@@ -9044,7 +9044,7 @@ function AcpmuxPane() {
                 btwNotes.ask(
                   sessionId,
                   question,
-                  [...turnTranscriptRows]
+                  [...turnRowsShown]
                     .reverse()
                     .find((row) => ![WORKING, THINKING, ACTIVITY_LINE, DATE].includes(row.kind)),
                   (question, sessionId) => callNative<string>("chat.btw.inline", { question, sessionId }),

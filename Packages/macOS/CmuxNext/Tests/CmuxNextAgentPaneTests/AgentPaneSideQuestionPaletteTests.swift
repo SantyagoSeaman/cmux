@@ -6,8 +6,8 @@ import Testing
 import WebKit
 @testable import CmuxNextAgentPane
 
-/// `/btw` behind Debug Settings' Side sessions (/btw) (`agentPane.debug.sideSessions`, off by default): with the
-/// toggle off the palette has no Ask a Side Question… and the page is told side sessions are off
+/// `/btw` behind Debug Settings' Side sessions (/btw) (`agentPane.debug.sideSessions`, on by default): with an
+/// explicit off override the palette has no Ask a Side Question… and the page is told side sessions are off
 /// (no `/btw`); with it on the palette offers the action in a focused agent chat, the page is told
 /// they are on, and running the action sends the chat's page the `sideQuestion` command, which
 /// prefills `/btw ` in its composer.
@@ -24,7 +24,7 @@ struct AgentPaneSideQuestionPaletteTests {
     private func withSideSessions(_ on: Bool, _ body: () async throws -> Void) async throws {
         TunableStore.shared.activate(file: nil)
         TunableStore.shared.register(AgentPaneTunables.all)
-        TunableStore.shared.set(AgentPaneTunables.sideSessions.key, on ? .bool(true) : nil)
+        TunableStore.shared.set(AgentPaneTunables.sideSessions.key, .bool(on))
         defer { TunableStore.shared.set(AgentPaneTunables.sideSessions.key, nil) }
         try await body()
     }
@@ -61,7 +61,7 @@ struct AgentPaneSideQuestionPaletteTests {
             registry.context = [.agentPaneFocused]
             registry.publishSideSessions()
             #expect(registry.isAvailable(Self.id))
-            TunableStore.shared.set(AgentPaneTunables.sideSessions.key, nil)
+            TunableStore.shared.set(AgentPaneTunables.sideSessions.key, .bool(false))
             for _ in 0..<50 where registry.isAvailable(Self.id) { try await Task.sleep(for: .milliseconds(20)) }
             #expect(!registry.isAvailable(Self.id), "the palette still offers it after the toggle went off")
         }

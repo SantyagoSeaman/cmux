@@ -47,6 +47,7 @@
 //! Codex MCP tools run outside its sandbox.
 
 use super::*;
+use std::future::Future;
 
 /// The tag that marks a side chat, valued with its chat's session id
 /// (webviews sessionList.ts `SIDE_TAG`, `_acpmux/side`).
@@ -69,6 +70,22 @@ const REFUSED_KINDS: &[&str] = &["edit", "delete", "move", "execute", "switch_mo
 /// Words in a model id or name that mark a small, fast model, best first.
 const SMALL_MODEL_WORDS: &[&str] = &["nano", "mini", "flash", "lite", "small", "fast"];
 
+/// Run setup and answer work under one inline deadline; legacy side sessions have no deadline.
+async fn with_inline_deadline<T, F>(
+    deadline: Option<tokio::time::Instant>,
+    future: F,
+) -> Result<T, RpcError>
+where
+    F: Future<Output = T>,
+{
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future)
+            .await
+            .map_err(|_| RpcError::internal("the inline side question timed out")),
+        None => Ok(future.await),
+    }
+}
+
 impl Hub {
     /// Open a side session about `session` and send it `question`. Legacy calls
     /// return `{sessionId, model, readOnly}`. Inline calls return `{text}` and
@@ -87,19 +104,24 @@ impl Hub {
         if question.is_empty() {
             return Err(RpcError::invalid_params("question is required"));
         }
+        // One deadline covers the inline fallback from this entry point through answer and cleanup;
+        // it cannot spend separate acceptance and answer windows beyond the app's request budget.
+        let inline_deadline = inline.then(|| tokio::time::Instant::now() + INLINE_TIMEOUT);
         let explicit = model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned);
         let meta = session.meta();
         // Claude Code owns a transcript-free side-question callback on its
         // running stream-json process. It never creates a session or sends an
         // ACP prompt, so the main turn and its queue stay untouched.
         if inline {
-            let (is_claude, _) = self.harness_env(&meta).await;
+            let (is_claude, _) =
+                with_inline_deadline(inline_deadline, self.harness_env(&meta)).await?;
             if is_claude {
                 return self.btw_inline_claude(session, question).await;
             }
         }
         // Refused before anything is created when no mode would hold it.
-        let (mode, read_only) = self.read_only_mode(&meta).await?;
+        let (mode, read_only) =
+            with_inline_deadline(inline_deadline, self.read_only_mode(&meta)).await??;
         // Inline emulation uses the chat's current model and folder exactly;
         // the legacy side-session path keeps its cheap default behavior.
         let mut model = if inline {
@@ -111,10 +133,18 @@ impl Hub {
             }
         };
         let name = self.unique_name(&format!("{}-btw", meta.name));
-        let (side, context) = match self.btw_fork_point(session, &meta).await? {
+        let (side, context) = match with_inline_deadline(
+            inline_deadline,
+            self.btw_fork_point(session, &meta),
+        )
+        .await??
+        {
             Some(through) => (
-                self.fork(session, Some(name), None, Default::default(), None, Some(through))
-                    .await?,
+                with_inline_deadline(
+                    inline_deadline,
+                    self.fork(session, Some(name), None, Default::default(), None, Some(through)),
+                )
+                .await??,
                 None,
             ),
             None => {
@@ -140,12 +170,21 @@ impl Hub {
                     disallowed_tools: Vec::new(),
                     checked_cwd: None,
                 };
-                let side = match self.new_session(req.clone()).await {
+                let side = match with_inline_deadline(
+                    inline_deadline,
+                    self.new_session(req.clone()),
+                )
+                .await?
+                {
                     // A default model the harness refuses: its own default instead.
                     Err(e) if !inline && explicit.is_none() && model.is_some() => {
                         tracing::warn!(session = %session.id, "side session model: {}", e.message);
                         model = None;
-                        self.new_session(NewRequest { model: None, ..req }).await?
+                        with_inline_deadline(
+                            inline_deadline,
+                            self.new_session(NewRequest { model: None, ..req }),
+                        )
+                        .await??
                     }
                     other => other?,
                 };
@@ -153,18 +192,39 @@ impl Hub {
             }
         };
         let forked = context.is_none();
-        let settled = self.btw_settle(session, &side, question, &mode, read_only, inline).await;
+        let settled = match with_inline_deadline(
+            inline_deadline,
+            self.btw_settle(session, &side, question, &mode, read_only, inline),
+        )
+        .await
+        {
+            Ok(settled) => settled,
+            Err(e) => {
+                self.btw_discard(&side).await;
+                return Err(e);
+            }
+        };
         // A fork runs its chat's model until it is set (a new session took it at its start).
         let settled = match (settled, model.clone().filter(|_| forked)) {
-            (Ok(mode), Some(m)) => match self.set_model(&side, &m).await {
-                Ok(_) => Ok(mode),
-                Err(e) if inline || explicit.is_some() => Err(e),
-                Err(e) => {
-                    tracing::warn!(session = %side.id, "side session model: {}", e.message);
-                    model = None;
-                    Ok(mode)
+            (Ok(mode), Some(m)) => {
+                let modeled =
+                    match with_inline_deadline(inline_deadline, self.set_model(&side, &m)).await {
+                        Ok(modeled) => modeled,
+                        Err(e) => {
+                            self.btw_discard(&side).await;
+                            return Err(e);
+                        }
+                    };
+                match modeled {
+                    Ok(_) => Ok(mode),
+                    Err(e) if inline || explicit.is_some() => Err(e),
+                    Err(e) => {
+                        tracing::warn!(session = %side.id, "side session model: {}", e.message);
+                        model = None;
+                        Ok(mode)
+                    }
                 }
-            },
+            }
             (settled, _) => settled,
         };
         let read_only = match settled {
@@ -196,7 +256,8 @@ impl Hub {
             r
         });
         if inline {
-            match tokio::time::timeout(INLINE_TIMEOUT, accepted).await {
+            let accepted_result = with_inline_deadline(inline_deadline, accepted).await;
+            match accepted_result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
                     // Refused before it was recorded: no side session is left behind.
@@ -229,7 +290,8 @@ impl Hub {
         }
         if inline {
             let mut run = run;
-            let answer = match tokio::time::timeout(INLINE_TIMEOUT, &mut run).await {
+            let answer_result = with_inline_deadline(inline_deadline, &mut run).await;
+            let answer = match answer_result {
                 Ok(Ok(Ok(reply))) => {
                     let text = self.btw_answer_text(&side, before).ok_or_else(|| {
                         RpcError::internal("the inline side question returned no text")
@@ -270,12 +332,14 @@ impl Hub {
                 "inline side questions require a running Claude process",
             ));
         }
-        let response = tokio::time::timeout(
-            INLINE_TIMEOUT,
-            child.request(crate::claude_stdio::SIDE_QUESTION, json!({"question": question})),
-        )
-        .await
-        .map_err(|_| RpcError::internal("the inline side question timed out"))??;
+        let response = child
+            .request_within(
+                crate::claude_stdio::SIDE_QUESTION,
+                json!({"question": question}),
+                INLINE_TIMEOUT,
+            )
+            .await
+            .ok_or_else(|| RpcError::internal("the inline side question timed out"))??;
         let text = Self::side_question_text(&response)
             .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| RpcError::internal("the inline side question returned no text"))?;
