@@ -98,9 +98,12 @@ impl Hub {
         steer: bool,
         mut opts: PromptOptions,
     ) -> Result<Value, RpcError> {
-        // A deferred start reads the queues after its ready line: a new prompt waits, so it
-        // never runs ahead of a prompt queued under the previous daemon.
-        self.wait_logs().await;
+        // A deferred start reads the queues after its ready line: a new prompt waits for its
+        // chat's, so it never runs ahead of a prompt queued under the previous daemon, nor ahead
+        // of a turn adoption recovers.
+        self.wait_adopted(session).await;
+        self.session_log(session).await;
+        self.pair_logs(opts.provenance.as_ref()).await;
         let Some(prompt_id) = opts.prompt_id.clone() else {
             return self.prompt_unless_held(session, blocks, client, steer, opts).await;
         };
@@ -198,8 +201,11 @@ impl Hub {
         joined: &super::digest::DigestTurn,
     ) -> Result<Value, RpcError> {
         let prompt_id = opts.prompt_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        // A stop after this prompt came ends the agent start it waits on (`ensure_child`).
+        let stops = session.stops.load(Ordering::SeqCst);
         let control = opts.control;
         let trust_gate = opts.trust_gate;
+        let no_queue = opts.no_queue;
         let mut on_accepted = self.with_host_pressure(opts.on_accepted);
         // The prompts this one replaced (`supersede.rs`), named in its acceptance: set where it
         // is committed (queued, started, or steered in), never before a refusal.
@@ -261,6 +267,7 @@ impl Hub {
             supersede: supersede.as_deref(),
             full_access_device: opts.full_access_device.as_deref(),
             replaced: &replaced,
+            no_queue: opts.no_queue,
         };
         let (turn_id, waiting, guard, run) = match self.queue_slot(session, slot, &mut accept).await
         {
@@ -310,11 +317,24 @@ impl Hub {
             drop(guard);
             return Err(e);
         }
-        // A subagent retry waits out Claude Code's own turn (`subagent_retry.rs`).
-        self.hold_retry_start(session, &prompt_id).await;
+        // A subagent retry waits out Claude Code's own turn (`subagent_retry.rs`); a person's
+        // never waits: `start_turn` refuses it then.
+        if !no_queue {
+            self.hold_retry_start(session, &prompt_id).await;
+        }
         // A continuation Stop overtook since it fired is refused here (`auto_resume.rs`).
         let turn = TurnInfo::prompted(client, &text, &turn_id, &prompt_id, control);
-        if let Err(e) = self.start_turn(session, after_turn.as_deref(), turn) {
+        if let Err(e) = self.start_turn(session, after_turn.as_deref(), no_queue, turn) {
+            self.refuse_dequeued(session, waiting, &prompt_id, &turn_id, client, &e);
+            drop(guard);
+            return Err(e);
+        }
+        // A lane's report to a parent whose close began since `queue_slot` checked is refused
+        // (`lane_reports.rs`). Checked once the turn is set: `kill` marks the close before it
+        // clears the turn, so a close that began any time before this check is seen.
+        if super::queue::refuses_closing_run(session, run.provenance.as_ref()) {
+            *session.turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let e = super::queue::closing_error();
             self.refuse_dequeued(session, waiting, &prompt_id, &turn_id, client, &e);
             drop(guard);
             return Err(e);
@@ -347,6 +367,8 @@ impl Hub {
             m.preview = Some(String::new());
             m.turn_count += 1;
         }
+        // A turn on lane reports only reports nothing (`lane_reports.rs`).
+        self.lane_turn_started(session, provenance.as_ref());
         // A family prompt (`subsessions.rs`) never clears the floor a Web
         // turn left: only a local turn the person or a client starts does.
         let family = super::subsession_guard::is_family_prompt(run.provenance.as_ref());
@@ -369,7 +391,7 @@ impl Hub {
         }
         // The prompt is recorded and acknowledged above before the agent is started again (it
         // died, or the daemon restarted), so a client hears prompt_accepted at once.
-        let started = match self.child_for(session).await {
+        let started = match self.child_for_since(session, stops).await {
             Ok(child) => session
                 .meta()
                 .agent_session_id
@@ -405,12 +427,16 @@ impl Hub {
             drop(guard);
             return Err(e);
         }
-        if let Err(e) = self.family_dispatch_check(session, run.provenance.as_ref()).await {
-            self.refuse_dequeued(session, waiting, &prompt_id, &turn_id, client, &e);
-            self.refuse_started_turn(session, &prompt_id, &turn_id, &e);
-            drop(guard);
-            return Err(e);
-        }
+        // Held until the prompt is written: an MDM off push waits for it (`family_gate`).
+        let family_gate = match self.family_gate(session, run.provenance.as_ref()).await {
+            Ok(gate) => gate,
+            Err(e) => {
+                self.refuse_dequeued(session, waiting, &prompt_id, &turn_id, client, &e);
+                self.refuse_started_turn(session, &prompt_id, &turn_id, &e);
+                drop(guard);
+                return Err(e);
+            }
+        };
         if session.rehydrate.swap(false, Ordering::SeqCst)
             && let Some(transcript) = self.transcript(session, 24_000)
         {
@@ -427,7 +453,7 @@ impl Hub {
                 session,
                 "mux",
                 "turn_started",
-                json!({"prompt": short_text(&text, 200), "client": client, "promptId": prompt_id, "turnId": turn_id, "control": control.as_str()}),
+                json!({"prompt": short_text(&text, 200), "client": client, "promptId": prompt_id, "turnId": turn_id, "control": control.as_str(), "trustGate": trust_gate}),
             )
             .seq;
         let control = {
@@ -460,6 +486,9 @@ impl Hub {
         Self::hold_stalled_count(session);
         self.set_status(session, SessionStatus::Running);
         self.watch_silent_turn(session, &turn_id).await;
+        // Tests only: a pause right before the write (`full_access_bound::WriteSeam`).
+        #[cfg(test)]
+        self.pause_at_family_write().await;
         // Start title generation after the first prompt is written to the harness, while its
         // session-info title can still win before the cheap completion is spent.
         let mut result = super::steer_end::agent_prompt_hook(
@@ -469,6 +498,7 @@ impl Hub {
             &turn_id,
             false,
             || {
+                drop(family_gate);
                 self.watch_stalled_turn(session, None);
                 self.title_after_prompt(session)
             },
@@ -480,7 +510,9 @@ impl Hub {
         if let Err(e) = &result {
             // A pool launcher that dies on the prompt (its proxy is down)
             // moves the session too, not only a usage or auth limit.
+            // A stopped session's agent closed because of the stop: no failover starts it again.
             if (is_limit_error(&e.message) || e.message.starts_with("agent process closed"))
+                && session.stops.load(Ordering::SeqCst) == stops
                 && let Some(to) = self.fallback_profile(session).await
             {
                 let from = session.meta().harness;
@@ -512,9 +544,10 @@ impl Hub {
                 }
                 self.save_meta(session);
                 let control = session.turn().map_or(control, |t| t.control);
-                let fallback = self.child_for(session).await;
+                let fallback = self.child_for_since(session, stops).await;
+                let mut family_gate = None;
                 let refusal = match &fallback {
-                    Ok(_) => self
+                    Ok(_) => match self
                         .check_dispatch(
                             session,
                             control,
@@ -525,7 +558,18 @@ impl Hub {
                             client,
                         )
                         .await
-                        .err(),
+                    {
+                        // A family message is checked again, and held until it is resent: an
+                        // off push may have come since its first write (`family_gate`).
+                        Ok(()) => match self.family_gate(session, run.provenance.as_ref()).await {
+                            Ok(gate) => {
+                                family_gate = gate;
+                                None
+                            }
+                            Err(e) => Some(e),
+                        },
+                        Err(e) => Some(e),
+                    },
                     Err(_) => None,
                 };
                 match (fallback, refusal) {
@@ -559,7 +603,10 @@ impl Hub {
                                 json!({"sessionId": sid2, "prompt": acp_prompt_blocks(session, &blocks)?}),
                                 &turn_id,
                                 false,
-                                || self.watch_stalled_turn(session, None),
+                                || {
+                                    drop(family_gate);
+                                    self.watch_stalled_turn(session, None)
+                                },
                             )
                             .await;
                         }
@@ -581,6 +628,12 @@ impl Hub {
         // A connection error cut the turn off: it goes on by itself (`auto_resume.rs`).
         let cut = match (&result, detached) {
             (Err(e), false) => Some(super::auto_resume::CutTurn {
+                // A family message's continuation speaks for its sender (`is_family`).
+                from: run
+                    .provenance
+                    .as_ref()
+                    .filter(|p| super::subsession_guard::is_family(Some(p)))
+                    .and_then(|p| p["from"].as_str()),
                 prompt_id: &prompt_id,
                 turn_id: &turn_id,
                 control,
@@ -615,6 +668,8 @@ impl Hub {
         turn_seq: u64,
         joined: Option<&super::digest::DigestTurn>,
     ) -> Result<Value, RpcError> {
+        // This turn's number, before taking it lets the next one start (`lane_reports.rs`).
+        let turn = session.meta().turn_count;
         // A model switch (`detach_child`) ended this turn already: its failure is not the queue's.
         let detached = self.take_turn(session, turn_id).is_none_or(|t| t.turn_id != turn_id);
         session.queue_moved.notify_waiters();
@@ -625,7 +680,8 @@ impl Hub {
                 self.save_meta(session);
             }
         }
-        // Quit Everything already recorded this turn as cancelled.
+        // Quit Everything already recorded this turn as cancelled. It ends the lane's parent too and
+        // no agent starts after it, so the lane reports nothing (`lane_reports.rs`).
         if self.settled_by_shutdown.lock().unwrap().contains(turn_id) {
             return result;
         }
@@ -783,6 +839,7 @@ impl Hub {
         }
         self.save_meta(session);
         self.send_offer_result(session);
+        self.lane_turn_ended(session, true, turn);
         result
     }
 
@@ -826,6 +883,7 @@ impl Hub {
         turn_id: &str,
         e: &RpcError,
     ) {
+        let turn = session.meta().turn_count;
         *session.turn.lock().unwrap() = None;
         let mut e = e.clone();
         crate::recovery::annotate(&mut e, Some(&session.meta().cwd));
@@ -850,6 +908,9 @@ impl Hub {
             self.set_status(session, SessionStatus::Disconnected);
         }
         self.save_meta(session);
+        // The turn was counted: its lane's parent hears it failed, with no reply of its own
+        // (`lane_reports.rs`).
+        self.lane_turn_ended(session, false, turn);
     }
 
     /// Waits until the inbound loop handled every agent message queued before
@@ -914,14 +975,17 @@ impl Hub {
     ) -> Result<Value, RpcError> {
         // Every switch into a mode that skips approvals, from any client (the app, the CLI, a
         // script), passes here: refused while `sessions.allowFullAccess` is off.
-        if super::start_mode::requests_full_access(m, &params)
-            && !super::start_mode::full_access_allowed()
-        {
+        if super::start_mode::requests_full_access(m, &params) && !self.full_access_allowed() {
             return Err(super::start_mode::full_access_off());
         }
         // Nor does a switch out of the mode a narrower policy needs (`policy_mode.rs`).
         self.refuse_wider_mode_as(session, m, &params, granted).await?;
         let child = self.child_for(session).await?;
+        // Again once the agent is there (its start can take seconds): MDM may have forced full
+        // access off since. A push after this ends the agent at the next prompt (`child_for`).
+        if super::start_mode::requests_full_access(m, &params) && !self.full_access_allowed() {
+            return Err(super::start_mode::full_access_off());
+        }
         let sid = session
             .meta()
             .agent_session_id
@@ -1001,6 +1065,15 @@ impl Hub {
             _ => {}
         }
         self.save_meta(session);
+        // MDM forced full access off while this switch waited on the harness (after both checks
+        // above). The mode is written before this reads the off, and the push writes the off
+        // before it returns, so a switch the push overtook ends here; one that finished first is
+        // an agent already in full access when MDM turned it off (#23322 b).
+        if self.managed_off_runs_full_access(session) {
+            let _spawning = session.spawn_lock.lock().await;
+            self.stop_full_access_agent(session).await;
+            return Err(super::start_mode::full_access_off());
+        }
         Ok(res)
     }
 
@@ -1177,11 +1250,22 @@ impl Hub {
 
     /// Stop the child. The log stays. `purge` also deletes the log.
     pub async fn kill(&self, session: &Arc<Session>, purge: bool) -> Result<(), RpcError> {
+        // Counted first: a start for a request from before this stop ends (`ensure_child`).
+        session.stops.fetch_add(1, Ordering::SeqCst);
         session.closing.store(true, Ordering::SeqCst);
         self.stop_auto_resume(session);
         self.stop_subagent_retries(session, true);
         self.revoke_permission_chat(session);
         self.cancel_pending_permissions(session);
+        // The prompts queued behind its turn are answered withdrawn: run after the stop, the
+        // next one started the closed session again (ergo-walk2). A restart restores no closed
+        // session's queue either (`queue.rs` `restore_queue`). A chat an import replaces
+        // (`transfer_in.rs`) keeps its log as it was for the copy that takes its id.
+        if !session.replaced.load(Ordering::SeqCst) {
+            for queued in session.queue() {
+                self.remove_queued_because(session, &queued.prompt_id, Some("stopped"));
+            }
+        }
         if let Some(child) = session.child.lock().await.take() {
             if let Some(sid) = session.meta().agent_session_id {
                 let _ = tokio::time::timeout(
@@ -1214,6 +1298,7 @@ impl Hub {
             session.purged.store(true, Ordering::SeqCst);
             let replaced = session.replaced.load(Ordering::SeqCst);
             self.sessions.lock().unwrap().remove(&session.id);
+            self.child_tags.forget(&session.id);
             // Its temporary folder goes with it (`agent/session_tmp.rs`).
             #[cfg(unix)]
             {
