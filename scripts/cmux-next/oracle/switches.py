@@ -29,7 +29,8 @@ Usage:
 is schemas/oracle/fixtures/switch-hits-reply.json). It prints one line
     NAME arm=ARM verdict=VERDICT key=app:KEY old=N new=N sites=SITE:old=N/new=N,...
 A daemon switch (`daemon_key`) is refused as bad input: only app sites count hits; the daemon has no
-hit source yet, so every daemon run would read as arm-not-exercised.
+hit source yet, so every daemon run would read as arm-not-exercised. So is a config arm (`config_key`):
+no site holds it; the driver reports its hits per case (action_fixtures MotionArm.case_report).
 `exercised` needs hits on the requested arm and none on the other. 0 hits on the requested arm (or no
 entry) is `arm-not-exercised`: the run never reached a guarded site on that arm, so its diff proves
 nothing. Hits on the other arm too are `arm-mixed`: a site does not read the frozen value. Chrome
@@ -43,13 +44,16 @@ configured trial that no code queried reports nothing; here the site counts the 
 - `expires` before `created`, or more than MAX_LIFETIME_DAYS (14) after it;
 - an app key that is not a raw value of `enum RefactorSwitchKey` in APP_CATALOG (task 180);
 - a daemon key that is not in `SWITCH_NAMES` of DAEMON_CATALOG (task 020): the daemon would not parse it;
+- a config arm (`config_key`, task 233) whose key is not a row of SETTINGS_SCHEMA, whose `config_arms`
+  value the row does not accept, or whose `readback` is not a SNAPSHOT_SCHEMA value read from that key
+  (its x-oracle-source `from`): an arm the product never applies or never reports proves nothing;
 - an app switch that a Swift source reads through a per-call closure (see `closure_reads`);
 - a `plan` or `old_paths` entry that does not exist, a suite that baselines.py does not classify,
   and an `expected_differences` list that diff.py refuses.
 `--check` does not read the date: an expired switch is the `--expired` queue (task 171), not a refusal.
 
 `--expired` (MQ-switch-expiry) prints, by `expires` day then name, one line per switch:
-    NAME expired=DAY owner=OWNER key=app:KEY|daemon:KEY catalog=PATH default=ARM keep=ARM delete=P1,P2,...
+    NAME expired=DAY owner=OWNER key=app:KEY|daemon:KEY|config:KEY catalog=PATH default=ARM keep=ARM delete=P1,P2,...
 `keep` is the `planned` arm. `delete` is the old arm's `old_paths` (only when `keep` is new) and the
 registry file; the owner also removes KEY's case from `catalog` and its reads. Values are shell-quoted.
 
@@ -87,6 +91,8 @@ SCHEMA = REPO / "schemas" / "oracle" / "refactor-switches.schema.json"
 APP_CATALOG = REPO / "Packages" / "macOS" / "CmuxNext" / "Sources" / "CmuxNextCompat" / "RefactorSwitches.swift"
 DAEMON_CATALOG = REPO / "cmux-tui" / "crates" / "cmux-tui-core" / "src" / "switches.rs"
 SWIFT_ROOT = REPO / "Packages" / "macOS" / "CmuxNext" / "Sources"
+SETTINGS_SCHEMA = REPO / "schemas" / "settings" / "settings-schema.json"
+SNAPSHOT_SCHEMA = REPO / "schemas" / "oracle" / "snapshot-v1.schema.json"
 APP_CATALOG_TASK = "p15-oracle-180"
 DAEMON_CATALOG_TASK = "p15-oracle-020"
 MAX_LIFETIME_DAYS = 14
@@ -115,6 +121,8 @@ class Roots:
     app_catalog: Path = APP_CATALOG
     daemon_catalog: Path = DAEMON_CATALOG
     swift_root: Path = SWIFT_ROOT
+    settings_schema: Path = SETTINGS_SCHEMA
+    snapshot_schema: Path = SNAPSHOT_SCHEMA
 
 
 def load_sibling(module: str, task: str) -> Any:
@@ -257,6 +265,56 @@ def parse_day(value: Any) -> Optional[dt.date]:
         return None
 
 
+def settings_rows(path: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The rows of the generated settings schema by dotted key, or None when the file is missing."""
+    if not path.is_file():
+        return None
+    rows = json.loads(path.read_text(encoding="utf-8")).get("rows") or []
+    return {row["key"]: row for row in rows if isinstance(row, dict) and isinstance(row.get("key"), str)}
+
+
+def snapshot_source(schema: Any, pointer: str) -> Optional[Dict[str, Any]]:
+    """The x-oracle-source of the snapshot-v1 value at `pointer` (through properties and a facet's oneOf), or
+    None when the schema declares no value there."""
+    node = schema
+    for token in pointer[1:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        branches = [node, *(b for b in node.get("oneOf", []) if isinstance(b, dict))] if isinstance(node, dict) else []
+        node = next((b["properties"][token] for b in branches if token in (b.get("properties") or {})), None)
+        if node is None:
+            return None
+    source = node.get("x-oracle-source") if isinstance(node, dict) else None
+    return source if isinstance(source, dict) else None
+
+
+def check_config_arm(data: Dict[str, Any], roots: Roots, settings: Optional[Dict[str, Dict[str, Any]]],
+                     snapshot: Any) -> List[str]:
+    """Why a config arm (`config_key`) does not hold: the key is no settings row, the row refuses an arm's
+    value, the arms are equal, or `readback` is not where the snapshot reads that key back."""
+    key, arms, readback = data["config_key"], data["config_arms"], data["readback"]
+    problems: List[str] = []
+    if arms["old"] == arms["new"]:
+        problems.append(f"config_arms old and new are both {arms['old']!r}: the arms would run the same config")
+    if settings is None:
+        problems.append(f"config key {key!r}: {relative(roots.settings_schema, roots.repo)} is not on this branch")
+    elif key not in settings:
+        problems.append(f"config key {key!r} is not a row of {relative(roots.settings_schema, roots.repo)}")
+    else:
+        accepts = settings[key].get("accepts")
+        for arm in ARMS:
+            if isinstance(accepts, list) and arms[arm] not in accepts:
+                problems.append(f"config key {key!r} does not accept the {arm} arm's {arms[arm]!r} (accepts {accepts})")
+    if snapshot is None:
+        problems.append(f"readback {readback}: {relative(roots.snapshot_schema, roots.repo)} is not on this branch")
+    else:
+        source = snapshot_source(snapshot, readback)
+        if source is None:
+            problems.append(f"readback {readback} is not a value of {relative(roots.snapshot_schema, roots.repo)}")
+        elif source.get("from") != key:
+            problems.append(f"readback {readback} reads {source.get('from')!r}, not the config key {key!r}")
+    return problems
+
+
 def relative(path: Path, repo: Path) -> str:
     try:
         return str(path.relative_to(repo))
@@ -276,7 +334,8 @@ def load_entry(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
 
 
 def check_entry(path: Path, data: Dict[str, Any], schema: Any, roots: Roots, apps: Optional[Dict[str, str]],
-                daemons: Optional[Set[str]], sources: Sequence[Tuple[Path, str]]) -> List[Finding]:
+                daemons: Optional[Set[str]], sources: Sequence[Tuple[Path, str]],
+                settings: Optional[Dict[str, Dict[str, Any]]] = None, snapshot: Any = None) -> List[Finding]:
     normalize = load_sibling("normalize", "p15-oracle-013")
     where = relative(path, roots.repo)
     errors = normalize.validate(data, schema)
@@ -315,6 +374,9 @@ def check_entry(path: Path, data: Dict[str, Any], schema: Any, roots: Roots, app
                 for line in closure_reads(text, case):
                     refuse(f"{data['read']} switch {key!r} is read through a per-call closure at "
                            f"{relative(source, roots.repo)}:{line}; pass the frozen arm, not a closure")
+    elif "config_key" in data:
+        for problem in check_config_arm(data, roots, settings, snapshot):
+            refuse(problem)
     else:
         key = data["daemon_key"]
         if daemons is None:
@@ -358,12 +420,16 @@ def check(roots: Roots) -> Tuple[List[Finding], int]:
     findings: List[Finding] = []
     paths = sorted(roots.registry.glob("*.json"))
     sources = swift_sources(roots.swift_root) if paths and apps else []
-    for path in paths:
-        data, error = load_entry(path)
+    entries = [(path, *load_entry(path)) for path in paths]
+    configs = any(data is not None and "config_key" in data for _, data, _ in entries)
+    settings = settings_rows(roots.settings_schema) if configs else None
+    snapshot = (json.loads(roots.snapshot_schema.read_text(encoding="utf-8"))
+                if configs and roots.snapshot_schema.is_file() else None)
+    for path, data, error in entries:
         if data is None:
             findings.append(Finding(relative(path, roots.repo), error or "unreadable"))
             continue
-        findings.extend(check_entry(path, data, schema, roots, apps, daemons, sources))
+        findings.extend(check_entry(path, data, schema, roots, apps, daemons, sources, settings, snapshot))
     return findings, len(paths)
 
 
@@ -400,6 +466,8 @@ def deletion_task(path: Path, data: Dict[str, Any], day: dt.date, roots: Roots) 
     keep = str(data.get("planned", "-"))
     if "app_key" in data:
         key, catalog = f"app:{data['app_key']}", roots.app_catalog
+    elif "config_key" in data:
+        key, catalog = f"config:{data['config_key']}", roots.settings_schema
     else:
         key, catalog = f"daemon:{data.get('daemon_key', '-')}", roots.daemon_catalog
     old_paths = [str(old) for old in data.get("old_paths") or []] if keep == "new" else []
@@ -480,6 +548,9 @@ def hit_verdict(report: Any, name: str, key: str, arm: str) -> HitVerdict:
     if key.startswith("daemon:"):
         raise UsageError(f"{name}: {key} is a daemon switch; only app sites report switch hits "
                          "(the daemon has no hit source), so --hits cannot judge it")
+    if key.startswith("config:"):
+        raise UsageError(f"{name}: {key} is a config arm; no app site holds it, the driver reports its hits per "
+                         "case (switch_hits of the run receipt), so --hits cannot judge it")
     if arm not in ARMS:
         raise UsageError(f"arm {arm!r} is not one of {', '.join(ARMS)}")
     switches = report.get("switches") if isinstance(report, dict) else None
@@ -522,7 +593,9 @@ def switch_key(roots: Roots, name: str) -> str:
         return f"app:{data['app_key']}"
     if isinstance(data.get("daemon_key"), str):
         return f"daemon:{data['daemon_key']}"
-    raise UsageError(f"{where}: no app_key or daemon_key (run --check)")
+    if isinstance(data.get("config_key"), str):
+        return f"config:{data['config_key']}"
+    raise UsageError(f"{where}: no app_key, daemon_key or config_key (run --check)")
 
 
 def hits(roots: Roots, report_path: Path, name: str, arm: str) -> HitVerdict:
@@ -608,6 +681,14 @@ def daemon_entry(**overrides: Any) -> Dict[str, Any]:
                              **overrides})
 
 
+def config_entry(**overrides: Any) -> Dict[str, Any]:
+    """A config arm on the real settings and snapshot schemas (the motion-on virtual suite's shape)."""
+    return selftest_entry(**{"name": "motion-on", "app_key": None, "config_key": "ui.animations.enabled",
+                             "config_arms": {"old": False, "new": True}, "readback": "/facets/settings/motion/enabled",
+                             "read": "launch", "planned": "old", "suites": ["actions", "journeys"],
+                             "expected_differences": [], "old_paths": None, **overrides})
+
+
 # (name, files {stem: entry}, extra Swift site or None, the substring every finding must hold; "" = pass)
 SELFTEST_CASES: Sequence[Tuple[str, Dict[str, Dict[str, Any]], Optional[str], str]] = (
     ("seed app and daemon switches pass", {"layer-hosting": selftest_entry(), "holder": daemon_entry()}, None, ""),
@@ -648,6 +729,20 @@ SELFTEST_CASES: Sequence[Tuple[str, Dict[str, Dict[str, Any]], Optional[str], st
     ("an expected difference with no reason is refused",
      {"layer-hosting": selftest_entry(expected_differences=[{"pointer": "/layout"}])}, None,
      "missing required member 'reason'"),
+    ("a config arm passes", {"motion-on": config_entry()}, None, ""),
+    ("a config key that is no settings row is refused", {"motion-on": config_entry(config_key="ui.motion.ghost")},
+     None, "config key 'ui.motion.ghost'"),
+    ("equal config arms are refused", {"motion-on": config_entry(config_arms={"old": True, "new": True})}, None,
+     "the arms would run the same config"),
+    ("a readback of another setting is refused", {"motion-on": config_entry(readback="/facets/settings/motion/speed")},
+     None, "reads 'ui.animationSpeed', not the config key"),
+    ("a readback the snapshot does not declare is refused",
+     {"motion-on": config_entry(readback="/facets/settings/motion/ghost")}, None, "is not a value of"),
+    ("a config arm without its arms is refused", {"motion-on": config_entry(config_arms=None)}, None, "oneOf"),
+    ("a config arm with an app key is refused", {"motion-on": config_entry(app_key="browser.layer-hosting")}, None,
+     "oneOf"),
+    ("a readback without a config key is refused",
+     {"layer-hosting": selftest_entry(readback="/facets/settings/motion/enabled")}, None, "config_key"),
 )
 
 
@@ -656,7 +751,8 @@ def selftest_tree(tmp: Path, files: Dict[str, Dict[str, Any]], site: Optional[st
     if repo.exists():
         shutil.rmtree(repo)
     roots = Roots(repo=repo, registry=repo / "registry", schema=SCHEMA, app_catalog=repo / "Sources" / "RefactorSwitches.swift",
-                  daemon_catalog=repo / "switches.rs", swift_root=repo / "Sources")
+                  daemon_catalog=repo / "switches.rs", swift_root=repo / "Sources", settings_schema=SETTINGS_SCHEMA,
+                  snapshot_schema=SNAPSHOT_SCHEMA)
     roots.registry.mkdir(parents=True)
     roots.swift_root.mkdir(parents=True)
     (repo / "plans").mkdir()
@@ -843,6 +939,11 @@ def selftest_hits(tmp: Path) -> List[str]:
             got = ""
         if got != want:
             failures.append(f"--hits {label}: got {got or 'refused'!r}, want {want or 'refused'!r}")
+    try:
+        hit_verdict(golden, "motion-on", "config:ui.animations.enabled", "new")
+        failures.append("--hits on a config arm did not refuse")
+    except UsageError:
+        pass
     golden_sites = hit_verdict(golden, "golden", "app:browser.layer-hosting", "new").sites
     if golden_sites != (("CEFLayerHosting.pageShown", 0, 2), ("CEFLayerHosting.pageWindowCreated", 0, 1)):
         failures.append(f"--hits golden: layer hosting sites read as {golden_sites}")
@@ -890,9 +991,9 @@ def selftest() -> int:
         if not (len(messages) == 2 and APP_CATALOG_TASK in messages[1] and DAEMON_CATALOG_TASK in messages[0]):
             failures.append(f"missing catalogs: got {messages}")
     # The closure, refusal, --expired, --expired CLI, --hits, --hits golden and --hits CLI tables, the missing registry,
-    # the missing catalogs, the golden sites and the --hits line round trip.
+    # the missing catalogs, the config-arm --hits refusal, the golden sites and the --hits line round trip.
     total = (len(SELFTEST_CLOSURES) + len(SELFTEST_CASES) + len(SELFTEST_EXPIRED) + len(SELFTEST_EXPIRED_CLI)
-             + len(SELFTEST_HITS) + len(SELFTEST_HITS_GOLDEN) + len(SELFTEST_HITS_CLI) + 4)
+             + len(SELFTEST_HITS) + len(SELFTEST_HITS_GOLDEN) + len(SELFTEST_HITS_CLI) + 5)
     for failure in failures:
         print(f"FAIL {failure}")
     print(f"selftest: {total - len(failures)}/{total} pass")

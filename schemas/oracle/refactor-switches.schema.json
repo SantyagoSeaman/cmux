@@ -2,14 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmux.com/schemas/oracle/refactor-switches",
   "title": "cmux refactor switch",
-  "description": "One refactor switch: plans/cmux-next/refactor-switches/<name>.json (plans/cmux-next/chrome-parity/p15-oracle.md, sections 3F.2 and 3I). A switch runs an old and a new arm of one refactor in one build, so the oracle can diff them (`oracle.py run --switch NAME --arm old|new`) and the new path can ship with a kill switch. It is the analog of a chrome/browser/flag-metadata.json entry (owners, expiry_milestone) plus its FlagExpectations file (expected_differences). scripts/cmux-next/oracle/switches.py --check runs this schema through normalize.py's validator, then the checks JSON Schema cannot express: expires <= created + 14 days, the app key is a RefactorSwitchKey raw value, the daemon key is in switches.rs SWITCH_NAMES, no app site reads the switch through a closure literal, and every expected_differences entry loads in diff.py.",
+  "description": "One refactor switch: plans/cmux-next/refactor-switches/<name>.json (plans/cmux-next/chrome-parity/p15-oracle.md, sections 3F.2 and 3I). A switch runs an old and a new arm of one refactor in one build, so the oracle can diff them (`oracle.py run --switch NAME --arm old|new`) and the new path can ship with a kill switch. It is the analog of a chrome/browser/flag-metadata.json entry (owners, expiry_milestone) plus its FlagExpectations file (expected_differences). scripts/cmux-next/oracle/switches.py --check runs this schema through normalize.py's validator, then the checks JSON Schema cannot express: expires <= created + 14 days, the app key is a RefactorSwitchKey raw value, the daemon key is in switches.rs SWITCH_NAMES, a config key is a settings row whose snapshot readback reads it, no app site reads the switch through a closure literal, and every expected_differences entry loads in diff.py.",
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "owner", "plan", "read", "default", "planned", "created", "expires", "suites", "expected_differences"],
   "oneOf": [
-    {"required": ["app_key"], "not": {"required": ["daemon_key"]}},
-    {"required": ["daemon_key"], "not": {"required": ["app_key"]}}
+    {"required": ["app_key"], "not": {"anyOf": [{"required": ["daemon_key"]}, {"required": ["config_key"]}]}},
+    {"required": ["daemon_key"], "not": {"anyOf": [{"required": ["app_key"]}, {"required": ["config_key"]}]}},
+    {"required": ["config_key", "config_arms", "readback"], "not": {"anyOf": [{"required": ["app_key"]}, {"required": ["daemon_key"]}]}}
   ],
+  "dependentRequired": {"config_arms": ["config_key"], "readback": ["config_key"]},
   "properties": {
     "$schema": {
       "type": "string",
@@ -45,6 +47,23 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9._-]{0,95}$",
       "description": "The daemon key: an entry of SWITCH_NAMES in cmux-tui/crates/cmux-tui-core/src/switches.rs (p15-oracle-020), set with CMUX_TUI_SWITCHES=KEY=ARM."
+    },
+    "config_key": {
+      "type": "string",
+      "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)+$",
+      "description": "A config arm: a dotted cmux-next.json settings key (a row `key` of schemas/settings/settings-schema.json) that the driver writes into the launch config, one value per arm (`config_arms`). For a virtual suite such as motion-on (p15-oracle-233): the same cases rerun with one setting changed, not a refactor's two code paths."
+    },
+    "config_arms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["old", "new"],
+      "properties": {"old": {"type": "boolean"}, "new": {"type": "boolean"}},
+      "description": "The config_key value of each arm; switches.py --check refuses two equal values and a value the settings row does not accept."
+    },
+    "readback": {
+      "type": "string",
+      "pattern": "^(/[^/]+)+$",
+      "description": "JSON pointer into the snapshot where the product reads the applied config_key back (a snapshot-v1 value whose x-oracle-source `from` is config_key): each case's switch_readback."
     },
     "default": {
       "enum": ["old", "new"],

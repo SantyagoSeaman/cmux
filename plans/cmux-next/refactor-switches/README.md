@@ -14,7 +14,8 @@ Check: `python3 -I scripts/cmux-next/oracle/switches.py --check` (`oracle.py swi
 | `owner` | Who deletes the old path before `expires`. |
 | `plan` | The plan that owns the refactor (a repo path, optional `#anchor`). |
 | `read` | `launch`: read once at the owner start and passed as a value. `live`: sites ask the injected frozen value at each use. Never a per-call closure. |
-| `app_key` or `daemon_key` | Exactly one. App: a `RefactorSwitchKey` raw value (`--cmux-switches=KEY=ARM`, `CMUX_NEXT_SWITCHES`). Daemon: a `SWITCH_NAMES` entry of `switches.rs` (`CMUX_TUI_SWITCHES=KEY=ARM`). |
+| `app_key`, `daemon_key` or `config_key` | Exactly one. App: a `RefactorSwitchKey` raw value (`--cmux-switches=KEY=ARM`, `CMUX_NEXT_SWITCHES`). Daemon: a `SWITCH_NAMES` entry of `switches.rs` (`CMUX_TUI_SWITCHES=KEY=ARM`). Config: a settings row key the driver writes into the launch config (a virtual suite: the same cases with one setting changed). |
+| `config_arms`, `readback` | Config arms only. `config_arms`: the key's value on `old` and `new`. `readback`: the snapshot pointer where the product reports the applied value (its schema `x-oracle-source` `from` is the key); each case's `switch_readback` comes from it. |
 | `default` | The arm when nothing sets the switch. |
 | `planned` | The arm the refactor lands at; `--arm launch-config` runs every switch at it. |
 | `created`, `expires` | Days (UTC). `expires` is at most `created` + 14 days. |
@@ -24,7 +25,8 @@ Check: `python3 -I scripts/cmux-next/oracle/switches.py --check` (`oracle.py swi
 
 `switches.py --check` refuses a file that does not match the schema (a missing `planned`, `owner` or
 `plan`, an unknown field), an expiry more than 14 days after `created`, an app key that
-`RefactorSwitchKey` does not declare, a daemon key that `switches.rs` does not parse, and a switch that a
+`RefactorSwitchKey` does not declare, a daemon key that `switches.rs` does not parse, a config key that
+is no settings row (or whose `readback` does not read that key back), and a switch that a
 Swift site reads through a closure literal (`isEnabled: { switches.isNew(.key) }`), which is how one
 process ran both arms of `browserResize.layerHosting`.
 
@@ -42,6 +44,12 @@ calls `ran(new:)` on the branch it took. `debug.oracle.switch_hits` (DEBUG and b
 `schemas/oracle/fixtures/switch-hits-reply.json`. Only app sites count, so `--hits` refuses a daemon
 switch. The first counted site (`CEFLayerHosting`, `.layerHosting`) is wired once p15-oracle-180
 freezes that arm.
+
+`motion-on.json` is a config arm (task p15-oracle-233): every case runs with `ui.animations.enabled=false`
+(the `old` arm), and the `new` arm reruns the actions and journeys suites with animation on; settled
+snapshots must be equal. `scripts/cmux-next/oracle/action_fixtures/__init__.py` (`MotionArm`) turns the arm
+into the launch config, reads it back from `/facets/settings/motion/enabled` and counts its hits per case
+(`debug.motion` spans).
 
 The first switches (F6 holder, F1 layer hosting, F2 CEF helper, F7 intents, F8 discard) are task
 p15-oracle-232; they need the catalogs of p15-oracle-020 (`switches.rs`) and p15-oracle-180
