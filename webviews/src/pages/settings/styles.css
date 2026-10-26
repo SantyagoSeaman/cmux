@@ -1687,7 +1687,7 @@ mark {
 
 .menus-area-title {
   margin: 0 0 3px 8px;
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 600;
   color: var(--muted-text);
 }
@@ -1742,7 +1742,7 @@ mark {
 
 .menus-detail-title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--text-title);
   font-weight: 600;
 }
 
@@ -1888,7 +1888,7 @@ button.menu-disclosure {
 .menu-empty {
   padding: 3px 8px;
   color: var(--soft-text);
-  font-size: 12px;
+  font-size: var(--text-detail);
 }
 
 .menus-hidden {
@@ -1915,5 +1915,5 @@ button.menu-disclosure {
 .menus-failure {
   margin: 0 0 10px;
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--text-detail);
 }
