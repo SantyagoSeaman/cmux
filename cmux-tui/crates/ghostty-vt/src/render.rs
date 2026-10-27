@@ -365,6 +365,11 @@ impl RenderState {
         Ok(Arc::new(kitty::snapshot(terminal, &mut self.kitty_pixel_cache, include_unplaced)?))
     }
 
+    /// The Kitty images and placements of the last [`RenderState::update`].
+    pub fn kitty_graphics(&self) -> &Arc<KittyGraphicsSnapshot> {
+        &self.kitty_graphics
+    }
+
     /// Release renderer-owned Kitty pixels after the process owner lowers a
     /// terminal's native storage share, or under critical memory pressure.
     /// The next update rebuilds only images that survived libghostty's
@@ -532,7 +537,22 @@ impl RenderState {
     /// Walk every row of the snapshot top to bottom. The callback receives
     /// the row index, the row's dirty flag, and its cells. Row dirty flags
     /// are cleared as part of the walk.
-    pub fn walk_rows(&mut self, mut f: impl FnMut(usize, bool, &[Cell])) -> Result<()> {
+    pub fn walk_rows(&mut self, f: impl FnMut(usize, bool, &[Cell])) -> Result<()> {
+        self.walk(false, f)
+    }
+
+    /// Walk only the damage: every row after a full invalidation, else the dirty rows.
+    /// Clean rows' cells are never read, so a one-cell echo costs one row, not the
+    /// screen (`build_frame` copies every row). Row dirty flags and the global dirty
+    /// state are cleared, as `build_frame` clears them.
+    pub fn walk_damage(&mut self, mut f: impl FnMut(usize, &[Cell])) -> Result<()> {
+        let full = self.dirty() == Dirty::Full;
+        self.walk(!full, |row, _, cells| f(row, cells))?;
+        self.set_clean();
+        Ok(())
+    }
+
+    fn walk(&mut self, only_dirty: bool, mut f: impl FnMut(usize, bool, &[Cell])) -> Result<()> {
         // SAFETY: `self.raw` and `self.rows` are this RenderState's live handles;
         // ROW_ITERATOR fills the iterator that `self.rows` points to.
         check(unsafe {
@@ -566,6 +586,11 @@ impl RenderState {
                     &mut self.cells as *mut _ as *mut c_void,
                 )
             })?;
+
+            if only_dirty && !dirty {
+                row_index += 1;
+                continue;
+            }
 
             // Reuse the row buffer (and each Cell's String capacity).
             let mut col = 0usize;

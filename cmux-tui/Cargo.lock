@@ -1976,6 +1976,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmux-vt-worker"
+version = "0.1.0"
+dependencies = [
+ "ghostty-vt",
+]
+
+[[package]]
 name = "cmux-wake"
 version = "0.1.0"
 dependencies = [

@@ -216,3 +216,97 @@ waited for it (same fleet mini, new browser tab 4.2 ms p50 without, 22-25 ms wit
 about 11 ms with F_BARRIERFSYNC). Before: each commit F_FULLFSYNCed inside the registry lock (about
 4.5 ms on a fleet M4 Pro, 20 ms on a busy Apple SSD), 1-3 per create or close reply, and every
 request that needed the lock waited behind it.
+
+## 8. The app draws screens, not bytes (task p01-process-241, spike 2026-10-27)
+
+Goal (chrome-parity p01-process.md, Rule of 2): the app parses no terminal output. A VT worker
+parses each byte once and publishes the screen; the app draws what it is handed, as Chrome's
+browser composites what renderers rasterize (`components/viz/common/quads/compositor_frame.h`:
+a frame and its damage). Until this lands the app's Ghostty parses every untrusted byte, so a VT
+or Kitty bug can end cmux.
+
+Built (`cmux-tui/crates/cmux-vt-worker/src/screen_page.rs`, the first file of the task 133 crate):
+
+- The screen page: one terminal's viewport (cell text, width, authored colors, attributes,
+  underline style), the cursor, the default colors and up to 64 visible Kitty placements by
+  reference (`image_id`, `placement_id`, generation, viewport cell, grid size; pixels stay on the
+  trusted `ghostty_surface_apply_kitty_replay` path). Shared `u64` words, one writer, many readers,
+  no lock: Chromium's one-writer seqlock (`device/base/synchronization/one_writer_seqlock.h`).
+- Damage: each row keeps the sequence of the publish that wrote it, the header the sequence of the
+  last full invalidation (first publish, resize). A reader asks for the damage since the publish
+  it drew last, so a reader that misses publishes misses no row.
+- `PageWriter::publish_damage` reads only the damaged rows out of the render state
+  (`RenderState::walk_damage`, new in ghostty-vt). `build_frame` copies every cell of the screen:
+  about 300 us for a one-byte echo at 200x50, which every per-frame consumer of `build_frame`
+  pays today.
+- The page is untrusted (Chrome's bad_message rule): `PageReader::read` checks every count
+  against its own geometry and every field's encoding, and returns `BadPage(<reason>)` for the
+  owner to end the worker. A read page has no C0, DEL or C1 control in any cell.
+- `encode_replay`: the canonical VT that draws an update on a Ghostty surface through the existing
+  `ghostty_surface_process_output` (cursor moves, SGR, EL, text, DECSCUSR, DECTCEM). It never
+  scrolls the surface and sets the column again after each non-ASCII cell, so a different width
+  table cannot shift the row.
+
+Tests (`cargo test -p cmux-vt-worker`, Linux x86_64, 8 pass): five corpora (typing, colored
+`ls`, a 3,000-line flood, a full-screen TUI with curly underlines and cursor styles, CJK, emoji,
+ZWJ and combining marks, full last rows) drawn from the page give the worker's screen cell by
+cell and the same cursor, from `build_frame` and from `publish_damage`; a reader that misses
+publishes gets every damaged row; resize damages every row; an echo publishes one row and a
+replay under 64 bytes; each of 10 named corruptions gives its `BadPage` reason; 2,000 randomly
+corrupted pages never panic, and no replay of an accepted one sets a title or scrolls.
+
+Spike numbers (`cargo run --release -p cmux-vt-worker --example screen_page_spike`; 200x50
+terminal in a 256x64 page of 323 KiB; one publish per chunk, a chunk stands for one frame;
+Linux x86_64 VM at load 200-600, so absolute times are high and the ratios are the result; not
+fleet numbers):
+
+| corpus | output bytes | frames | replay bytes | app parse, bytes mode | app parse, screen mode | worker update + publish_damage p50/p99 | app read p50/p99 | encode p50/p99 | replay parse p50/p99 per frame |
+|---|---|---|---|---|---|---|---|---|---|
+| typing, 1 B echo per frame | 174 | 133 | 22,077 | 0.03 ms | 0.33 ms | 9.9/27 us | 3.9/6.0 us | 1.1/1.8 us | 2.0/6.1 us |
+| `ls -l` colored, 4 KiB frames | 370,000 | 91 | 407,692 | 9.5 ms | 2.6 ms | 457/499 us | 151/195 us | 37/56 us | 27/49 us |
+| flood, 100k lines, 64 KiB frames | 6,500,000 | 100 | 403,365 | 24.7 ms | 1.8 ms | 439/471 us | 151/175 us | 32/52 us | 17/35 us |
+| full-screen TUI, 500 redraws | 4,291,154 | 501 | 4,504,054 | 17.2 ms | 20.2 ms | 506/586 us | 219/274 us | 63/84 us | 38/58 us |
+| CJK and emoji, 4 KiB frames | 154,000 | 38 | 314,803 | 5.1 ms | 5.7 ms | 442/484 us | 125/147 us | 24/40 us | 146/204 us |
+
+What the numbers say:
+
+- The app's parse cost becomes O(frames x damaged rows), not O(bytes): a flood is 14x less app
+  parse work (24.7 to 1.8 ms), `ls` 3.6x. A program that repaints the whole screen every frame
+  costs about the same (1.2x more), and CJK the same (each non-ASCII cell adds a column move).
+- An echo: the app's part is read 3.9 + encode 1.1 + parse 2.0 = 7 us, against 0.2 us to parse
+  the byte. The worker's part is 10 us with `publish_damage`; with `build_frame` it was 366 us,
+  which alone would break the 1 ms echo budget under STRESS. The hop from the worker to the app
+  (a page-advance event) is not measured here; it is the same hop the daemon ring takes today.
+- With `?7l` around the whole replay the app parsed it 2.5x slower (Ghostty's print fast path
+  needs autowrap), so the replay keeps autowrap on and starts every row with an absolute move.
+- Full damage costs the worker about 440-500 us per 200x50 frame, most of it `fill_cell` over
+  the FFI (about 40 ns a cell). It runs once per frame, not per byte, and on the worker's
+  thread, never the app's.
+
+Not built into the app in this task. What it needs, none of it on perf/chrome-parity at
+611363dd393:
+
+1. The worker process (task 133) and its page mapping to the app: today no process publishes a
+   page, and the app's ring reader (task 131, `TerminalOutputLane.processRing`) is not on the
+   branch either. The app maps the page read-only next to the D3 ring; the stream gets a
+   `page-advance(seq)` event in place of `RING_ADVANCE` for screen-mode surfaces.
+2. History. The page is the viewport. A screen-mode surface keeps no scrollback of its own (the
+   replay never scrolls it), so scrolling, search, selection across history and copy need the
+   history from the worker: the existing GHOSTSNP history pages (`restoreSnapshot` history
+   phase), which the app then reads from the worker's own encoder, not from program output.
+3. Terminal state the app reads from its surface today: modes for key and mouse encoding (task
+   209 puts them in the page), title and cwd (worker events, validated as task 141), prompt
+   marks, hyperlinks (OSC 8 is not in the page), bell and notifications.
+4. Strict acceptance. "VT parses per byte == 1" holds for program output: the app parses only the
+   replay, which carries only escapes the encoder writes. A Ghostty API that takes cells (a
+   `ghostty_surface_apply_screen` in GhosttyKit, a fork change) would remove that second parse;
+   the replay is the way to ship without a fork change, and the numbers above say it is cheap
+   enough for every corpus but full-screen CJK.
+
+Plan, in order: (a) task 133 lands the worker with this page; (b) screen mode in the app behind
+the default-off feature `terminalScreenPages` (schemas/features/features.d), with
+`TerminalOutputLane.processScreen(update)` beside `processRing` on the same lane and the same
+backlog, reading the page with this crate's reader rule ported to Swift and the history from (2);
+(c) fleet A/B: `bench-typing.py` STRESS in both modes and the VT fuzz crash corpus with one
+shard ending while the app keeps running; (d) the GhosttyKit cell API only if (c) shows the
+replay parse past 1 ms p99 on a fleet Mac.

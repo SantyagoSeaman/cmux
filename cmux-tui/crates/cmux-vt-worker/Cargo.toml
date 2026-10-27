@@ -1,0 +1,14 @@
+[package]
+name = "cmux-vt-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The VT worker's published screen: seqlock screen pages a sandboxed parser writes and the daemon and app read (std and ghostty-vt only)"
+
+[lints]
+workspace = true
+
+[dependencies]
+ghostty-vt.workspace = true

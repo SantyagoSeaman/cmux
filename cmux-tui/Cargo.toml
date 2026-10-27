@@ -51,6 +51,7 @@ members = [
     "crates/cmux-memory",
     "crates/cmux-pty",
     "crates/cmux-holder",
+    "crates/cmux-vt-worker",
     "crates/cmux-ipc",
     "crates/cmux-flow-trace",
     "crates/cmux-threads",
@@ -223,6 +224,7 @@ cmux-chat-index = { path = "crates/cmux-chat-index" }
 cmux-tui-cdp = { path = "crates/cmux-tui-cdp" }
 cmux-pty = { path = "crates/cmux-pty" }
 cmux-holder = { path = "crates/cmux-holder" }
+cmux-vt-worker = { path = "crates/cmux-vt-worker" }
 cmux-ipc = { path = "crates/cmux-ipc" }
 cmux-process = { path = "crates/cmux-process" }
 cmux-flow-trace = { path = "crates/cmux-flow-trace" }

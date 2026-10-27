@@ -293,6 +293,21 @@
       "trace": [
         "key.flow"
       ]
+    },
+    "vt-screen-page-publish": {
+      "what": "a VT worker publishes one frame's damage into its screen page (cmux-vt-worker screen_page.rs PageWriter::publish_damage): the damaged rows read from the render state between the seqlock's begin and end; a full 200x50 screen is the worst case, an echo writes one row",
+      "bench": "cargo run --release -p cmux-vt-worker --example screen_page_spike (p50/p99 per frame, 200x50, five corpora), then scripts/cmux-next/bench-typing.py STRESS",
+      "owner": "PL-daemon"
+    },
+    "vt-screen-page-read": {
+      "what": "a reader copies and validates the damage since its last read from a screen page (PageReader::read): relaxed word copies between two sequence loads, then bounds and encoding checks",
+      "bench": "cargo run --release -p cmux-vt-worker --example screen_page_spike (p50/p99 per frame, 200x50, five corpora), then scripts/cmux-next/bench-typing.py STRESS",
+      "owner": "PL-daemon"
+    },
+    "vt-screen-page-replay": {
+      "what": "the canonical VT a surface draws a screen update from (screen_page.rs encode_replay): one cursor move, SGR runs and text per damaged row",
+      "bench": "cargo run --release -p cmux-vt-worker --example screen_page_spike (p50/p99 per frame, 200x50, five corpora), then scripts/cmux-next/bench-typing.py STRESS",
+      "owner": "PL-daemon"
     }
   }
 }
