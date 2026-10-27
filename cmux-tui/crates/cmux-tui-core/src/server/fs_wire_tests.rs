@@ -469,3 +469,102 @@ fn the_fs_hook_refuses_on_a_poisoned_registry_lock() {
     }));
     assert_eq!(fs_stat_code(&mux, client), "fs.permission_denied");
 }
+
+/// The `fs.read` line that a binary body (p05-ipc-149) stands for: its
+/// `data_len` bytes become `text` or `bytes_base64`, as `encoding` says.
+fn read_line_of_body(body: &[u8]) -> Value {
+    use base64::Engine as _;
+    let mut body = crate::binary_body::BinaryBody::decode(body).unwrap();
+    let data = body.take("data_len").unwrap().to_vec();
+    let mut meta = body.finish().unwrap();
+    let (field, value) = match meta["encoding"].as_str() {
+        Some("utf-8") => ("text", json!(String::from_utf8(data).unwrap())),
+        Some("base64") => {
+            ("bytes_base64", json!(base64::engine::general_purpose::STANDARD.encode(data)))
+        }
+        other => panic!("unknown encoding {other:?}"),
+    };
+    meta.insert(field.into(), value);
+    Value::Object(meta)
+}
+
+/// p05-ipc-149: an `fs.read` binary body carries the bytes raw, never as
+/// base64, and stands for its line byte for byte (text, escape-heavy text,
+/// binary, empty and truncated reads).
+#[test]
+fn fs_read_binary_body_equals_the_line_and_carries_raw_bytes() {
+    let home = Home::new("read-body");
+    let service = home.service();
+    let binary: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
+    let fixtures: [(&str, Vec<u8>, u64); 5] = [
+        ("text", b"hello\nworld".to_vec(), 64),
+        ("escapes", vec![1u8; 300], 1024),
+        ("binary", binary.clone(), 4096),
+        ("empty", Vec::new(), 16),
+        ("cut", binary, 1000),
+    ];
+    for (name, bytes, max_bytes) in fixtures {
+        std::fs::write(home.path.join(name), &bytes).unwrap();
+        let params = || {
+            let path = home.path.join(name).display().to_string();
+            serde_json::from_value(json!({"path": path, "max_bytes": max_bytes})).unwrap()
+        };
+        let line = service.read_reply(params()).unwrap().into_json();
+        let body = service.read_reply(params()).unwrap().into_body().unwrap();
+        let rebuilt = read_line_of_body(&body);
+        assert_eq!(rebuilt, line, "{name}");
+        assert_eq!(serde_json::to_vec(&rebuilt).unwrap(), serde_json::to_vec(&line).unwrap());
+        let read = usize::try_from(max_bytes).unwrap().min(bytes.len());
+        assert!(body.ends_with(&bytes[..read]), "{name}: the bytes are raw at the end of the body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("bytes_base64") && !text.contains("\"text\""), "{name}: {text}");
+    }
+}
+
+/// p05-ipc-149: a binary `fs.write` writes its raw bytes exactly as the
+/// `bytes_base64` line writes them, and refuses a body that also carries
+/// the bytes as text or names more bytes than it has.
+#[test]
+fn fs_write_binary_body_writes_the_bytes_the_line_writes() {
+    use base64::Engine as _;
+    let home = Home::new("write-body");
+    let service = home.service();
+    let bytes: Vec<u8> = (0..=255u8).rev().cycle().take(5000).collect();
+    let path = |name: &str| home.path.join(name).display().to_string();
+
+    let body = crate::binary_body::encode(
+        &json!({"path": path("framed"), "mode": "create", "data_len": bytes.len()}),
+        &[&bytes],
+    )
+    .unwrap();
+    let framed = service.write_body(&body).unwrap();
+    let line = service
+        .write(
+            serde_json::from_value(json!({
+                "path": path("line"),
+                "mode": "create",
+                "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(home.path.join("framed")).unwrap(), bytes);
+    assert_eq!(std::fs::read(home.path.join("line")).unwrap(), bytes);
+    assert_eq!(framed["entry"]["size"], line["entry"]["size"], "{framed} {line}");
+
+    let both = crate::binary_body::encode(
+        &json!({"path": path("both"), "mode": "create", "text": "x", "data_len": 1}),
+        &[b"y"],
+    )
+    .unwrap();
+    let short = crate::binary_body::encode(
+        &json!({"path": path("short"), "mode": "create", "data_len": 9}),
+        &[b"y"],
+    )
+    .unwrap();
+    for body in [both, short] {
+        let refused = service.write_body(&body);
+        assert!(matches!(refused, Err(FsError::ParamsInvalid(_))), "{refused:?}");
+    }
+    assert!(!home.path.join("both").exists() && !home.path.join("short").exists());
+}

@@ -15,6 +15,11 @@ protocol LoopbackLineSending: Sendable {
 /// Writes wait (without blocking a thread) while the daemon window is
 /// spent; received bytes stay within this client's window, so buffers are
 /// bounded on both ends. All methods are safe from any thread.
+///
+/// Received bytes come as `loopback-data` lines or, on a forward that rides a frame stream, as OUTPUT frames
+/// whose payload is the bytes and whose aux is their offset in what the target sent (p05-ipc-149). Both feed
+/// one credit queue: it holds at most `receiveWindow` bytes, so at most that many data events (each holds a
+/// byte or more) plus the end of the target's side and the close.
 public final class LoopbackStream: Sendable {
     public let id: UInt64
     public let events: AsyncStream<LoopbackStreamEvent>
@@ -34,12 +39,18 @@ public final class LoopbackStream: Sendable {
         var buffered = 0
         /// Consumed and not yet granted back.
         var toGrant = 0
+        /// Bytes the target sent on this forward and this client received: where the next OUTPUT frame starts.
+        var receivedOffset: UInt64 = 0
         var writeWaiter: OnceContinuation<Void, any Error>?
         var writeShutdown = false
         var finished: LoopbackStreamError??
     }
 
     private let state: Mutex<State>
+
+    /// The credit queue's event bound for `receiveWindow`: one data event per byte at most, then `.eof` and
+    /// `.closed`.
+    static func queueCapacity(receiveWindow: Int) -> Int { max(receiveWindow, 0) + 2 }
 
     /// Registered before `loopback-open` is sent, so a target that speaks
     /// first loses nothing; `opened` adds the daemon window.
@@ -50,11 +61,10 @@ public final class LoopbackStream: Sendable {
         self.receiveWindow = receiveWindow
         self.onFinish = onFinish
         state = Mutex(State())
-        // Bounded by `receiveWindow`: the daemon never sends past it, and
-        // `deliver` ends the stream if it does.
-        // concurrency-allow: bounded by the credit window (see deliver)
-        // memory: bounded-by receiveWindow (the credit window, 256 KiB): deliver ends the stream past it
-        (events, continuation) = AsyncStream.makeStream(of: LoopbackStreamEvent.self, bufferingPolicy: .unbounded)
+        // memory: bounded-by receiveWindow (the credit window, 256 KiB): `receive` ends the stream past it
+        (events, continuation) = AsyncStream.makeStream(
+            of: LoopbackStreamEvent.self,
+            bufferingPolicy: .bufferingOldest(Self.queueCapacity(receiveWindow: receiveWindow)))
     }
 
     /// The loopback address the daemon connected (`127.0.0.1:5173`).
@@ -129,16 +139,7 @@ public final class LoopbackStream: Sendable {
     func deliver(_ event: LoopbackForwardEvent) {
         switch event {
         case .data(_, let bytes):
-            let overflow = state.withLock { state -> Bool in
-                guard state.finished == nil else { return false }
-                state.buffered += bytes.count
-                return state.buffered > receiveWindow
-            }
-            if overflow {
-                finish(.protocolViolation("the daemon sent past the window"), notifyDaemon: true)
-            } else {
-                continuation.yield(.data(bytes))
-            }
+            receive(bytes, at: nil)
         case .credit(_, let bytes):
             let waiter = state.withLock { state -> OnceContinuation<Void, any Error>? in
                 state.sendCredit += bytes
@@ -147,9 +148,48 @@ public final class LoopbackStream: Sendable {
             }
             waiter?.resume(returning: ())
         case .eof:
-            continuation.yield(.eof)
+            enqueue(.eof)
         case .closed(_, let error):
             finish(error.map { LoopbackStreamError.daemon($0) }, notifyDaemon: false)
+        }
+    }
+
+    /// The payload of an OUTPUT frame on this forward's frame stream (p05-ipc-149): the target's bytes as they
+    /// came, never base64, starting at `offset` in what the target sent. An offset that is not where the last
+    /// bytes ended means bytes were lost or sent twice: the stream ends.
+    func deliverOutput(_ bytes: Data, at offset: UInt64) {
+        receive(bytes, at: offset)
+    }
+
+    /// Queues received bytes within the window; `offset`, when the frame names one, must continue the bytes
+    /// before it.
+    private func receive(_ bytes: Data, at offset: UInt64?) {
+        enum Outcome { case queue, ignore, overflow, gap(expected: UInt64) }
+        let outcome = state.withLock { state -> Outcome in
+            guard state.finished == nil, !bytes.isEmpty else { return .ignore }
+            if let offset, offset != state.receivedOffset { return .gap(expected: state.receivedOffset) }
+            guard state.buffered + bytes.count <= receiveWindow else { return .overflow }
+            state.buffered += bytes.count
+            state.receivedOffset += UInt64(truncatingIfNeeded: bytes.count)
+            return .queue
+        }
+        switch outcome {
+        case .queue:
+            enqueue(.data(bytes))
+        case .ignore:
+            break
+        case .overflow:
+            finish(.protocolViolation("the daemon sent past the window"), notifyDaemon: true)
+        case .gap(let expected):
+            finish(.protocolViolation("output at offset \(offset ?? 0), expected \(expected)"), notifyDaemon: true)
+        }
+    }
+
+    /// One event into the credit queue. The window keeps it under its bound; an event past it means the daemon
+    /// broke the protocol (a second end of stream, say), and the stream ends rather than drop it.
+    private func enqueue(_ event: LoopbackStreamEvent) {
+        if case .dropped = continuation.yield(event) {
+            finish(.protocolViolation("the daemon sent past the queue bound"), notifyDaemon: true)
         }
     }
 

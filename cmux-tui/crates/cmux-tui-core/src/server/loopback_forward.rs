@@ -24,20 +24,22 @@
 //! - Events: `loopback-data`, `loopback-credit`, `loopback-eof`,
 //!   `loopback-closed {stream, error?}`. Data, EOF and close of one stream
 //!   travel in one ordered outbound stream.
+//! - On frames the data is binary both ways, never base64 (loopback_frames.rs).
 
 use cmux_threads::sync::{Condvar, Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
 use serde::Deserialize;
-use serde::de::{self, Deserializer, Visitor};
 use serde_json::{Value, json};
+
+#[path = "loopback_frames.rs"]
+mod frames;
+use frames::{DataPayload, LoopbackData};
 
 use super::routes::{Route, RouteLine, RouteName};
 use super::{FrameStage, MessageWriter, OutboundStream, Response, send_response};
@@ -626,15 +628,16 @@ fn run_reader(stream: Arc<ForwardStream>, forwarder: Arc<Mux>) {
             stream.complete_if_done(forwarder);
             return;
         }
-        {
+        let offset = {
             let mut inner = stream.inner.lock().recover_poison();
             inner.send_credit = inner.send_credit.saturating_sub(read);
+            let offset = inner.bytes_from_target;
             inner.bytes_from_target += read as u64;
-        }
-        let Some(read_bytes) = buffer.get(..read) else { return };
-        let data = base64::engine::general_purpose::STANDARD.encode(read_bytes);
-        let event = json!({"event": "loopback-data", "stream": stream.id, "data": data});
-        if stream.event(&event).is_err() {
+            offset
+        };
+        let Some(bytes) = buffer.get(..read) else { return };
+        let data = LoopbackData { stream: stream.id, offset, bytes };
+        if stream.event(&data.json()).is_err() {
             stream.fail(forwarder, "client-gone", false);
             return;
         }
@@ -722,7 +725,7 @@ pub(super) enum LoopbackCommand {
         window: Option<usize>,
     },
     #[serde(rename = "loopback-data")]
-    Data { stream: u64, data: Base64Frame },
+    Data { stream: u64, data: DataPayload },
     #[serde(rename = "loopback-credit")]
     Credit { stream: u64, bytes: usize },
     #[serde(rename = "loopback-shutdown")]
@@ -731,49 +734,6 @@ pub(super) enum LoopbackCommand {
     Close { stream: u64 },
     #[serde(rename = "loopback-status")]
     Status,
-}
-
-/// A `loopback-data` payload, decoded from the line's base64 text while the
-/// line parses: the text goes straight into the bytes the stream queues for
-/// its target, never through a `String` copy first. Text that is not base64,
-/// or that decodes to more than [`MAX_FRAME_BYTES`], is `Bad`, so the line
-/// still reaches its stream and the stream ends with `bad-frame`.
-pub(super) enum Base64Frame {
-    Bytes(Vec<u8>),
-    Bad,
-}
-
-impl Base64Frame {
-    /// The longest padded base64 text of at most [`MAX_FRAME_BYTES`].
-    const MAX_TEXT_BYTES: usize = MAX_FRAME_BYTES.div_ceil(3) * 4;
-
-    fn decode(text: &str) -> Self {
-        if text.len() > Self::MAX_TEXT_BYTES {
-            return Self::Bad;
-        }
-        match base64::engine::general_purpose::STANDARD.decode(text.as_bytes()) {
-            Ok(bytes) if bytes.len() <= MAX_FRAME_BYTES => Self::Bytes(bytes),
-            _ => Self::Bad,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Base64Frame {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct FrameVisitor;
-        impl Visitor<'_> for FrameVisitor {
-            type Value = Base64Frame;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a base64 string")
-            }
-
-            fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
-                Ok(Base64Frame::decode(text))
-            }
-        }
-        deserializer.deserialize_str(FrameVisitor)
-    }
 }
 
 /// The `cmd` names this module answers (server/routes.rs).
@@ -812,14 +772,7 @@ fn handle(line: &RouteLine<'_>) -> Option<bool> {
             let Some(target) = allowed.then(|| forwarder.stream(client, stream)).flatten() else {
                 return Some(unknown_stream(writer, id, stream));
             };
-            match data {
-                Base64Frame::Bytes(bytes) => {
-                    if !bytes.is_empty() {
-                        target.accept_data(forwarder, bytes);
-                    }
-                }
-                Base64Frame::Bad => target.fail(forwarder, "bad-frame", true),
-            }
+            data.deliver(&target, forwarder);
             Some(id.is_none() || ok(writer, id, json!({})))
         }
         LoopbackCommand::Credit { stream, bytes } => {

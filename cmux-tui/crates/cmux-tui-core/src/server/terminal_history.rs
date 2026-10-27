@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use super::terminal_io_wire::{TerminalHistoryParams, TerminalReadRangeParams, wire_usize};
 use super::{get_surface, require_pty};
 use crate::Mux;
+use crate::panic_free::JsonFields as _;
 
 /// Default and maximum page bytes of one `terminal-history` reply.
 pub const TERMINAL_HISTORY_DEFAULT_BYTES: usize = 1 << 20;
@@ -61,19 +62,67 @@ pub(crate) fn history(mux: &Arc<Mux>, params: TerminalHistoryParams) -> anyhow::
     let pages = surface
         .history_pages(Some(params.marker_epoch), params.before, max_bytes)
         .map_err(marker_error)?;
-    let engine = &base64::engine::general_purpose::STANDARD;
-    Ok(json!({
-        "surface": params.surface,
-        "marker_epoch": pages.marker_epoch,
-        "snapshot_version": ghostty_vt::snapshot_version(),
-        "pages": pages.pages.iter().map(|page| json!({
-            "marker": page.marker,
-            "rows": page.rows,
-            "data": engine.encode(&page.record),
-        })).collect::<Vec<_>>(),
-        "next_before": pages.next_before,
-        "done": pages.done,
-    }))
+    Ok(HistoryReply::new(json!(params.surface), pages).into_json())
+}
+
+/// A `terminal-history` answer, as its JSON line or as its binary body
+/// (crate::binary_body, p05-ipc-149).
+pub(crate) struct HistoryReply {
+    surface: Value,
+    pages: ghostty_vt::HistoryPages,
+}
+
+impl HistoryReply {
+    pub(crate) fn new(surface: Value, pages: ghostty_vt::HistoryPages) -> Self {
+        Self { surface, pages }
+    }
+
+    /// The answer's fields but the page records; each page has `data_len`
+    /// in place of `data` when `lengths` is set.
+    fn meta(&self, lengths: bool) -> Value {
+        let pages = &self.pages;
+        json!({
+            "surface": self.surface,
+            "marker_epoch": pages.marker_epoch,
+            "snapshot_version": ghostty_vt::snapshot_version(),
+            "pages": pages.pages.iter().map(|page| {
+                let mut entry = json!({"marker": page.marker, "rows": page.rows});
+                if lengths {
+                    entry.insert("data_len", json!(page.record.len()));
+                }
+                entry
+            }).collect::<Vec<_>>(),
+            "next_before": pages.next_before,
+            "done": pages.done,
+        })
+    }
+
+    /// The line: each page's record as base64 `data`.
+    pub(crate) fn into_json(self) -> Value {
+        let engine = &base64::engine::general_purpose::STANDARD;
+        let mut value = self.meta(false);
+        if let Some(entries) = value.get_mut("pages").and_then(Value::as_array_mut) {
+            for (entry, page) in entries.iter_mut().zip(&self.pages.pages) {
+                entry.insert("data", json!(engine.encode(&page.record)));
+            }
+        }
+        value
+    }
+
+    /// The binary body: the line's meta with each page's `data_len`, then
+    /// the page records raw, in page order.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "terminal-history answers on frames once it carries `payload: binary`"
+        )
+    )]
+    pub(crate) fn into_body(self) -> Result<Vec<u8>, crate::binary_body::BinaryBodyError> {
+        let records: Vec<&[u8]> =
+            self.pages.pages.iter().map(|page| page.record.as_slice()).collect();
+        crate::binary_body::encode(&self.meta(true), &records)
+    }
 }
 
 pub(crate) fn read_range(mux: &Arc<Mux>, params: TerminalReadRangeParams) -> anyhow::Result<Value> {
@@ -103,7 +152,60 @@ pub(crate) fn read_range(mux: &Arc<Mux>, params: TerminalReadRangeParams) -> any
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_text;
+    use super::{HistoryReply, truncate_text};
+    use base64::Engine as _;
+    use serde_json::{Value, json};
+
+    fn reply(records: &[Vec<u8>]) -> HistoryReply {
+        let pages = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| ghostty_vt::HistoryPage {
+                marker: 100 - index as u64,
+                rows: 24,
+                record: record.clone(),
+            })
+            .collect();
+        HistoryReply::new(
+            json!(7),
+            ghostty_vt::HistoryPages { marker_epoch: 3, pages, next_before: Some(90), done: false },
+        )
+    }
+
+    /// p05-ipc-149: a `terminal-history` binary body holds each page record
+    /// raw (no base64) and stands for the line byte for byte.
+    #[test]
+    fn terminal_history_binary_body_equals_the_line() {
+        let fixtures: [Vec<Vec<u8>>; 3] = [
+            vec![],
+            vec![b"GHOSTSNP one".to_vec()],
+            vec![(0..=255u8).collect(), Vec::new(), vec![0xFF; 70_000]],
+        ];
+        for records in fixtures {
+            let line = reply(&records).into_json();
+            let body = reply(&records).into_body().unwrap();
+            let mut read = crate::binary_body::BinaryBody::decode(&body).unwrap();
+            let mut pages = read.meta.remove("pages").unwrap();
+            for (entry, record) in pages.as_array_mut().unwrap().iter_mut().zip(&records) {
+                let entry = entry.as_object_mut().unwrap();
+                let len = crate::binary_body::take_len(entry, "data_len").unwrap();
+                let raw = read.take_bytes(len).unwrap();
+                assert_eq!(raw, record.as_slice());
+                let data = base64::engine::general_purpose::STANDARD.encode(raw);
+                entry.insert("data".into(), json!(data));
+            }
+            let mut rebuilt = read.finish().unwrap();
+            rebuilt.insert("pages".into(), pages);
+            let rebuilt = Value::Object(rebuilt);
+            assert_eq!(rebuilt, line);
+            assert_eq!(serde_json::to_vec(&rebuilt).unwrap(), serde_json::to_vec(&line).unwrap());
+            for record in records.iter().filter(|record| record.len() >= 3) {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(record);
+                let found = body.windows(encoded.len()).any(|window| window == encoded.as_bytes());
+                assert!(!found, "a page record went into the body as base64");
+            }
+        }
+    }
 
     #[test]
     fn read_range_text_is_cut_at_a_character_boundary() {

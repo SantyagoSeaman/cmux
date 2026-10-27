@@ -646,7 +646,7 @@ fn loopback_commands_and_events_are_in_the_sdk_schema() {
     assert_eq!(priority("loopback-open"), "control");
     assert_eq!(priority("loopback-close"), "control");
 
-    let source = include_str!("loopback_forward.rs");
+    let source = [include_str!("loopback_forward.rs"), include_str!("loopback_frames.rs")].concat();
     let mut emitted: Vec<&str> =
         source.split("\"event\": \"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
     emitted.sort_unstable();
