@@ -17,6 +17,7 @@ pub struct PoolConfig {
     pub max_rss_mb: u64,
     /// Stop (SIGSTOP) a ready pooled harness and continue it when taken, for
     /// no idle CPU at all. Off by default: idle exit bounds the cost instead.
+    /// Energy Saver parks whatever this says ([`PoolConfig::parks`]).
     pub park: bool,
     /// `_acpmux/prewarm` hints this close together count once (the last).
     pub debounce_ms: u64,
@@ -35,5 +36,18 @@ impl PoolConfig {
 
     pub fn idle(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.idle_minutes.max(1) * 60)
+    }
+
+    /// Whether ready entries are stopped now: with `park`, and always under
+    /// Energy Saver (`saver`), as Chrome's battery saver freezes more
+    /// (`FreezingPolicy::ToggleFreezingOnBatterySaverMode`).
+    pub fn parks(&self, saver: bool) -> bool {
+        self.park || saver
+    }
+
+    /// Whether a new entry may start now: never under Energy Saver, which is
+    /// on on battery by default; the entries already ready stay (parked).
+    pub fn starts(&self, saver: bool) -> bool {
+        self.enabled && !saver
     }
 }

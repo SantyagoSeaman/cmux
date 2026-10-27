@@ -5,6 +5,10 @@
 //! as showing every chat it attaches (the TUI, `acpmux attach`).
 
 use super::*;
+#[cfg(unix)]
+use acpmux::hub::freeze::ProcessControl;
+#[cfg(unix)]
+use std::sync::{Mutex, Weak};
 
 /// The chat's `unread` once its turn has settled (the prompt's answer can
 /// come before the turn records its end).
@@ -84,4 +88,97 @@ async fn a_chat_marked_unread_stays_unread_until_shown_again() {
     c.request("_acpmux/view", json!({"sessionId": id, "visible": true})).await.unwrap();
     assert_eq!(unread(&hub, &id).await, false);
     assert!(c.request("_acpmux/markUnread", json!({"sessionId": "no-such-chat"})).await.is_err());
+}
+
+// p14-energy-117 end to end: the pane hides its chat (`_acpmux/visibility`),
+// the chat's idle harness stops after `freezeAfterSeconds`, and a prompt
+// continues it before a single byte is sent to it. The process control
+// records instead of signalling, with the count of records sent so far.
+
+#[cfg(unix)]
+type Log = Arc<Mutex<Vec<(&'static str, usize)>>>;
+
+#[cfg(unix)]
+struct Recorder {
+    hub: Weak<Hub>,
+    session: String,
+    log: Log,
+}
+
+#[cfg(unix)]
+impl Recorder {
+    fn note(&self, what: &'static str) {
+        let sent = self.hub.upgrade().map_or(0, |hub| {
+            let events = hub.events(&self.session, 0, 100_000).unwrap();
+            events.iter().filter(|e| e.dir == "out").count()
+        });
+        self.log.lock().unwrap().push((what, sent));
+    }
+}
+
+#[cfg(unix)]
+impl ProcessControl for Recorder {
+    fn stop(&self, _group: u32) -> bool {
+        self.note("stop");
+        true
+    }
+
+    fn resume(&self, _group: u32) {
+        self.note("cont");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn freeze_a_hidden_pane_stops_the_idle_harness_and_a_prompt_continues_it_first() {
+    let (hub, mut c) = setup(PermissionPolicy::ApproveAll).await;
+    let clock = acpmux::clock::ManualClock::new();
+    hub.set_clock(clock.clone());
+    let id = new_session(&mut c, "hidden-pane").await;
+    let log: Log = Default::default();
+    let recorder = Recorder { hub: Arc::downgrade(&hub), session: id.clone(), log: log.clone() };
+    hub.set_process_control(Arc::new(recorder));
+    hub.set_harness_freeze(true);
+    c.request(method::MUX_VISIBILITY, json!({"sessionId": id, "visible": false})).await.unwrap();
+    let frozen = |hub: &Hub| hub.session_summary(&hub.resolve(&id).unwrap())["frozen"].clone();
+    clock.advance(Duration::from_secs(299));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(log.lock().unwrap().is_empty(), "stopped before its quiet period ended");
+    clock.advance(Duration::from_secs(2));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while frozen(&hub) != true {
+        assert!(std::time::Instant::now() < deadline, "the hidden harness never stopped");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(c.request(method::MUX_STATUS, json!({})).await.unwrap()["frozen"], 1);
+    let r = c.request(method::SESSION_PROMPT, prompt(&id, "wake up", None)).await.unwrap();
+    assert_eq!(r["stopReason"], "end_turn");
+    let log = log.lock().unwrap().clone();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!((log[0].0, log[1].0), ("stop", "cont"));
+    assert_eq!(log[1].1, log[0].1, "bytes went to the stopped harness before it continued");
+    assert_eq!(frozen(&hub), false);
+}
+
+#[tokio::test]
+async fn freeze_visibility_needs_an_attachment_and_combines_with_the_page_view() {
+    let (hub, mut c) = setup(PermissionPolicy::ApproveAll).await;
+    let id = new_session(&mut c, "pane").await;
+    let shown = |hub: &Hub| hub.session_summary(&hub.resolve(&id).unwrap())["shown"].clone();
+    c.request(method::MUX_VISIBILITY, json!({"sessionId": id, "visible": false})).await.unwrap();
+    assert_eq!(shown(&hub), false);
+    // The page shows the chat; the pane still hides it.
+    c.request(method::MUX_VIEW, json!({"sessionId": id, "visible": true})).await.unwrap();
+    assert_eq!(shown(&hub), false);
+    // Attaching again keeps what the pane said.
+    c.request(method::MUX_ATTACH, json!({"sessionId": id, "limit": 1})).await.unwrap();
+    assert_eq!(shown(&hub), false);
+    c.request(method::MUX_VISIBILITY, json!({"sessionId": id, "visible": true})).await.unwrap();
+    assert_eq!(shown(&hub), true);
+    c.request(method::MUX_DETACH, json!({"sessionId": id})).await.unwrap();
+    let error = c
+        .request(method::MUX_VISIBILITY, json!({"sessionId": id, "visible": false}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("attach to the session before _acpmux/visibility"), "{error}");
 }

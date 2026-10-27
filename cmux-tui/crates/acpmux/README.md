@@ -213,6 +213,11 @@ if it never answers. Only a turn nobody holds: no client that shows the chat, no
 secret waiting, and its recorded owner (a sub-session's parent, the session a `spawnedBy` tag
 names) not running or waiting. The chat stays open and its idle agent exits as any unused one
 does; the next prompt resumes it.
+`freezeAfterSeconds` (default 300, at most 30 under Energy Saver; 0 turns it off; only with
+the `hiddenHarnessFreeze` feature): a chat that a client holds but that no attached client
+shows (`_acpmux/view`, `_acpmux/visibility`), with no turn, queued prompt, permission, start,
+background process or record for that long, gets its harness stopped (SIGSTOP; the summary's
+`frozen`). Anything sent to the harness, and showing the chat, continues it first.
 Files dropped into a chat (`_acpmux/file_put`, under `<home>/uploads/<session>/`) are
 deleted with the chat (`_acpmux/kill` with purge) and once older than `uploadsMaxAgeDays`
 (default 30; 0 keeps them), checked at the daemon's start and daily.

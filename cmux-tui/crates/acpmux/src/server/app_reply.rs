@@ -63,7 +63,7 @@ pub(super) fn check(hub: &Hub, conn: &Conn, params: &Value) -> Result<Value, Rpc
     if field("replyTo").is_empty() {
         return Err(refused());
     }
-    let shows = |id: &str| conn.sub_opts(id).is_some_and(|o| !o.hidden);
+    let shows = |id: &str| conn.sub_opts(id).is_some_and(|o| o.shows());
     let signed = hub.app_reply_fits(&provenance, to, &shows).ok_or_else(refused)?;
     // The daemon's body rule (`validate_body`): no control character but newlines and tabs.
     let control = text.chars().any(|c| c.is_control() && c != '\n' && c != '\t');

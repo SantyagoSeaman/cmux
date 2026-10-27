@@ -222,6 +222,21 @@ impl Hub {
             && self.config.read().await.pool.enabled
     }
 
+    /// Whether a new entry may start under the current Energy Saver mode
+    /// (`PoolConfig::starts`).
+    async fn pool_starts(&self) -> bool {
+        self.config.read().await.pool.starts(self.maintenance.energy().is_saver())
+    }
+
+    /// Energy Saver changed (`freeze.rs` `watch_energy`): turning on parks
+    /// every ready entry now; turning off leaves them parked until taken.
+    pub(super) async fn pool_saver_edge(&self) {
+        let park = self.config.read().await.pool.parks(self.maintenance.energy().is_saver());
+        if park {
+            park_ready(&mut lock(&self.pool.pool));
+        }
+    }
+
     /// Measure pooled hosts with `probe` instead of `ps` (tests).
     pub fn set_pool_rss_probe(&self, probe: RssProbe) {
         *lock(&self.pool.rss) = probe;
@@ -341,6 +356,9 @@ impl Hub {
         if !self.pool_enabled().await {
             return Ok(json!({"accepted": false, "reason": "the session pool is off"}));
         }
+        if !self.pool_starts().await {
+            return Ok(json!({"accepted": false, "reason": "Energy Saver starts no pooled agent"}));
+        }
         // No folder named, no pooled agent: never the home folder or `/` by
         // default (LAUNCH-NO-TCC-PROMPTS).
         let Some(cwd) = req.cwd.clone().or_else(|| {
@@ -408,7 +426,7 @@ impl Hub {
 
     /// Point `role` at `spec` and start it when nothing holds it.
     async fn pool_want(self: &Arc<Self>, role: Role, spec: PoolSpec) {
-        if !self.pool_enabled().await {
+        if !self.pool_enabled().await || !self.pool_starts().await {
             return;
         }
         if lock(&self.pool.oversize).contains(&spec.key) {
@@ -455,7 +473,8 @@ impl Hub {
     async fn pool_after_ready(&self) {
         let (cap, park) = {
             let cfg = self.config.read().await;
-            (cfg.pool.max_rss_mb.saturating_mul(1024 * 1024), cfg.pool.park)
+            let saver = self.maintenance.energy().is_saver();
+            (cfg.pool.max_rss_mb.saturating_mul(1024 * 1024), cfg.pool.parks(saver))
         };
         let pids: Vec<u32> = lock(&self.pool.pool).ready_mut().map(|p| p.record.host_pid).collect();
         let probe = lock(&self.pool.rss).clone();
@@ -470,11 +489,9 @@ impl Hub {
                 if let Some(rss) = measured.get(&p.record.host_pid) {
                     p.rss = *rss;
                 }
-                #[cfg(unix)]
-                if park && !p.parked {
-                    signal_harness(&p.record, libc::SIGSTOP);
-                    p.parked = true;
-                }
+            }
+            if park {
+                park_ready(&mut pool);
             }
             let evicted = pool.enforce_cap(cap, |p| p.rss);
             // A session over the cap on its own would only start again.
@@ -861,6 +878,17 @@ impl Drop for ClaimGuard {
     fn drop(&mut self) {
         self.hub.pool_return_claimed(&self.id);
     }
+}
+
+/// Stop every ready harness of the pool that is not parked yet.
+fn park_ready(pool: &mut Pool<Pooled>) {
+    #[cfg(unix)]
+    for p in pool.ready_mut().filter(|p| !p.parked) {
+        signal_harness(&p.record, libc::SIGSTOP);
+        p.parked = true;
+    }
+    #[cfg(not(unix))]
+    let _ = pool;
 }
 
 /// End one pooled session: continue a parked harness, end it through its

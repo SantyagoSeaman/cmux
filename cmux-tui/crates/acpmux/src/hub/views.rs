@@ -400,6 +400,8 @@ impl Hub {
         // The branch its folder has checked out now (`git_watch.rs`); null on
         // a detached HEAD or outside a repository.
         summary["gitBranch"] = json!(self.git_branch_now(&m));
+        // Its harness is stopped while hidden and idle (`freeze.rs`).
+        summary["frozen"] = json!(self.is_frozen(session));
         decide(&mut summary);
         summary
     }
@@ -468,6 +470,8 @@ impl Hub {
             "store": cfg.store,
             "sessions": sessions.len(),
             "liveAgents": live,
+            // Harnesses of hidden idle sessions stopped now (`freeze.rs`).
+            "frozen": self.frozen_count(),
             // `deny`: this daemon starts no agent process (cx-9ettq).
             "agentLaunch": crate::launch_policy::status_word(),
             // Hidden pre-created sessions; never counted above.

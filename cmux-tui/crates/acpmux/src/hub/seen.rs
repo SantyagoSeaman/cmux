@@ -29,6 +29,7 @@ impl Hub {
         }
         // The git watch follows the chats clients hold (`git_watch.rs`).
         self.git_watch_wake();
+        self.visibility_changed(session);
     }
 
     /// An attached client starts or stops showing the chat.
@@ -40,6 +41,8 @@ impl Hub {
         } else {
             session.hidden.fetch_add(1, Ordering::SeqCst);
         }
+        // A shown chat's stopped harness continues now (`freeze.rs`).
+        self.visibility_changed(session);
     }
 
     /// Some attached client shows the chat, so a turn ending now is seen.

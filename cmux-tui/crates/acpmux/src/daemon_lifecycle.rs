@@ -475,6 +475,9 @@ pub async fn run_for_daemon(hub: Arc<crate::hub::Hub>) {
     // The policy and document reads are disk reads: off the runtime's workers.
     let features = cmux_blocking::spawn_blocking(daemon_features).await;
     let idle_exit_on = features.as_ref().is_ok_and(enabled);
+    // The same read turns on the hidden idle harness freeze (`hub/freeze.rs`).
+    let freeze = cmux_features::feature::HIDDEN_HARNESS_FREEZE;
+    hub.set_harness_freeze(features.as_ref().is_ok_and(|f| f.is_enabled(freeze)));
     let clock = hub.lifecycle_clock();
     let owner = OwnerApp::from_env(OWNER_APP_PID_ENV);
     let liveness = HubLiveness { hub: hub.clone(), owner };

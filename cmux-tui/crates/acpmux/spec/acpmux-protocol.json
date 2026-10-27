@@ -199,6 +199,16 @@
     },
     {
       "kind": "request",
+      "name": "_acpmux/visibility",
+      "params": {
+        "$ref": "#/types/ViewParams"
+      },
+      "result": {
+        "$ref": "#/types/Done"
+      }
+    },
+    {
+      "kind": "request",
       "name": "_acpmux/markUnread",
       "params": {
         "$ref": "#/types/SessionRef"

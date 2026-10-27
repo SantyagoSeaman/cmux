@@ -9,7 +9,8 @@
 //! agent session id stay, so the next prompt resumes it (`session/load`).
 //!
 //! The same task ends a running turn whose model has said nothing for
-//! `stalledTurnEndMs` (`stalled_turn.rs`).
+//! `stalledTurnEndMs` (`stalled_turn.rs`), and stops the harness of a hidden
+//! session unused for `freezeAfterSeconds` (`freeze.rs`).
 //!
 //! One task per hub waits on the injected clock for the earliest deadline
 //! and on a wake signal for a new child; it never polls, so idle costs no
@@ -19,14 +20,29 @@
 use super::*;
 
 impl Hub {
+    /// Drive lifecycle timers from `clock` (tests pass a `ManualClock`).
+    pub fn set_clock(&self, clock: Arc<dyn crate::clock::Clock>) {
+        *self.clock.lock().unwrap() = clock;
+        self.idle_wake.notify_one();
+    }
+
+    /// How long an unused session harness lives; None keeps it forever.
+    pub fn set_idle_child(&self, idle: Option<std::time::Duration>) {
+        *self.idle_child.lock().unwrap() = idle;
+        self.idle_wake.notify_one();
+    }
+
     /// The hub clock's time, as stored in `Session::last_active`.
     pub(super) fn clock_now(&self) -> u64 {
         self.clock.lock().unwrap().now().as_nanos() as u64
     }
 
-    /// Something happened in `session`: its idle period starts again.
+    /// Something happened in `session`: its idle period starts again, and so
+    /// does its quiet period before a hidden harness stops (`freeze.rs`).
     pub(super) fn touch(&self, session: &Session) {
-        session.last_active.store(self.clock_now(), Ordering::Relaxed);
+        let now = self.clock_now();
+        session.last_active.store(now, Ordering::Relaxed);
+        session.used_at.store(now, Ordering::Relaxed);
     }
 
     /// Unused right now. A turn or permission an adopted host's recovery
@@ -34,17 +50,7 @@ impl Hub {
     /// `session.turn` (and holds `turn_lock` until the answer), registers
     /// the permission as pending, and moves the status off ready.
     fn idle_eligible(&self, session: &Session) -> bool {
-        !self.stopping.load(Ordering::SeqCst)
-            && session.attached.load(Ordering::SeqCst) == 0
-            && matches!(session.status(), SessionStatus::Ready | SessionStatus::Idle)
-            && session.turn().is_none()
-            && session.turn_lock.try_lock().is_ok()
-            && session.queued() == 0
-            && session.pending_permissions().is_empty()
-            && session.spawn_lock.try_lock().is_ok()
-            // A process still running in the background (a dev server, a
-            // watcher) ends with the harness: never reap it for idleness.
-            && !self.any_process_running(session)
+        session.attached.load(Ordering::SeqCst) == 0 && self.harness_quiet(session)
     }
 
     /// The daemon is stopping (`_acpmux/shutdown`, SIGTERM, then
@@ -69,12 +75,14 @@ impl Hub {
                 let Some(hub) = weak.upgrade() else { return };
                 let clock = hub.clock.lock().unwrap().clone();
                 // The same task ends stalled turns (`stalled_turn.rs`).
-                let stalled = hub.config.read().await.stalled_turn_end();
-                let stalled = stalled.and_then(|s| hub.next_stalled_deadline(s));
-                let next = match (hub.next_idle_deadline(), stalled) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
+                let (stalled, freeze) = {
+                    let cfg = hub.config.read().await;
+                    (cfg.stalled_turn_end(), hub.freeze_after(&cfg))
                 };
+                let stalled = stalled.and_then(|s| hub.next_stalled_deadline(s));
+                // The hidden harness freeze (`freeze.rs`) waits on the same task.
+                let freeze = freeze.and_then(|f| hub.next_freeze_deadline(f));
+                let next = [hub.next_idle_deadline(), stalled, freeze].into_iter().flatten().min();
                 (next, clock)
             };
             match next {
@@ -87,8 +95,15 @@ impl Hub {
                 None => wake.notified().await,
             }
             let Some(hub) = weak.upgrade() else { return };
-            if let Some(stalled) = hub.config.read().await.stalled_turn_end() {
+            let (stalled, freeze) = {
+                let cfg = hub.config.read().await;
+                (cfg.stalled_turn_end(), hub.freeze_after(&cfg))
+            };
+            if let Some(stalled) = stalled {
                 hub.settle_stalled_turns(stalled);
+            }
+            if let Some(freeze) = freeze {
+                hub.freeze_hidden_children(freeze).await;
             }
             hub.stop_idle_children().await;
         }
@@ -136,8 +151,9 @@ impl Hub {
                     self.end_unadopted_host(&session).await;
                 }
             } else {
-                // In use at its deadline: a full idle period starts now.
-                self.touch(&session);
+                // In use at its deadline: a full idle period starts now. Not
+                // a use: the freeze's `used_at` stays.
+                session.last_active.store(now, Ordering::Relaxed);
             }
         }
     }

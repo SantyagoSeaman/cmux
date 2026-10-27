@@ -16,6 +16,8 @@ use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 mod command;
+mod ticket;
+pub use ticket::WriteTicket;
 #[cfg(unix)]
 pub(crate) mod session_tmp;
 pub(crate) use command::{
@@ -64,56 +66,6 @@ pub enum Inbound {
 /// ticket its write is known by: an agent host entry is acknowledged only once
 /// its ticket is written ([`WriteTicket::written`]).
 pub type Tap = Arc<dyn Fn(Direction, &Message, Option<u64>) -> Option<WriteTicket> + Send + Sync>;
-
-/// When a tapped message's record, and every record of its session before it, is on disk: the
-/// session's last record when the tap returned, and the store's progress for that session
-/// (`store/log_writer.rs`; None for a store that writes before it returns).
-pub struct WriteTicket {
-    seq: u64,
-    progress: Option<tokio::sync::watch::Receiver<crate::store::Progress>>,
-}
-
-impl WriteTicket {
-    pub fn new(
-        seq: u64,
-        progress: Option<tokio::sync::watch::Receiver<crate::store::Progress>>,
-    ) -> Self {
-        Self { seq, progress }
-    }
-
-    /// A message that is stored as soon as it is handed over (a test's or a probe's tap).
-    pub fn done() -> Self {
-        Self { seq: 0, progress: None }
-    }
-
-    /// The ticket that covers both: the one that waits on the store for the later record.
-    fn later(self, other: Self) -> Self {
-        match (&self.progress, &other.progress) {
-            (None, _) => other,
-            (Some(_), None) => self,
-            (Some(_), Some(_)) if other.seq >= self.seq => other,
-            _ => self,
-        }
-    }
-
-    /// Waits until the ticket's records are on disk. False when its log failed, or the store
-    /// ended first: the entry is then never acknowledged, and the host keeps it.
-    pub async fn written(self) -> bool {
-        let Some(mut rx) = self.progress else { return true };
-        loop {
-            let p = *rx.borrow_and_update();
-            if p.failed {
-                return false;
-            }
-            if p.covers(self.seq) {
-                return true;
-            }
-            if rx.changed().await.is_err() {
-                return false;
-            }
-        }
-    }
-}
 
 /// Tap methods for an agent host's stderr and exit entries, so they are
 /// logged in entry order before the entry is acknowledged.
@@ -217,6 +169,8 @@ pub struct ChildAgent {
     /// The question preview format its command was pinned to, for a direct
     /// start (a host's is recorded where the host starts, `hub/hosts.rs`).
     pub preview_format: Option<crate::hub::questions::PreviewFormat>,
+    /// Every write passes it: a stopped harness continues first (`hub/freeze.rs`).
+    pub(crate) gate: Arc<crate::hub::freeze::HarnessGate>,
     /// Windows: the agent's job (its process group on Unix).
     #[cfg(windows)]
     job: Option<crate::job::Job>,
@@ -318,6 +272,7 @@ impl ChildAgent {
             hosted: None,
             all_tools: std::sync::atomic::AtomicBool::new(false),
             preview_format,
+            gate: Default::default(),
             #[cfg(windows)]
             job,
         });
@@ -542,6 +497,7 @@ impl ChildAgent {
     }
 
     pub async fn kill(&self) {
+        self.gate.thaw(); // A stopped harness takes SIGTERM only once it runs.
         if self.hosted.is_some() {
             self.terminate(KILL_GRACE).await;
             return;
@@ -588,6 +544,7 @@ impl ChildAgent {
     /// to `grace` for it to exit, then SIGKILL the group (stragglers
     /// included). Never waits on a lock or a pipe without a deadline.
     pub async fn terminate(&self, grace: std::time::Duration) {
+        self.gate.thaw();
         if let Some(h) = &self.hosted {
             if h.exited.load(Ordering::SeqCst) || h.link().is_closed() {
                 return;
@@ -668,6 +625,7 @@ impl ChildAgent {
     }
 
     async fn write(&self, msg: &Message) -> Result<()> {
+        let _writing = self.gate.writing(); // Continued first, not stopped meanwhile.
         if let Some(h) = &self.hosted {
             // The host writes it and logs it back as an `out` entry.
             return h.link().line(msg.to_value()).await;
@@ -923,6 +881,7 @@ impl ChildAgent {
     /// Leave a hosted agent running and let go of it (daemon shutdown or
     /// upgrade). A direct child cannot outlive acpmux and is terminated.
     pub async fn detach(&self, grace: std::time::Duration) {
+        self.gate.thaw(); // A hosted harness outlives this controller: never stopped.
         match &self.hosted {
             Some(h) => {
                 h.detached.store(true, Ordering::SeqCst);
@@ -952,6 +911,8 @@ impl ChildAgent {
             };
         let (agent, responses) =
             Self::from_link(name, link, &adopted, resume_after, awaiting, inbound, tap);
+        // A daemon that crashed may have left the harness stopped (`hub/freeze.rs`).
+        crate::hub::freeze::resume_adopted(&agent);
         Ok(Attached::Ready(agent, adopted, responses))
     }
 
@@ -1000,6 +961,7 @@ impl ChildAgent {
             }),
             all_tools: std::sync::atomic::AtomicBool::new(false),
             preview_format: None,
+            gate: Default::default(),
             #[cfg(windows)]
             job: None,
         });

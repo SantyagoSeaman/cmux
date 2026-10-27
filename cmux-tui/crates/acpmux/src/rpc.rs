@@ -243,6 +243,8 @@ pub mod method {
     pub const MUX_PRESETS: &str = "_acpmux/presets";
     pub const MUX_ATTACH: &str = "_acpmux/attach";
     pub const MUX_VIEW: &str = "_acpmux/view";
+    /// Whether the pane holding an attached chat shows (`server/visibility.rs`).
+    pub const MUX_VISIBILITY: &str = "_acpmux/visibility";
     pub const MUX_MARK_UNREAD: &str = "_acpmux/markUnread";
     pub const MUX_DETACH: &str = "_acpmux/detach";
     pub const MUX_WATCH: &str = "_acpmux/watch";

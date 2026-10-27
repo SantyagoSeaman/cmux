@@ -3047,8 +3047,10 @@ def build_stress(app, static=False):
 FAKE_AGENT = os.path.join(HERE, "..", "..", "cmux-tui", "crates", "acpmux", "tests", "fake_agent.py")
 AGENT_HARNESS_ID = "idle-budget-agent"
 # p14-energy-117 freezes the harness of an idle hidden session this long after it hides (freezeAfterSeconds); agent-idle
-# settles past it (FREEZE_GRACE_S more), so its rows are the frozen state D14 judges once 117 lands.
+# settles past it (FREEZE_GRACE_S more), so its rows are the frozen state D14 judges. The freeze is behind the
+# default-off `hiddenHarnessFreeze` feature (schemas/features/features.d), which the app's acpmux reads from its env.
 HARNESS_FREEZE_S = 300
+HARNESS_FREEZE_ENV = {"CMUX_ENABLE_FEATURES": "hiddenHarnessFreeze"}
 # The pooled entry outlives the settle and the window (acpmux's default pool.idleMinutes is 10).
 POOL_IDLE_MINUTES = 60
 # How long acpmux, an agent page, a chat start or a turn may take to answer while the session is built.
@@ -3489,7 +3491,7 @@ SESSIONS = {
     CHROME_SESSION: {"chrome": True, "tabs": TABS_STATIC, "settle_min": FREEZE_HIDDEN_TABS_S + FREEZE_GRACE_S},
     POWER_SESSION: {"tabs": ONE_TAB, "power": True, "settle_min": POWER_SETTLE_S},
     CHROME_POWER_SESSION: {"chrome": True, "tabs": ONE_TAB, "power": True, "settle_min": POWER_SETTLE_S},
-    "agent-idle": {"agents": {"visible": True, "hidden": True, "pool": 1},
+    "agent-idle": {"agents": {"visible": True, "hidden": True, "pool": 1}, "env": HARNESS_FREEZE_ENV,
                    "settle_min": HARNESS_FREEZE_S + FREEZE_GRACE_S, "shown": True},
     "agent-working-visible": {"agents": {"visible": True, "working": True, "engine": "cef"}, "shown": True},
     "busy-hidden": {"busy_terminal": BUSY_PERIOD_S, "shown": True},

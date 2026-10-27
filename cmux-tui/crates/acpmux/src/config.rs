@@ -574,35 +574,6 @@ pub fn turn_cut(name: &str, profile: &HarnessProfile) -> Option<TurnCut> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum StoreMode {
-    Memory,
-    #[default]
-    Local,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct StoreConfig {
-    #[serde(default)]
-    pub mode: StoreMode,
-    /// Segment roll size in bytes for the event log.
-    #[serde(default = "default_segment_bytes")]
-    pub segment_bytes: u64,
-}
-
-fn default_segment_bytes() -> u64 {
-    8 * 1024 * 1024
-}
-
-impl Default for StoreConfig {
-    fn default() -> Self {
-        Self { mode: StoreMode::Local, segment_bytes: default_segment_bytes() }
-    }
-}
-
 /// Permission policy applied when no attached client answers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -836,6 +807,10 @@ pub struct Config {
     /// gone or not busy. Default 21600000 (6 h); 0 turns it off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_turn_end_ms: Option<u64>,
+    /// `freezeAfterSeconds`: how long a hidden attached session goes unused before its harness
+    /// stops until something is sent to it (`hub/freeze.rs`). Default 300 (30 in Energy Saver).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze_after_seconds: Option<u64>,
     /// `autoResumeDelaysMs`: the wait before each automatic continuation of a turn a
     /// connection error cut off (`hub/auto_resume.rs`), one entry per attempt. Default
     /// `[10000, 60000, 300000, 1200000]`; `[]` turns it off. Checked on load: at most 4
@@ -1331,6 +1306,8 @@ mod peer;
 pub use peer::PeerConfig;
 mod pool;
 pub use pool::PoolConfig;
+mod store;
+pub use store::{StoreConfig, StoreMode};
 mod btw;
 pub use btw::BtwConfig;
 pub mod folder_profiles;

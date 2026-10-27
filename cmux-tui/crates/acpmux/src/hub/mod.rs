@@ -28,6 +28,7 @@ pub use file_uploads::FEATURE as FILE_PUT_FEATURE;
 mod fork;
 mod fork_at;
 pub mod forum;
+pub mod freeze;
 mod handoff;
 mod harness_view;
 mod harness_watch;
@@ -408,6 +409,8 @@ pub struct Hub {
     pub(super) idle_pass: Mutex<()>,
     /// Hidden pre-created sessions for instant harness switches (`pool/`).
     pub(super) pool: Arc<pool::PoolState>,
+    /// Stopped harnesses of hidden idle sessions (`freeze.rs`).
+    pub(super) freeze: freeze::FreezeState,
     /// The merged asking-mode table for Web connections (`web_control.rs`).
     pub(super) web_modes: StdMutex<web_control::WebModeCache>,
     /// Where the folder-trust gate reads (`server/trust_gate.rs`); None: no gate.
@@ -536,6 +539,7 @@ impl Hub {
             stopping: AtomicBool::new(false),
             idle_pass: Mutex::new(()),
             pool: Arc::new(pool::PoolState::new()),
+            freeze: Default::default(),
             web_modes: StdMutex::new(Default::default()),
             trust_gate: StdMutex::new(None),
             remote_sandbox_exec: StdMutex::new(PathBuf::from(remote_sandbox::SANDBOX_EXEC)),
@@ -583,23 +587,12 @@ impl Hub {
             hub.watch_transfers();
             hub.watch_titles();
             hub.watch_orphans();
+            hub.watch_energy();
             for (name, pc) in peers_cfg {
                 hub.start_peer(&name, &pc);
             }
         }
         hub
-    }
-
-    /// Drive lifecycle timers from `clock` (tests pass a `ManualClock`).
-    pub fn set_clock(&self, clock: Arc<dyn crate::clock::Clock>) {
-        *self.clock.lock().unwrap() = clock;
-        self.idle_wake.notify_one();
-    }
-
-    /// How long an unused session harness lives; None keeps it forever.
-    pub fn set_idle_child(&self, idle: Option<std::time::Duration>) {
-        *self.idle_child.lock().unwrap() = idle;
-        self.idle_wake.notify_one();
     }
 
     /// Turns on the folder-trust gate for the app's agent pane, reading the agents' files and
@@ -829,6 +822,7 @@ impl Hub {
             last_model_at: AtomicU64::new(0),
             silent_turn: StdMutex::new(None),
             last_active: AtomicU64::new(self.clock_now()),
+            used_at: AtomicU64::new(self.clock_now()),
             web_control_ended: AtomicBool::new(false),
             floor: Default::default(),
             subagents: StdMutex::new(Default::default()),

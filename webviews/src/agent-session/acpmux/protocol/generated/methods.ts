@@ -27,6 +27,7 @@ export interface AcpmuxRequests {
   "_acpmux/attach": { params: AttachParams; result: AttachResult };
   "_acpmux/detach": { params: SessionRef; result: Done };
   "_acpmux/view": { params: ViewParams; result: Done };
+  "_acpmux/visibility": { params: ViewParams; result: Done };
   "_acpmux/markUnread": { params: SessionRef; result: Done };
   "_acpmux/watch": { params: WatchParams; result: SessionsResult };
   "_acpmux/rename": { params: unknown; result: unknown };
@@ -262,6 +263,7 @@ export const ACPMUX_METHODS: ReadonlyArray<{ name: string; kind: AcpmuxMethodKin
   { name: "_acpmux/attach", kind: "request", acp: false, typed: true },
   { name: "_acpmux/detach", kind: "request", acp: false, typed: true },
   { name: "_acpmux/view", kind: "request", acp: false, typed: true },
+  { name: "_acpmux/visibility", kind: "request", acp: false, typed: true },
   { name: "_acpmux/markUnread", kind: "request", acp: false, typed: true },
   { name: "_acpmux/watch", kind: "request", acp: false, typed: true },
   { name: "_acpmux/rename", kind: "request", acp: false, typed: false },

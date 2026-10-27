@@ -1992,8 +1992,10 @@ class D8BenchTests(unittest.TestCase):
     def test_the_energy_saver_session_launches_with_the_feature_on(self):
         base = {"CMUX_NEXT_ISOLATED_LAUNCH": "1"}
         self.assertEqual(ib.session_env("energy-saver", base), {**base, "CMUX_ENABLE_FEATURES": "energySaver"})
+        # agent-idle turns on the hidden harness freeze (p14-energy-117); every other session adds nothing.
+        self.assertEqual(ib.session_env("agent-idle", base), {**base, **ib.HARNESS_FREEZE_ENV})
         for session in ib.SESSIONS:
-            if session != "energy-saver":
+            if session not in ("energy-saver", "agent-idle"):
                 self.assertEqual(ib.session_env(session, base), base, session)
 
     def test_dry_run_prints_both_surfaces_with_the_saver_on_and_off(self):
@@ -3332,17 +3334,17 @@ class AgentSessionTests(unittest.TestCase):
         budget = ib.load_budget(ib.BUDGET_FILE)
         idle = {"app": {"wakeups_per_s": 0.4}, "daemon": {"wakeups_per_s": 0.2}, "acpmux": {"wakeups_per_s": 0.3},
                 "agent-harness": {"wakeups_per_s": 9.0, "hidden_wakeups_max": 4.0}}
-        # The hidden harness is reported, not judged, until p14-energy-117 freezes it.
-        self.assertEqual(ib.over_budget("agent-idle", idle, budget), [])
-        self.assertIsNone(ib.limit_for(budget, "agent-idle", "agent-harness", "hidden_wakeups_max"))
-        # ... and the gap shows: an IDLE-BUDGET-NOT-JUDGED note with the value and the task that turns it on.
-        notes = ib.deferred_notes("agent-idle", idle, budget)
-        self.assertEqual(len(notes), 1)
-        self.assertTrue(notes[0].startswith("agent-idle agent-harness hidden_wakeups_max: not judged: 4.0 measured;"))
-        self.assertIn("p14-energy-117", notes[0])
-        self.assertIn("not measured", ib.deferred_notes("agent-idle", {}, budget)[0])
+        # p14-energy-117 stops the hidden chat's idle harness: any wakeup of it is an over, judged with no note.
+        self.assertEqual(ib.limit_for(budget, "agent-idle", "agent-harness", "hidden_wakeups_max"), 0)
+        self.assertEqual(ib.over_budget("agent-idle", idle, budget),
+                         [("agent-harness", "hidden_wakeups_max", 4.0, 0)])
+        frozen = {**idle, "agent-harness": {"wakeups_per_s": 9.0, "hidden_wakeups_max": 0.0}}
+        self.assertEqual(ib.over_budget("agent-idle", frozen, budget), [])
+        self.assertEqual(ib.deferred_notes("agent-idle", idle, budget), [])
         self.assertEqual(ib.deferred_notes("stress-static", {}, budget), [])  # a null with no reason stays quiet
-        loud ={**idle, "acpmux": {"wakeups_per_s": 0.6}}
+        # The session's acpmux runs with the freeze's feature on.
+        self.assertEqual(ib.session_env("agent-idle", {})["CMUX_ENABLE_FEATURES"], "hiddenHarnessFreeze")
+        loud ={**frozen, "acpmux": {"wakeups_per_s": 0.6}}
         self.assertIn(("app+daemon+acpmux", "wakeups_per_s", 1.2, 1.0), ib.over_budget("agent-idle", loud, budget))
         working = {"app": {"wakeups_per_s": 20.0}, "cef-renderer": {"wakeups_per_s": 10.0},
                    "cef-gpu": {"wakeups_per_s": 6.0}, "daemon": {"wakeups_per_s": 50.0}}
@@ -3717,7 +3719,7 @@ class SessionWiringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out:
             app, agents = ib.session_app(self.App, "/A.app", out, "agent-idle", {"CMUX_X": "1"})
             self.assertIsInstance(agents, ib.AgentHome)
-            self.assertEqual(app.env, {"CMUX_X": "1", **agents.env()})
+            self.assertEqual(app.env, {"CMUX_X": "1", **ib.HARNESS_FREEZE_ENV, **agents.env()})
             self.assertEqual(agents.folder, os.path.join(out, "agent-idle"))
             self.assertEqual(app.out, out)  # result-v1 files: the lab reads --out only
             self.assertEqual(app.log_name, os.path.join("agent-idle", "app.log"))

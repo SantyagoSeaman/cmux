@@ -151,6 +151,9 @@ pub struct Session {
     /// The hub clock's time (`Hub::clock_now`) of the last record or
     /// attach change; the idle harness exit counts from it (`idle.rs`).
     pub(super) last_active: AtomicU64,
+    /// The same time, which only use moves (`Hub::touch`), never the idle
+    /// reaper's re-arm: the hidden harness freeze counts from it (`freeze.rs`).
+    pub(super) used_at: AtomicU64,
     /// Web control ended: the mode left the asking table (`web_control.rs`).
     pub(super) web_control_ended: AtomicBool,
     /// The remote floor's per-session marks (`remote_floor.rs`).

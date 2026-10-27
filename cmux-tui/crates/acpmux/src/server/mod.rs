@@ -28,17 +28,7 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 #[cfg(windows)]
 pub use windows_socket::{UnixListener, bind_unix, router_admin, serve_unix};
 
-/// How one connection receives one attached session's live records.
-#[derive(Debug, Clone, Default)]
-pub struct SubOpts {
-    /// Every record arrives as `_acpmux/event` (agent notifications nested
-    /// in `msg`) instead of `session/update` plus `_acpmux/event`.
-    pub event_stream: bool,
-    /// With `event_stream`, only records this filter passes are sent.
-    pub filter: EventFilter,
-    /// Attached without showing the chat (`view.rs`).
-    pub hidden: bool,
-}
+pub use view::SubOpts;
 
 pub struct Conn {
     pub id: String,
@@ -1463,6 +1453,7 @@ mod stream;
 mod subsessions;
 pub(crate) mod trust_gate;
 mod view;
+mod visibility;
 mod wait;
 #[cfg(windows)]
 mod windows_socket;
