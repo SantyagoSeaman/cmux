@@ -236,8 +236,10 @@ let daemonSwiftSettings: [SwiftSetting] = [
 ///   `presented_userdata`. CmuxNextTerminal reads, hides and purges frames through the first two
 ///   (`GhosttyFrameSource`), reads no layer contents, and takes each presented frame as its contents mark
 ///   (`ghosttySurfacePresented`, p03-rendering-081).
-/// - GHOSTTY_CURSOR_BLINK_LAYER: `void ghostty_app_set_cursor_blink_layer(ghostty_app_t, bool)` (ghostty-next
-///   cp/p14-energy-068 1793719b9, not in 723c4ab93): `GhosttyCursorBlinkLayer`, so `terminalCursorBlinkLayer`.
+/// - GHOSTTY_CURSOR_BLINK_LAYER: `void ghostty_app_set_cursor_blink_layer(ghostty_app_t, bool)` and the
+///   `thread_wakes` and `cursor_blink_ticks` fields of `ghostty_surface_render_counters_s` (ghostty-next
+///   cp/p14-energy-068 1133b5abf, pull request 61, not in 723c4ab93): `GhosttyCursorBlinkLayer`, so
+///   `terminalCursorBlinkLayer`, and `TerminalRenderCounters.rendererWakes`. Pin bump: task p14-energy-068a.
 let ghosttyNextKitHasGPUResident = false
 let ghosttyNextKitHasEnergySaver = false
 let ghosttyNextKitHasRendererFrames = false

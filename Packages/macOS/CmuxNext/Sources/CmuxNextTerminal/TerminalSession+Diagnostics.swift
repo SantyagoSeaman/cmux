@@ -117,16 +117,21 @@ extension TerminalSession {
             renderCounters: unsafe surface.surface.map { surface in
                 // SAFETY: the view's live surface (TerminalSurfaceView.surface).
                 let counters = unsafe ghostty_surface_render_counters(surface)
-                return TerminalRenderCounters(frames: counters.frames, cellRebuilds: counters.cell_rebuilds,
-                                              blendFrames: counters.blend_frames, frameUpdates: counters.frame_updates,
-                                              fullPalette: counters.full_palette, fullConfig: counters.full_config,
-                                              fullFont: counters.full_font, fullOther: counters.full_other,
-                                              fullSwap: counters.full_swap, fullResize: counters.full_resize,
-                                              hostDisplayPasses: counters.host_display_passes,
-                                              hostPresentCalls: counters.host_present_calls,
-                                              hostMainDraws: counters.host_main_draws,
-                                              hostFreshPresents: counters.host_fresh_presents,
-                                              hostLatePresents: counters.host_late_presents)
+                var result = TerminalRenderCounters(frames: counters.frames, cellRebuilds: counters.cell_rebuilds,
+                                                    blendFrames: counters.blend_frames, frameUpdates: counters.frame_updates,
+                                                    fullPalette: counters.full_palette, fullConfig: counters.full_config,
+                                                    fullFont: counters.full_font, fullOther: counters.full_other,
+                                                    fullSwap: counters.full_swap, fullResize: counters.full_resize,
+                                                    hostDisplayPasses: counters.host_display_passes,
+                                                    hostPresentCalls: counters.host_present_calls,
+                                                    hostMainDraws: counters.host_main_draws,
+                                                    hostFreshPresents: counters.host_fresh_presents,
+                                                    hostLatePresents: counters.host_late_presents)
+                #if GHOSTTY_CURSOR_BLINK_LAYER
+                result.rendererWakes = counters.thread_wakes
+                result.cursorBlinkTicks = counters.cursor_blink_ticks
+                #endif
+                return result
             },
             windowFraction: surface.window.flatMap { window in
                 let frame = window.frame
@@ -169,12 +174,19 @@ public struct TerminalRenderCounters: Sendable, Equatable {
     public var hostMainDraws: UInt64 = 0
     public var hostFreshPresents: UInt64 = 0
     public var hostLatePresents: UInt64 = 0
+    /// Renderer thread wakes (a mailbox wakeup, a draw-now, an animation, blink or compression timer) and,
+    /// of them, cursor blink ticks. Nil for a GhosttyNextKit without them (`GHOSTTY_CURSOR_BLINK_LAYER`).
+    public var rendererWakes: UInt64?
+    public var cursorBlinkTicks: UInt64?
 
     /// Every counter by its `debug.surfaces` name.
     public var byName: [String: UInt64] {
-        ["frames": frames, "cell_rebuilds": cellRebuilds, "blend_frames": blendFrames, "frame_updates": frameUpdates,
-         "full_palette": fullPalette, "full_config": fullConfig, "full_font": fullFont, "full_other": fullOther,
-         "full_swap": fullSwap, "full_resize": fullResize, "host_display_passes": hostDisplayPasses, "host_present_calls": hostPresentCalls, "host_main_draws": hostMainDraws,
-         "host_fresh_presents": hostFreshPresents, "host_late_presents": hostLatePresents]
+        var names = ["frames": frames, "cell_rebuilds": cellRebuilds, "blend_frames": blendFrames, "frame_updates": frameUpdates,
+                     "full_palette": fullPalette, "full_config": fullConfig, "full_font": fullFont, "full_other": fullOther,
+                     "full_swap": fullSwap, "full_resize": fullResize, "host_display_passes": hostDisplayPasses, "host_present_calls": hostPresentCalls, "host_main_draws": hostMainDraws,
+                     "host_fresh_presents": hostFreshPresents, "host_late_presents": hostLatePresents]
+        if let rendererWakes { names["renderer_wakes"] = rendererWakes }
+        if let cursorBlinkTicks { names["cursor_blink_ticks"] = cursorBlinkTicks }
+        return names
     }
 }

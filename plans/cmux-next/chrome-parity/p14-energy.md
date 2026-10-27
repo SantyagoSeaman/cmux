@@ -614,6 +614,7 @@ repositories.
 | 067e | Q2 CMUXMobileCore | S | 005 | Q2 |
 | 067f | Q2 VNC, ScreenKit, InstallAuthCore, MessagesLab rest | S | 005, 050, 051, 052, 053 | Q2 |
 | 068 | Ghostty cursor blink on the render server | L | - | ghostty-next |
+| 068a | ghostty-next pin bump for ghostty_app_set_cursor_blink_layer | S | 068 | none |
 | 069 | Ghostty blink timeout fallback behind a setting | S | - | ghostty-next |
 | 070 | acpmux: owner lands pl-acpmux-audit; remove the 1 s wait poll | S | 010 | Q4 |
 | 071 | acpmux pool RSS cap without ps | S | 020, 070 | Q4 |
@@ -1919,6 +1920,23 @@ then `idle-budget tabs-static --gate`) gives the measured values and adds a slot
   case red before, green after.
 - Test phase: ghostty-next CI; `swift test --filter TerminalIdleCursorFrameTests`; light with a focused terminal.
 - Size L. Queue ghostty-next.
+
+#### p14-energy-068a ghostty-next pin bump for ghostty_app_set_cursor_blink_layer
+- Files: `ghostty-next` gitlink, `Packages/Shared/CmuxGhosttyKit/Package.swift` (URL and checksum),
+  `Packages/macOS/CmuxNext/Package.swift` (`ghosttyNextKitHasCursorBlinkLayer`).
+- Change: 068 lands its libghostty side as ghostty-next pull request 61 (branch `cp/p14-energy-068`,
+  1133b5abf) and its cmux side with `GHOSTTY_CURSOR_BLINK_LAYER` off, so its layer cases of
+  TerminalIdleCursorFrameTests are skipped (`GhosttyCursorBlinkLayer.isAvailable`). After pull request 61
+  merges and a GhosttyNextKit release of that commit is published, one commit moves the gitlink and the pin
+  to it and sets `ghosttyNextKitHasCursorBlinkLayer = true` (cmux-ghostty skill: commit on main first).
+- Acceptance: gitlink and pin name the same commit, reachable from ghostty-next main; the pinned ghostty.h
+  declares `ghostty_app_set_cursor_blink_layer` and the `thread_wakes` and `cursor_blink_ticks` render
+  counters; the two layer cases run and pass: 0 renderer wakes, 0 blink ticks and 0 frames over 10 s for a
+  focused idle blinking cursor with the layer on, while the control (the same terminal, layer off) is red
+  (blink ticks wake the renderer and update frames); after a resize the cursor sublayer covers the cursor cell.
+- Test phase: fleet `cmux-ci build cmux --ref SHA`; `cmux-ci swift test --filter TerminalIdleCursorFrameTests`;
+  light with a focused terminal and `terminalCursorBlinkLayer` on (D2).
+- Size S. Depends: 068.
 
 #### p14-energy-069 Ghostty blink timeout fallback behind a setting
 - Files: `ghostty-next:src/renderer/Thread.zig`, `Packages/macOS/CmuxNext/Sources/CmuxNextSettings/**`,

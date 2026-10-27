@@ -18,13 +18,24 @@ public struct GhosttyCursorBlinkLayer {
         self.runtime = runtime
     }
 
+    /// Whether the pinned GhosttyNextKit has the switch (`GHOSTTY_CURSOR_BLINK_LAYER`): false until the pin
+    /// bump that brings it (task p14-energy-068a).
+    public nonisolated static var isAvailable: Bool {
+        #if GHOSTTY_CURSOR_BLINK_LAYER
+        return true
+        #else
+        return false
+        #endif
+    }
+
     /// Turns the layer blink on or off for every surface, current and future. Returns whether libghostty
     /// took it: false before the app starts, or for a pin without the switch.
     @discardableResult
     public func set(_ enabled: Bool) -> Bool {
         #if GHOSTTY_CURSOR_BLINK_LAYER
         guard let app = runtime.app else { return false }
-        ghostty_app_set_cursor_blink_layer(app, enabled)
+        // SAFETY: `app` is the runtime's live app (never freed).
+        unsafe ghostty_app_set_cursor_blink_layer(app, enabled)
         return true
         #else
         return false
