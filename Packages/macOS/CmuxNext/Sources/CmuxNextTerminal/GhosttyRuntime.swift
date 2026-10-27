@@ -40,6 +40,10 @@ public final class GhosttyRuntime {
     /// `background-opacity` from the user's config with cmux.json's
     /// `appearance.backgroundOpacity` over it (not the surface override).
     var configuredBackgroundOpacity: Double = 1
+    /// cmux.json's cursor blink timeout in seconds, written after the user's files as
+    /// `cursor-style-blink-timeout` (``cursorBlinkTimeoutLines(_:)``); nil keeps the config's. Set, then call
+    /// ``reloadConfig()``.
+    public var cursorBlinkTimeout: Double?
 
     /// The user's config with one theme applied, per theme name, built on
     /// demand (`themeConfig(named:)`) and rebuilt on every config change.
@@ -217,7 +221,7 @@ public final class GhosttyRuntime {
         config = unsafe fresh
         hostKeybindCache.binds = nil
         // Themed configs were built on the old files: each keeps serving until its rebuild lands.
-        themeConfigs.invalidate(loader: configLoader) { GhosttyConfigInputs.current(theme: $0) }
+        themeConfigs.invalidate(loader: configLoader) { GhosttyConfigInputs.current(theme: $0, cursorBlinkTimeout: cursorBlinkTimeout) }
         onConfigChange?()
         configRevision.bump()
         for handler in configChangeHandlers { handler() }

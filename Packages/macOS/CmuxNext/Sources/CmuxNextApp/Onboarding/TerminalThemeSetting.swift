@@ -29,6 +29,9 @@ final class TerminalThemeSetting {
         /// `appearance.surfaces.terminal` is set: surfaces draw a
         /// transparent default background (`GhosttyRuntimeSurfacePolicy`).
         var terminalOverridden = false
+        /// `terminal.cursorBlinkTimeout` in seconds while the `terminalCursorBlinkTimeout` feature
+        /// is on; nil (feature off) keeps Ghostty's, a blink that never stops.
+        var cursorBlinkTimeout: Double?
 
         init(theme: String?, font: GhosttyRuntime.FontOverride, background: WindowBackgroundOverride, terminalOverridden: Bool = false) {
             (self.theme, self.font, self.background, self.terminalOverridden) = (theme, font, background, terminalOverridden)
@@ -36,12 +39,13 @@ final class TerminalThemeSetting {
 
         /// Parsed and validated in `CmuxConfigSnapshot` (a bad value is a
         /// diagnostic and keeps the Ghostty config's).
-        init(_ snapshot: CmuxConfigSnapshot) {
+        init(_ snapshot: CmuxConfigSnapshot, cursorBlinkTimeout: Bool) {
             self.init(theme: snapshot.appTheme,
                       font: GhosttyRuntime.FontOverride(family: snapshot.terminalFontFamily, size: snapshot.terminalFontSize),
                       background: ReducedBackgroundsSetting.drawn(snapshot.windowBackground, reduced: snapshot.reducedBackgrounds),
                       terminalOverridden: snapshot.surfaceBackgrounds.overridesTerminal)
             edits = snapshot.themeEdits
+            self.cursorBlinkTimeout = cursorBlinkTimeout ? snapshot.terminalCursorBlinkTimeout : nil
         }
     }
 
@@ -51,6 +55,8 @@ final class TerminalThemeSetting {
 
     private let backdropScope: ThemeScope
     private let mainWork: MainWorkScheduler
+    /// The `terminalCursorBlinkTimeout` feature: `terminal.cursorBlinkTimeout` reaches Ghostty.
+    private let followsCursorBlinkTimeout: Bool
     /// Where it hears of a day, time zone or clock change (the app's one observer per notice; tests post to their own).
     private let appEvents: AppEvents
     /// Where it hears the Mac wake (`NSWorkspace`'s notices; tests post to their own).
@@ -62,8 +68,11 @@ final class TerminalThemeSetting {
     ///     picture are deadlines on it, and a settings change applies as one `visible` task on its scheduler.
     ///   - appEvents: The app's one observer per app notice (`AppServices.appEvents`).
     ///   - workspaceEvents: The app's one observer per `NSWorkspace` notice (`AppServices.workspaceEvents`).
-    init(backdropScope: ThemeScope, deadlines: MainDeadlineScheduler, appEvents: AppEvents, workspaceEvents: AppEvents) {
+    ///   - cursorBlinkTimeout: The `terminalCursorBlinkTimeout` feature: the blink timeout setting reaches Ghostty.
+    init(backdropScope: ThemeScope, deadlines: MainDeadlineScheduler, appEvents: AppEvents, workspaceEvents: AppEvents,
+         cursorBlinkTimeout: Bool = false) {
         self.backdropScope = backdropScope
+        followsCursorBlinkTimeout = cursorBlinkTimeout
         self.appEvents = appEvents
         self.workspaceEvents = workspaceEvents
         mainWork = deadlines.work
@@ -159,7 +168,7 @@ final class TerminalThemeSetting {
         backdropScope.setSurfaceBackgrounds(followed.snapshot.surfaceBackgrounds)
         // Over a picture the Opacity the user set is the window's tint (unset: the work's own).
         backdropScope.setWindowBackdropTint(followed.reduced ? nil : followed.background.opacity)
-        var state = State(followed.snapshot)
+        var state = State(followed.snapshot, cursorBlinkTimeout: followsCursorBlinkTimeout)
         state.theme = followed.theme
         state.edits = followed.edits
         state.background = ReducedBackgroundsSetting.drawn(followed.background, reduced: followed.reduced)
@@ -175,8 +184,9 @@ final class TerminalThemeSetting {
 
     /// Puts `snapshot`'s appearance on the Ghostty overrides before the
     /// runtime starts, so its first config load already has them.
-    static func prime(_ snapshot: CmuxConfigSnapshot) {
-        let state = State(snapshot)
+    /// `cursorBlinkTimeout` is the `terminalCursorBlinkTimeout` feature.
+    static func prime(_ snapshot: CmuxConfigSnapshot, cursorBlinkTimeout: Bool = false) {
+        let state = State(snapshot, cursorBlinkTimeout: cursorBlinkTimeout)
         primed = state
         set(state)
     }
@@ -226,6 +236,7 @@ final class TerminalThemeSetting {
         GhosttyRuntime.themeOverride = state.theme
         GhosttyRuntime.themeEdits = state.edits
         GhosttyRuntime.fontOverride = state.font
+        GhosttyRuntime.shared.cursorBlinkTimeout = state.cursorBlinkTimeout
         let family = state.font.family?.trimmingCharacters(in: .whitespaces) ?? ""
         DesignSettings.shared.terminalFontFamily = family.isEmpty ? nil : family
         GhosttyRuntime.backgroundOverride = state.background

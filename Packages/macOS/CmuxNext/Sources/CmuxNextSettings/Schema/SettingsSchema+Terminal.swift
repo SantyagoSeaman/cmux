@@ -1,13 +1,16 @@
 /// One group of `SettingsSchema` rows (its own type: the schema type's line budget is per type).
 nonisolated enum TerminalSettingsSchema {
     /// `terminal.fontFamily` and `terminal.fontSize` (Ghostty overrides,
-    /// `TerminalFontSetting`), `terminal.linkOpener.*` (`TerminalLinkOpener`) and
-    /// `terminal.predictiveEcho` (`TerminalPredictiveEchoSetting`).
+    /// `TerminalFontSetting`), `terminal.linkOpener.*` (`TerminalLinkOpener`),
+    /// `terminal.predictiveEcho` (`TerminalPredictiveEchoSetting`) and
+    /// `terminal.cursorBlinkTimeout` (`TerminalCursorBlinkTimeoutSetting`).
     static var descriptors: [SettingDescriptor] {
         let font = SettingsText.keyed("settings.group.terminalFont", "Font")
         let ghostty = SettingsText.keyed("settings.source.ghostty", "Ghostty")
         let links = SettingsText.keyed("settings.group.openingLinks", "Opening Links")
         let typing = SettingsText.keyed("settings.group.terminalTyping", "Typing")
+        let cursor = SettingsText.keyed("settings.group.terminalCursor", "Cursor")
+        let blinkTimeout = TerminalCursorBlinkTimeoutSetting()
         return [
             SettingDescriptor(
                 TerminalFontSetting().familyPath, section: .terminal, group: font,
@@ -54,6 +57,15 @@ nonisolated enum TerminalSettingsSchema {
                 default: .string(TerminalPredictiveEchoSetting.fallback.rawValue),
                 keywords: ["predictive", "echo", "local echo", "mosh", "latency", "lag", "ssh", "remote", "typing"]
             ),
+            SettingDescriptor(
+                blinkTimeout.path, section: .terminal, group: cursor,
+                title: SettingsText.keyed("settings.terminal.cursorBlinkTimeout", "Stop Cursor Blink After"),
+                help: SettingsText.keyed("settings.terminal.cursorBlinkTimeout.help",
+                                         "Seconds a blinking cursor blinks with no typing or output before it stops and stays shown, so a terminal at rest draws nothing. Typing, output or focus starts the blink again. 0 never stops it."),
+                kind: .number(SettingNumber(blinkTimeout.range, step: 1, unit: .seconds)),
+                default: .number(blinkTimeout.fallback),
+                keywords: ["cursor", "blink", "blinking", "caret", "timeout", "energy", "battery", "idle", "cursor-style-blink", "ghostty"]
+            ).hiddenFromSettingsPage("applies only behind the default-off terminalCursorBlinkTimeout feature with a GhosttyNextKit that reads cursor-style-blink-timeout"),
         ]
     }
 }

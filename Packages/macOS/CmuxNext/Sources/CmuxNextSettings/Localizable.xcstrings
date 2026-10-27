@@ -1,6 +1,399 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "settings.group.terminalCursor": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cursor"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "カーソル"
+          }
+        },
+        "ar": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "المؤشر"
+          }
+        },
+        "bs": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Kursor"
+          }
+        },
+        "da": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Markør"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Textcursor"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Cursor de texto"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Curseur"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Cursore"
+          }
+        },
+        "km": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ទស្សន៍ទ្រនិច"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "커서"
+          }
+        },
+        "nb": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Markør"
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Kursor"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Cursor"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Курсор"
+          }
+        },
+        "th": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "เคอร์เซอร์"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "İmleç"
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Курсор"
+          }
+        },
+        "vi": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Con trỏ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "光标"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "游標"
+          }
+        }
+      }
+    },
+    "settings.terminal.cursorBlinkTimeout": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop Cursor Blink After"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "カーソルの点滅を止めるまで"
+          }
+        },
+        "ar": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "إيقاف وميض المؤشر بعد"
+          }
+        },
+        "bs": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Zaustavi treptanje kursora nakon"
+          }
+        },
+        "da": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Stop markørens blink efter"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Cursorblinken beenden nach"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Dejar de parpadear el cursor tras"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Arrêter le clignotement du curseur après"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Interrompi il lampeggio del cursore dopo"
+          }
+        },
+        "km": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ឈប់ការភ្លឹបភ្លែតទស្សន៍ទ្រនិចក្រោយ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "커서 깜박임 중지 시점"
+          }
+        },
+        "nb": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Stopp markørblinking etter"
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Zatrzymaj miganie kursora po"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Parar de piscar o cursor após"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Остановить мигание курсора через"
+          }
+        },
+        "th": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "หยุดกะพริบเคอร์เซอร์หลังจาก"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "İmlecin yanıp sönmesini şu süreden sonra durdur"
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Зупинити блимання курсора через"
+          }
+        },
+        "vi": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Dừng nhấp nháy con trỏ sau"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "光标停止闪烁前的时间"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "游標停止閃爍前的時間"
+          }
+        }
+      }
+    },
+    "settings.terminal.cursorBlinkTimeout.help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seconds a blinking cursor blinks with no typing or output before it stops and stays shown, so a terminal at rest draws nothing. Typing, output or focus starts the blink again. 0 never stops it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "入力も出力もないまま点滅カーソルが点滅を続ける秒数です。この時間が過ぎると点滅を止めて表示したままにし、待機中のターミナルは何も描画しません。入力、出力、フォーカスで点滅が再開します。0 にすると止まりません。"
+          }
+        },
+        "ar": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "عدد الثواني التي يومض فيها المؤشر دون كتابة أو مخرجات قبل أن يتوقف ويبقى ظاهرًا، فلا ترسم الطرفية الخاملة شيئًا. تعيد الكتابة أو المخرجات أو التركيز الوميض. القيمة 0 لا توقفه أبدًا."
+          }
+        },
+        "bs": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sekunde koliko kursor trepće bez kucanja i izlaza prije nego što stane i ostane prikazan, pa terminal u mirovanju ništa ne crta. Kucanje, izlaz ili fokus ponovo pokreću treptanje. 0 ga nikad ne zaustavlja."
+          }
+        },
+        "da": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sekunder, en blinkende markør blinker uden indtastning eller output, før den stopper og forbliver synlig, så en terminal i hvile ikke tegner noget. Indtastning, output eller fokus starter blinket igen. 0 stopper det aldrig."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sekunden, die ein blinkender Cursor ohne Eingabe oder Ausgabe blinkt, bevor er anhält und sichtbar bleibt, damit ein ruhendes Terminal nichts zeichnet. Eingabe, Ausgabe oder Fokus startet das Blinken neu. 0 stoppt es nie."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Segundos que un cursor parpadea sin escritura ni salida antes de detenerse y quedarse visible, para que un terminal en reposo no dibuje nada. Escribir, la salida o el foco reanudan el parpadeo. 0 nunca lo detiene."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Secondes pendant lesquelles un curseur clignote sans saisie ni sortie avant de s’arrêter et de rester affiché, pour qu’un terminal au repos ne dessine rien. Une saisie, une sortie ou le focus relance le clignotement. 0 ne l’arrête jamais."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Secondi in cui un cursore lampeggia senza digitazione né output prima di fermarsi e restare visibile, così un terminale a riposo non disegna nulla. Digitazione, output o focus riavviano il lampeggio. 0 non lo ferma mai."
+          }
+        },
+        "km": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ចំនួនវិនាទីដែលទស្សន៍ទ្រនិចភ្លឹបភ្លែតដោយគ្មានការវាយ ឬលទ្ធផល មុនពេលវាឈប់ ហើយនៅតែបង្ហាញ ដូច្នេះទែមីណាល់ដែលនៅស្ងៀមមិនគូរអ្វីទេ។ ការវាយ លទ្ធផល ឬការផ្តោតចាប់ផ្តើមការភ្លឹបភ្លែតឡើងវិញ។ 0 មិនដែលបញ្ឈប់វាទេ។"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "입력이나 출력이 없을 때 깜박이는 커서가 멈추고 계속 표시되기까지의 초입니다. 쉬고 있는 터미널은 아무것도 그리지 않습니다. 입력, 출력, 포커스가 깜박임을 다시 시작합니다. 0이면 멈추지 않습니다."
+          }
+        },
+        "nb": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sekunder en blinkende markør blinker uten skriving eller utdata før den stopper og blir stående synlig, slik at en terminal i ro ikke tegner noe. Skriving, utdata eller fokus starter blinkingen igjen. 0 stopper den aldri."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Liczba sekund, przez które kursor miga bez pisania i wyjścia, zanim się zatrzyma i pozostanie widoczny, aby bezczynny terminal niczego nie rysował. Pisanie, wyjście lub fokus wznawia miganie. 0 nigdy go nie zatrzymuje."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Segundos que um cursor pisca sem digitação nem saída antes de parar e ficar visível, para que um terminal em repouso não desenhe nada. Digitação, saída ou foco reiniciam o piscar. 0 nunca o interrompe."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Сколько секунд курсор мигает без ввода и вывода, прежде чем остановиться и остаться видимым, чтобы терминал в покое ничего не рисовал. Ввод, вывод или фокус снова запускают мигание. При 0 мигание не останавливается."
+          }
+        },
+        "th": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "จำนวนวินาทีที่เคอร์เซอร์กะพริบโดยไม่มีการพิมพ์หรือเอาต์พุตก่อนจะหยุดและแสดงค้างไว้ เพื่อให้เทอร์มินัลที่ไม่ได้ใช้งานไม่วาดอะไรเลย การพิมพ์ เอาต์พุต หรือการโฟกัสจะเริ่มการกะพริบอีกครั้ง 0 คือไม่หยุดเลย"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Yanıp sönen imlecin yazma veya çıktı olmadan durup görünür kalmadan önce yanıp söndüğü saniye; böylece boştaki bir terminal hiçbir şey çizmez. Yazma, çıktı veya odak yanıp sönmeyi yeniden başlatır. 0 hiç durdurmaz."
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Скільки секунд курсор блимає без введення й виводу, перш ніж зупинитися й лишитися видимим, щоб термінал у спокої нічого не малював. Введення, вивід або фокус знову запускають блимання. При 0 блимання не зупиняється."
+          }
+        },
+        "vi": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Số giây con trỏ nhấp nháy khi không gõ phím và không có đầu ra trước khi dừng và hiện cố định, để terminal đang nghỉ không vẽ gì. Gõ phím, đầu ra hoặc tiêu điểm sẽ bắt đầu nhấp nháy lại. 0 là không bao giờ dừng."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "没有输入或输出时光标闪烁的秒数，之后停止闪烁并保持显示，让空闲的终端不再绘制。有输入、输出或获得焦点时重新闪烁。0 表示从不停止。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "沒有輸入或輸出時游標閃爍的秒數，之後停止閃爍並保持顯示，讓閒置的終端機不再繪製。有輸入、輸出或取得焦點時重新閃爍。0 表示永不停止。"
+          }
+        }
+      }
+    },
     "settings.memory.saver.unavailable.featureOff": {
       "extractionState": "manual",
       "localizations": {

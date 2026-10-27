@@ -1,0 +1,13 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "terminalCursorBlinkTimeout",
+  "owner": "Performance Lead",
+  "description": "A blinking terminal cursor stops blinking and stays shown after the terminal.cursorBlinkTimeout setting (15 s by default) with no typing, output or focus change, so a terminal at rest draws no frames; typing or output starts the blink again. Needs a GhosttyNextKit with cursor-style-blink-timeout.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "labs",
+  "process": "app",
+  "params": [],
+  "stories": [],
+  "sticky": false,
+  "runtimeMutable": false
+}

@@ -560,7 +560,8 @@ final class AppServices {
     /// Links, files and services macOS hands cmux (default browser, ssh:, scripts).
     private(set) lazy var externalOpen = ExternalOpenController(services: self)
     private(set) lazy var terminalTheme = TerminalThemeSetting(backdropScope: .app, deadlines: mainDeadlines, appEvents: appEvents,
-                                                                      workspaceEvents: workspaceEvents)
+                                                                      workspaceEvents: workspaceEvents,
+                                                                      cursorBlinkTimeout: features.isEnabled(.terminalCursorBlinkTimeout))
     /// This Mac's layout templates (Save Layout as Template, New Workspace from Template).
     private(set) lazy var layoutTemplates = LayoutTemplateLibrary(repository: LayoutTemplateRepository(fileURL: environment.layoutTemplatesFile), mainWork: mainWork)
     /// Every daemon answers terminal color queries with the colors terminals are painted with.

@@ -174,6 +174,8 @@ extension SettingsSchema {
         "terminal.fontSize",
         // Draws typed characters early over the grid; it never writes to a terminal (p04-input-046).
         "terminal.predictiveEcho",
+        // How long the terminal cursor blinks at rest; it only changes what the cursor looks like.
+        "terminal.cursorBlinkTimeout",
         "sidebar.sectionLook",
         "sidebar.topBandMaxShare",
         "sidebar.bottomBandMaxShare",

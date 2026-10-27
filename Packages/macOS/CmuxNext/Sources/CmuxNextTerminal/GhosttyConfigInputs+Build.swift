@@ -40,6 +40,7 @@ nonisolated extension GhosttyConfigInputs {
         // SAFETY: the live config.
         unsafe ghostty_config_load_recursive_files(config)
         let overrides = Runtime.themeLines(theme, isDark: isDark, edits: themeEdits) + Runtime.fontOverrideLines(font)
+            + Runtime.cursorBlinkTimeoutLines(cursorBlinkTimeout)
         for line in overrides {
             // SAFETY: the live config.
             unsafe Runtime.loadConfigLine(line, into: config, source: "cmux.json")

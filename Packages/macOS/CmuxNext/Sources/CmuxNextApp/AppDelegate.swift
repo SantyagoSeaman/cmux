@@ -140,11 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // The rest runs with main()'s settings read, now or when it lands (the startup's main hop, unbudgeted):
         // no wait, no frame in the defaults (p08-startup 025). The launch marks end where the launch work ends.
+        let cursorBlinkTimeout = services?.features.isEnabled(.terminalCursorBlinkTimeout) ?? false
         settingsRead.whenRead(hop: .userVisible, startup: order.startup, take: { [logger] read in
             DebugTimings.markLaunch("dfl.settings_wait")  // the read in hand: at once warm, after the disk cold
             if let failure = read.bootstrapFailure { logger.error("cmux-next config bootstrap failed: \(failure, privacy: .public)") }
             // cmux.json's appearance goes on the Ghostty overrides; the first config builds with them on a files lane and the launch goes on when it lands (p02-threads-129).
-            TerminalThemeSetting.prime(read.snapshot)
+            TerminalThemeSetting.prime(read.snapshot, cursorBlinkTimeout: cursorBlinkTimeout)
         }, then: { [self] read in GhosttyRuntime.shared.start(loadingOn: GhosttyLaneConfigLoader(work: launchReads.work, mainWork: mainWork)) { [self] in finishLaunching(settings: read, launchStart: launchStart) } })
     }
 

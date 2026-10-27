@@ -21,11 +21,13 @@ nonisolated struct GhosttyConfigInputs: Sendable, Equatable {
     var ownerPaintsBackground: Bool
     /// The one config file `CMUX_NEXT_GHOSTTY_CONFIG` names instead of the default files; nil reads the defaults.
     var configFile: String?
+    /// cmux.json's cursor blink timeout in seconds (``GhosttyRuntime/cursorBlinkTimeout``); nil keeps Ghostty's.
+    var cursorBlinkTimeout: Double?
 
     /// The inputs of a build asked for now: the user's config with `theme` (a room, workspace or terminal theme)
-    /// or, nil, with `themeOverride`. Records the see-through state the build reads
-    /// (``GhosttyRuntime/seeThroughLoaded``).
-    @MainActor static func current(theme: String?) -> GhosttyConfigInputs {
+    /// or, nil, with `themeOverride`, and the runtime's `cursorBlinkTimeout`. Records the see-through state the
+    /// build reads (``GhosttyRuntime/seeThroughLoaded``).
+    @MainActor static func current(theme: String?, cursorBlinkTimeout: Double? = nil) -> GhosttyConfigInputs {
         typealias Runtime = GhosttyRuntime
         Runtime.seeThroughLoaded = Runtime.seeThroughShown
         let override = ProcessInfo.processInfo.environment[Runtime.configOverrideKey]
@@ -33,7 +35,8 @@ nonisolated struct GhosttyConfigInputs: Sendable, Equatable {
                                    isDark: Runtime.colorSchemeIsDark, font: Runtime.fontOverride,
                                    background: Runtime.backgroundOverride,
                                    ownerPaintsBackground: Runtime.terminalBackgroundOverridden || Runtime.seeThroughShown,
-                                   configFile: override.flatMap { $0.isEmpty ? nil : $0 })
+                                   configFile: override.flatMap { $0.isEmpty ? nil : $0 },
+                                   cursorBlinkTimeout: cursorBlinkTimeout)
     }
 }
 

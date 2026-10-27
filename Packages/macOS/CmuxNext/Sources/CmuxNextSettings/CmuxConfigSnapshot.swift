@@ -233,6 +233,8 @@ public struct CmuxConfigSnapshot: Sendable, Equatable {
     public var terminalFontSize: Double?
     /// `terminal.predictiveEcho`: off (no prediction engine) when unset or invalid.
     public var terminalPredictiveEcho = TerminalPredictiveEchoSetting.fallback
+    /// `terminal.cursorBlinkTimeout` in seconds (0: the blink never stops); 15 when unset or invalid.
+    public var terminalCursorBlinkTimeout: Double = TerminalCursorBlinkTimeoutSetting().fallback
     /// `history.terminalCommands` (opt-in terminal command history).
     public var recordsTerminalCommands: Bool = TerminalCommandHistorySetting.fallback
     /// `navigation.historyScope`: what Back and Forward walk (`workspace`, `window`, `surface`).
