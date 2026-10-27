@@ -220,14 +220,15 @@ final class LineTransport: Sendable {
     }
 
     /// Writes one line that has no `id` and gets no reply (`loopback-data`
-    /// and the other stream lines of `loopback-forward-v1`). Ordered with
-    /// every other write. False once the socket failed or closed.
-    func sendLine(_ payload: Data) -> Bool {
+    /// and the other stream lines of `loopback-forward-v1`) at `priority`:
+    /// after every earlier write of that priority and before every lower one.
+    /// False once the socket failed or closed.
+    func sendLine(_ payload: Data, priority: MethodPriority = .control) -> Bool {
         socket.withLock { socket in
             guard socket.fd >= 0, state.withLock({ $0.closed == nil }) else { return false }
             var line = payload
             line.append(0x0A)
-            guard writer.write(line) == nil else { return false }
+            guard writer.write(line, priority: priority) == nil else { return false }
             recorder?.lineWritten(bytes: line.count)
             return true
         }
@@ -335,13 +336,17 @@ final class LineTransport: Sendable {
     }
 
     private func failAll(_ reason: TransportCloseReason) {
-        let unanswered: [PendingRequest] = state.withLock { state in
+        let (unanswered, loopback, closed) = state.withLock { state -> ([PendingRequest], LoopbackStreamTable?, TransportCloseReason) in
             if state.closed == nil { state.closed = reason }
             state.deadlines.removeAll()
             state.armedAt = nil
-            return state.pending.removeAllInSendOrder()
+            // Taken with `closed` set, so no stream joins the table after its end (``loopbackStreams()``).
+            defer { state.loopbackStreams = nil }
+            return (state.pending.removeAllInSendOrder(), state.loopbackStreams, state.closed ?? reason)
         }
         deadlineTimer.cancel()
+        // Every stream on the connection ends with it, after the events the reader routed before.
+        loopback?.end(closed.detail)
         let error = Self.closedError(reason)
         for entry in unanswered {
             // A request the connection closed under never gets its reply.

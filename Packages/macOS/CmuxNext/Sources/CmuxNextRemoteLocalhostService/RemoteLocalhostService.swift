@@ -10,7 +10,8 @@ import Observation
 import os
 
 /// Remote localhost for browser tabs: decides each tab's route and store,
-/// owns the in-process proxy and one forwarding connection per machine.
+/// owns the in-process proxy and one forwarding client per machine, whose
+/// streams ride that machine's control connection.
 /// Nothing starts until a tab of a remote machine needs it.
 @MainActor
 public final class RemoteLocalhostService {
@@ -196,12 +197,21 @@ public final class RemoteLocalhostService {
     private func client(for daemon: DaemonService) -> LoopbackForwardClient {
         let key = ObjectIdentifier(daemon)
         if let client = clients[key] { return client }
-        let client = LoopbackForwardClient { [weak daemon] in
+        // Streams on the machine's control connection (p05-ipc-101), not a connection of their own.
+        let client = LoopbackForwardClient(connection: { [weak daemon] in
             guard let daemon else { throw DaemonError.notConnected }
-            return try await daemon.endpoint()
-        }
+            return try await Self.controlConnection(of: daemon)
+        })
         clients[key] = client
         return client
+    }
+
+    /// `daemon`'s control connection once it has one: after the policy check and the first connect's wait of
+    /// `endpoint()`.
+    private static func controlConnection(of daemon: DaemonService) async throws -> DaemonConnection {
+        _ = try await daemon.endpoint()
+        guard let connection = daemon.connection else { throw DaemonError.notConnected }
+        return connection
     }
 
     /// The forwarding connection of `machine` (browser runtimes and their
@@ -261,7 +271,7 @@ public final class RemoteLocalhostService {
 
     private func debugClient(_ socket: String) -> LoopbackForwardClient {
         if let client = debugClients[socket] { return client }
-        let client = LoopbackForwardClient { DaemonEndpoint(socketPath: socket) }
+        let client = LoopbackForwardClient(endpoint: { DaemonEndpoint(socketPath: socket) })
         debugClients[socket] = client
         return client
     }
@@ -285,8 +295,8 @@ public final class RemoteLocalhostService {
         ])
     }
 
-    /// Closes the forwarding connection of a machine that left the registry:
-    /// its streams and browser runtimes end with it.
+    /// Closes the forwarding client of a machine that left the registry: its
+    /// streams end, and its browser runtimes with the machine's connection.
     public func closeClient(of daemon: DaemonService) {
         guard let client = clients.removeValue(forKey: ObjectIdentifier(daemon)) else { return }
         // task-owner: one connection close; ends when the client has closed.

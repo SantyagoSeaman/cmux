@@ -48,6 +48,7 @@ extension LineTransport {
                 return
             }
         }
+        if let event = envelope.event, routeLoopback(event: event, line: line) { return }
         if let name = streamed ? Self.streamEvent : envelope.event {
             let index = state.withLock { state -> UInt64 in
                 if name == "daemon-shutdown" { state.sawShutdown = true }

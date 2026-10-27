@@ -174,8 +174,8 @@ public enum DaemonCapability: String, CaseIterable, Sendable {
     case frontendBrowserActivate = "frontend-browser-activate-v1"
     /// `after` on `new-frontend-browser-tab`: a link's tab lands next to its opener.
     case frontendBrowserInsertAfter = "frontend-browser-insert-after-v1"
-    /// Browser tabs reach the machine's loopback services over a dedicated
-    /// connection (`LoopbackForwardClient`, plans/cmux-next/remote-localhost.md).
+    /// Browser tabs reach the machine's loopback services as streams on its
+    /// control connection (`LoopbackForwardClient`, plans/cmux-next/remote-localhost.md).
     case loopbackForward = "loopback-forward-v1"
     /// The daemon starts the remote browser host on its machine
     /// (`browser-runtime-*`, cx-2cob slice 2); the app reaches it through

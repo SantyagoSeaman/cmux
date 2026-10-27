@@ -20,6 +20,9 @@ extension LineTransport {
         var controlStreams: Set<String> = []
         /// Gets resource API stream lines (`stream_item`, `stream_end`).
         var streamHandler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?
+        /// The `loopback-forward-v1` streams on this connection (``loopbackStreams()``); nil until one opens and
+        /// once the connection closed.
+        var loopbackStreams: LoopbackStreamTable?
 
         /// Takes every deadline due at `now` out and marks its request expired: what each one's
         /// `timedOut` needs. The timer is no longer armed (its fire called this).
