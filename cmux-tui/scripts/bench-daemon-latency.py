@@ -991,10 +991,15 @@ ECHO_ARGV = ["/bin/sh", "-c", "stty raw -echo; exec cat"]
 class Bench:
     _serial = itertools.count()
 
-    def __init__(self, args, env_extra=None):
-        """`env_extra`: daemon environment on top of the isolated one (a bulk sweep's frame cut)."""
+    def __init__(self, args, env_extra=None, record_to=None):
+        """`env_extra`: daemon environment on top of the isolated one (a bulk sweep's frame cut).
+        `record_to`: a recording daemon (REQUEST_PATH_RECORD_ENV) whose record lines go to this
+        file when it stops."""
         self.args = args
         self.env_extra = dict(env_extra or {})
+        self.record_to = record_to
+        if record_to:
+            self.env_extra.update(REQUEST_PATH_RECORD_ENV)
         self.root = tempfile.mkdtemp(prefix="pd.", dir="/private/tmp" if sys.platform == "darwin" else None)
         self.sock_path = os.path.join(self.root, "s.sock")
         self.session = f"perfd{os.getpid()}n{next(Bench._serial)}"
@@ -1066,7 +1071,18 @@ class Bench:
             if self.daemon:
                 self._shutdown()
         finally:
+            if self.record_to:
+                self.write_record()
             shutil.rmtree(self.root, ignore_errors=True)
+
+    def write_record(self):
+        """The ended daemon's request-path record lines into `record_to` (`--request-path-record`)."""
+        try:
+            lines = write_request_path_record(os.path.join(self.root, "daemon.log"), self.record_to)
+            log("wrote", lines, "request-path record lines to", self.record_to)
+        except OSError as e:
+            self.result["request_path_record_error"] = str(e)
+            self.failed = True
 
     def _shutdown(self):
         try:
@@ -1935,6 +1951,30 @@ def write_q16(targets_path, result, scenario="scale", threshold_ms=Q16_THRESHOLD
     return items
 
 
+REQUEST_PATH_IO_ENV = "CMUX_TUI_REQUEST_PATH_IO"
+# A recording daemon: request-path record lines, and a debug build's thread blocking detector
+# (cmux-threads blocking/mode.rs) records its sites instead of panicking at the first one, as the
+# core suite's record run sets it.
+REQUEST_PATH_RECORD_ENV = {REQUEST_PATH_IO_ENV: "record", "CMUX_DAEMON_BLOCKING": "record"}
+
+
+def write_request_path_record(daemon_log, path):
+    """The daemon's `REQUEST_PATH_IO kind=<k> site=<f:l> [op=<name>]` lines (a daemon started with
+    CMUX_TUI_REQUEST_PATH_IO=record prints one per noted blocking call on a request thread) into
+    `path`, counted like `sort | uniq -c`: `ipc-census.py --io-record PATH` reads it as queues Q9
+    (by kind and site) and Q18 (sqlite sites by op). Returns the number of distinct lines."""
+    counts = {}
+    with open(daemon_log, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            start = line.find("REQUEST_PATH_IO ")
+            if start >= 0:
+                record = line[start:].strip()
+                counts[record] = counts.get(record, 0) + 1
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(f"{count:7d} {record}\n" for record, count in sorted(counts.items()))
+    return len(counts)
+
+
 def parse_kib(value):
     sizes = [int(v) for v in value.split(",") if v]
     if not sizes or any(v <= 0 for v in sizes):
@@ -1965,6 +2005,10 @@ def parse_args(argv=None):
     ap.add_argument("--storm-seconds", type=float, default=8.0)
     ap.add_argument("--write-q16", nargs="?", const=TARGETS, default=None, metavar="TARGETS",
                     help=f"write runtime.Q16 into ipc-targets.json (default {os.path.relpath(TARGETS, REPO_ROOT)})")
+    ap.add_argument("--request-path-record", metavar="FILE", default=None,
+                    help=f"start the daemon with {REQUEST_PATH_IO_ENV}=record and write its REQUEST_PATH_IO lines "
+                         "(site and op of each request-path blocking call) to FILE for ipc-census.py --io-record "
+                         "(queues Q9 and Q18); the timings of such a run are not perf evidence")
     ap.add_argument("--app", help=lab.APP_HELP)
     ap.add_argument("--tag", help=lab.TAG_HELP)
     lab.add_arguments(ap, STORY)
@@ -1983,6 +2027,8 @@ def parse_args(argv=None):
                  f"{', '.join(unmeasured)} (add an @op)")
     if args.write_q16 and (args.ops != "all" or "scale" not in wanted):
         ap.error("--write-q16 needs --ops all and --scenario scale (Q16's definition)")
+    if args.write_q16 and args.request_path_record:
+        ap.error("--write-q16 and --request-path-record are separate runs: a recording daemon's timings are not Q16's")
     if args.write_q16 and sys.platform != "darwin":
         ap.error("--write-q16 runs on a macOS fleet host only: VM and Linux timing is not perf evidence")
     args.bin, out, measured = lab.prepare(ap, args, REPORT_NAME)
@@ -1998,7 +2044,7 @@ def main(argv=None):
     """Writes --out whatever happens (a failed section, a failed start, Ctrl-C), then --write-q16
     only when the whole run passed."""
     args, out, measured = parse_args(argv)
-    b = Bench(args)
+    b = Bench(args, record_to=args.request_path_record)
     b.result.update(host=host_info(), source=source_info(),
                     args={k: v for k, v in vars(args).items() if k not in ("bin", "out")})
     status = 1

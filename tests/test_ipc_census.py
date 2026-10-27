@@ -18,6 +18,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -473,12 +474,37 @@ class RuntimeQueueTests(Fixture):
         ]
         targets = {"ipc5_ops": ["new-tab"]}
         self.assertEqual(self.sites("Q9", targets, record), [
-            ("inventory.rs", 9, "kind=sqlite op=agent-inventory"),
+            ("inventory.rs", 9, "kind=sqlite"),
             ("spawn.rs", 44, "kind=journal_wait"),
-            ("tabs.rs", 120, "kind=sqlite op=new-tab"),
+            ("tabs.rs", 120, "kind=sqlite"),
         ])
         self.assertEqual(self.sites("Q18", targets, record), [("tabs.rs", 120, "kind=sqlite op=new-tab")])
         self.assertEqual(self.census(targets).result("Q9").source, "not recorded (p05-ipc-003 record run)")
+
+    def test_q9_of_an_op_labelled_run_equals_q9_of_the_same_run_without_ops(self):
+        labelled = [
+            "REQUEST_PATH_IO kind=sqlite site=src/workspace_registry/tabs.rs:120 op=new-tab",
+            "REQUEST_PATH_IO kind=sqlite site=src/workspace_registry/tabs.rs:120 op=split",
+            "REQUEST_PATH_IO kind=sqlite site=src/workspace_registry/tabs.rs:120",
+            "REQUEST_PATH_IO kind=journal_wait site=src/mux/spawn.rs:44 op=split",
+            "REQUEST_PATH_IO kind=lock_hold_over_1ms site=src/mux/spawn.rs:44 op=new-tab",
+        ]
+        bare = [re.sub(r" op=\S+", "", line) for line in labelled]
+        targets = {"ipc5_ops": ["new-tab", "split"]}
+        self.assertEqual(self.sites("Q9", targets, labelled), self.sites("Q9", targets, bare))
+        self.assertEqual(len(self.sites("Q9", targets, labelled)), 3, "one Q9 site per (kind, file, line)")
+        self.assertEqual(len(self.sites("Q18", targets, labelled)), 3, "Q18 keeps (site, op)")
+
+    def test_q18_keeps_a_site_under_a_frame_stage_before_its_handler(self):
+        record = [
+            "REQUEST_PATH_IO kind=sqlite site=src/server/connection_frame.rs:70 op=frame",
+            "REQUEST_PATH_IO kind=sqlite site=src/server/remote_relay/mod.rs:9 op=frame:remote-relay",
+            "REQUEST_PATH_IO kind=sqlite site=src/server/agent_cli_job.rs:143 op=frame:agent-cli-job",
+        ]
+        self.assertEqual(self.sites("Q18", {"ipc5_ops": ["new-tab"]}, record), [
+            ("connection_frame.rs", 70, "kind=sqlite op=frame"),
+            ("mod.rs", 9, "kind=sqlite op=frame:remote-relay"),
+        ])
 
     RECORD = [
         "REQUEST_PATH_IO kind=sqlite site=src/workspace_registry/tabs.rs:120 op=new-tab",
@@ -560,7 +586,7 @@ class RecordCheckTests(Fixture):
         )
         self.assertEqual(self.run_main("--record", "--io-record", str(run))[0], 0)
         runtime = json.loads(self.targets.read_text(encoding="utf-8"))["runtime"]
-        self.assertEqual([item["key"] for item in runtime["Q9"]], ["kind=journal_wait op=split", "kind=sqlite op=new-tab"])
+        self.assertEqual([item["key"] for item in runtime["Q9"]], ["kind=journal_wait", "kind=sqlite"], "Q9 by (kind, site)")
         self.assertEqual(runtime["Q18"], [{"file": "src/tabs.rs", "line": 120, "key": "kind=sqlite op=new-tab"}])
 
     def test_check_refuses_an_entry_without_a_reason_or_without_a_site(self):

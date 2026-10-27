@@ -128,9 +128,7 @@ pub(super) struct LineFrame<'f> {
 
 impl LineFrame<'_> {
     fn watch(&self, method: WatchedMethod) {
-        if let Some(scope) = self.watched {
-            scope.set_method(method);
-        }
+        method.reached(self.watched);
     }
 
     fn stage(&self, stage: FrameStage) {
@@ -192,9 +190,7 @@ pub(super) fn dispatch_line(line: &LineFrame<'_>) -> bool {
         Some(keep_open) => keep_open,
         None => match pending.take() {
             Some(request) => {
-                if let Some(scope) = watched {
-                    scope.command(&request.cmd);
-                }
+                WatchedMethod::command_reached(&request.cmd, watched);
                 handle_request_with_cancellation(mux, client, request, arrival, writer, None)
             }
             None => true,

@@ -303,11 +303,7 @@ pub(super) fn handle_watched_frame(
     arrived: Instant,
     watched: Option<&super::RequestScope<'_>>,
 ) -> bool {
-    let stage = |stage: super::FrameStage| {
-        if let Some(scope) = watched {
-            scope.set_method(super::WatchedMethod::frame(stage));
-        }
-    };
+    let stage = |stage: super::FrameStage| super::WatchedMethod::frame(stage).reached(watched);
     // A line whose `cmd` names no `Command` (an `fs-v1` op, or a line the
     // gate refuses) is answered under its own span; a `Command` opens its
     // span at its handler, and a refusal of one opens it here.
@@ -345,9 +341,7 @@ pub(super) fn handle_watched_frame(
         // Only a `cmd` the table names parses as a `Command`, so no line
         // span is open here.
         Ok(request) => {
-            if let Some(scope) = watched {
-                scope.command(&request.cmd);
-            }
+            super::WatchedMethod::command_reached(&request.cmd, watched);
             super::handle_request_with_cancellation(
                 mux,
                 client,

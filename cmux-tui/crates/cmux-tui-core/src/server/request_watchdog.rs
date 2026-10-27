@@ -141,6 +141,27 @@ impl WatchedMethod {
         Self(FRAME_TAG | stage as u32)
     }
 
+    /// A frame reached the handler of `self`. The request path names its op
+    /// ([`crate::request_path::name_op`]) whether or not the watchdog had a
+    /// slot for the frame: past every slot in flight the frame is unwatched,
+    /// and its request-path notes still carry its op (queue Q18). A watched
+    /// frame's slot is renamed too.
+    pub(crate) fn reached(self, watched: Option<&RequestScope<'_>>) {
+        match watched {
+            Some(scope) => scope.set_method(self),
+            None => crate::request_path::name_op(|| self.name()),
+        }
+    }
+
+    /// [`Self::reached`] for `command`; a watched command that waits by
+    /// design also ends its watch ([`RequestScope::command`]).
+    pub(super) fn command_reached(command: &Command, watched: Option<&RequestScope<'_>>) {
+        match watched {
+            Some(scope) => scope.command(command),
+            None => Self::command(command).reached(None),
+        }
+    }
+
     /// The method's name in `slow_requests`; read only when recording.
     fn name(self) -> &'static str {
         let index = (self.0 & INDEX_MASK) as usize;

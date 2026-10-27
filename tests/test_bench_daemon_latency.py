@@ -359,5 +359,50 @@ class Main(unittest.TestCase):
             self.assertIn("host", result)
 
 
+class RequestPathRecord(unittest.TestCase):
+    def test_the_daemon_logs_record_lines_feed_ipc_census_q9_and_q18(self):
+        census = load("cmux_ipc_census_for_bench", CENSUS)
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "daemon.log")
+            with open(log, "w") as f:
+                f.write("starting\n"
+                        "REQUEST_PATH_IO kind=sqlite site=crates/a.rs:10 op=select-workspace\n"
+                        "2026-10-27 warn REQUEST_PATH_IO kind=sqlite site=crates/a.rs:10 op=select-workspace\n"
+                        "REQUEST_PATH_IO kind=sqlite site=crates/a.rs:10 op=pane.create\n"
+                        "REQUEST_PATH_IO kind=journal_wait site=crates/b.rs:4 op=send\n")
+            out = os.path.join(tmp, "record.txt")
+            self.assertEqual(bench.write_request_path_record(log, out), 3)
+            with open(out) as f:
+                lines = f.read().splitlines()
+            self.assertEqual(lines[-1], "      2 REQUEST_PATH_IO kind=sqlite site=crates/a.rs:10 op=select-workspace")
+            hits = census.parse_io_record(lines)
+            self.assertEqual(sorted((hit.file, hit.line, hit.key) for hit in census.without_op(hits)), [
+                ("crates/a.rs", 10, "kind=sqlite"), ("crates/b.rs", 4, "kind=journal_wait"),
+            ])
+            self.assertEqual(sorted(hit.key for hit in hits if hit.key.startswith("kind=sqlite")),
+                             ["kind=sqlite op=pane.create", "kind=sqlite op=select-workspace"])
+
+    def test_a_recording_bench_starts_a_recording_daemon_and_keeps_its_lines_past_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "record.txt")
+            b = bench.Bench(None, record_to=out)
+            self.assertEqual(b.env_extra["CMUX_TUI_REQUEST_PATH_IO"], "record")
+            self.assertEqual(b.env_extra["CMUX_DAEMON_BLOCKING"], "record", "a debug daemon records, never panics")
+            with open(os.path.join(b.root, "daemon.log"), "w") as f:
+                f.write("REQUEST_PATH_IO kind=sqlite site=crates/a.rs:10 op=send\n")
+            with contextlib.redirect_stderr(io.StringIO()):
+                b.stop()
+            self.assertFalse(os.path.exists(b.root))
+            with open(out) as f:
+                self.assertEqual(f.read(), "      1 REQUEST_PATH_IO kind=sqlite site=crates/a.rs:10 op=send\n")
+            self.assertFalse(b.failed)
+            self.assertEqual(bench.Bench(None).env_extra, {})
+
+    def test_a_recording_run_never_writes_q16(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bench.parse_args(["--bin", "x", "--out", "r.json", "--ops", "all", "--scenario", "scale",
+                              "--write-q16", "--request-path-record", "rec.txt"])
+
+
 if __name__ == "__main__":
     unittest.main()

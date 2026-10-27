@@ -41,10 +41,11 @@ Refinements over the raw queries (each is stated on its queue):
 Schema queues (Q5, Q6, Q12, Q15) compare source against cmux-tui/spec/sdk-schema.json. Runtime
 queues are read, not computed: Q9 and Q18 from a `CMUX_TUI_REQUEST_PATH_IO=record` run (lines with
 `REQUEST_PATH_IO`, `kind=` and `site=FILE:LINE`, optional `op=`; passed with `--io-record FILE`
-or stored by `--record --io-record FILE` as `runtime.Q9` and, its sqlite sites with their ops,
-`runtime.Q18`; Q18 reads `runtime.Q18` before `runtime.Q9`, whose run may predate `op=`), Q16
-from `runtime.Q16`, which bench-daemon-latency.py
-`--write-q16` writes (p05-ipc-002).
+or stored by `--record --io-record FILE` as `runtime.Q9`, one site per (kind, file, line), and,
+its sqlite sites with their ops, `runtime.Q18`; Q18 reads `runtime.Q18` before `runtime.Q9`,
+whose run may predate `op=`). The core suite's record run and `bench-daemon-latency.py
+--request-path-record FILE` (a daemon serving every IPC-5 op) both write such a file. Q16 from
+`runtime.Q16`, which bench-daemon-latency.py `--write-q16` writes (p05-ipc-002).
 
 Usage:
   ipc-census.py                       counts of every queue
@@ -1107,14 +1108,23 @@ class Census:
         return [], "not recorded (p05-ipc-003 record run)"
 
     def q9(self) -> Result:
+        """One site per (kind, file, line): p05-ipc-128 triages Q9 by kind and site, so a record
+        line's `op=` (Q18's) never splits a Q9 site."""
         hits, source = self.io_sites()
-        return Result("Q9", "request-path I/O", hits, source=source)
+        return Result("Q9", "request-path I/O", without_op(hits), source=source)
+
+    # The request-path op names of the frame stages before a frame reaches its handler
+    # (server/request_watchdog.rs FrameStage::Route and RemoteRelay). A site under one cannot show
+    # it is off the IPC-5 path, so Q18 keeps it as it keeps an op-less site. The other `frame:`
+    # stages are feature routes' own handlers, which no `Command` reaches (routes::find).
+    PRE_HANDLER_OPS = frozenset({"frame", "frame:remote-relay"})
 
     def q18(self) -> Result:
         """The `kind=sqlite` sites of the Q9 run hit by an op of `ipc5_ops` (ipc-targets.json; the
-        IPC-5 ops of p05-ipc.md section 5). A site without `op=` stays: the record cannot show it is
-        off the IPC-5 path. An empty or missing `ipc5_ops` keeps every sqlite site, and `--check`
-        refuses it once Q9 has data, so the list never filters by being empty."""
+        IPC-5 ops of p05-ipc.md section 5). A site without `op=`, or under a frame stage before its
+        handler, stays: the record cannot show it is off the IPC-5 path. An empty or missing
+        `ipc5_ops` keeps every sqlite site, and `--check` refuses it once Q9 has data, so the list
+        never filters by being empty."""
         hits, source = self.io_sites("Q18")
         ops = set(self.targets.get("ipc5_ops") or [])
         chosen = []
@@ -1122,7 +1132,8 @@ class Census:
             fields = dict(part.split("=", 1) for part in hit.key.split() if "=" in part)
             if fields.get("kind") != "sqlite":
                 continue
-            if ops and "op" in fields and fields["op"] not in ops:
+            op = fields.get("op")
+            if ops and op is not None and op not in ops and op not in self.PRE_HANDLER_OPS:
                 continue
             chosen.append(hit)
         if not ops:
@@ -1413,6 +1424,11 @@ def parse_io_record(lines: list[str]) -> list[Hit]:
     return sorted(hits)
 
 
+def without_op(hits: list[Hit]) -> list[Hit]:
+    """`hits` keyed by kind and site only: the `op=` field dropped, the (kind, site) pairs once."""
+    return sorted({Hit(hit.file, hit.line, " ".join(part for part in hit.key.split() if not part.startswith("op="))) for hit in hits})
+
+
 # ---------------------------------------------------------------------------------------------
 # Targets file: record and check
 
@@ -1444,8 +1460,9 @@ def record(census: Census, path: Path) -> dict:
     targets["base"] = {"sha": census.repo.head(), "queues": queues}
     if census.io_record is not None:
         runtime = targets.setdefault("runtime", {})
+        # Q9 by (kind, site), as p05-ipc-128 triages it; Q18 by (site, op).
         runtime["Q9"] = [hit.as_json() for hit in census.result("Q9").hits]
-        runtime["Q18"] = [hit.as_json() for hit in census.result("Q9").hits if hit.key.split()[0] == "kind=sqlite"]
+        runtime["Q18"] = [hit.as_json() for hit in parse_io_record(census.io_record) if hit.key.split()[0] == "kind=sqlite"]
     path.write_text(json.dumps(targets, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return targets
 

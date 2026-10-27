@@ -260,3 +260,44 @@ fn connection_frame_page_routed_operations_are_not_catalog_operations() {
         );
     }
 }
+
+/// The request-path op of a frame is its handler's name even when every
+/// watchdog slot is taken (a STRESS run past 256 requests in flight), so a
+/// record run's `op=` never depends on a free slot (queue Q18).
+#[test]
+fn connection_frame_names_the_request_path_op_with_every_watchdog_slot_taken() {
+    use crate::request_path::{RequestPathMode, RequestPathScope, RequestPathStats};
+    use cmux_tui_platform::request_path::current_op;
+    let mux = test_mux();
+    let conn = Conn::new(&mux);
+    let route = WatchedMethod::frame(FrameStage::Route);
+    let taken: Vec<_> =
+        std::iter::from_fn(|| mux.request_watchdog.begin(conn.client, route)).collect();
+    assert!(!taken.is_empty());
+    let stats = RequestPathStats::new(RequestPathMode::RECORD);
+    let resource = json!({"protocol":"cmux.protocol/2","type":"request","id":"r-1",
+        "operation":"session.ping","params":{"machine":"current","session":"current"}})
+    .to_string();
+    for (message, op) in [(r#"{"id":1,"cmd":"ping"}"#, "ping"), (resource.as_str(), "session.ping")]
+    {
+        let _request_path = RequestPathScope::enter(&stats);
+        let watched = mux.request_watchdog.begin(conn.client, route);
+        assert!(watched.is_none(), "every slot is taken");
+        assert_eq!(current_op(), Some("frame"));
+        let scheduler =
+            Arc::new(ConnectionSurfaceScheduler::new(mux.surface_operation_admission.clone()));
+        let line = LineFrame {
+            mux: &mux,
+            client: conn.client,
+            message,
+            writer: &conn.writer,
+            scheduler: &scheduler,
+            arrived: Instant::now(),
+            watched: watched.as_ref(),
+        };
+        dispatch_line(&line);
+        scheduler.finish_and_wait();
+        assert_eq!(current_op(), Some(op), "{message}");
+    }
+    drop(taken);
+}

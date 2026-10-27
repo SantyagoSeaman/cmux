@@ -99,6 +99,12 @@
       "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
       "key": "kind=sqlite",
       "reason": "server_stats_tests.rs request_path_a_registry_handler_records_its_own_line runs list_terminals in its own unnamed RequestPathScope; the daemon's op=list-terminals pair is the same read (p05-ipc-402)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/resource_api.rs",
+      "key": "kind=sqlite op=frame",
+      "reason": "op=frame here is the oracle-state / oracle-restore-preview route (server/oracle_state_command.rs, debug and oracle builds only), whose route stage is FrameStage::Route, the pre-handler name that ipc-census keeps in Q18; the read is public_session_snapshot_at_cut's with_resource_projection pin, off the IPC-5 ops (p05-ipc-407 also_serves it)."
     }
   ],
   "ipc5_ops": [
@@ -3418,6 +3424,13 @@
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
         "line": 135,
         "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "op": "frame",
+        "reason": "op=frame here is the oracle-state / oracle-restore-preview route (server/oracle_state_command.rs, debug and oracle builds only), whose route stage is FrameStage::Route, the pre-handler name that ipc-census keeps in Q18; the read is public_session_snapshot_at_cut's with_resource_projection pin, off the IPC-5 ops (p05-ipc-407 also_serves it)."
       }
     ]
   },
@@ -3668,6 +3681,27 @@
           "terminal.close",
           "workspace.agent_folder.set",
           "workspace.list"
+        ]
+      },
+      {
+        "id": "p05-ipc-408",
+        "title": "Q18 read barrier: the IPC-5 ops' cold reads never wait on p05-ipc-120's counted barrier",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/registry_connection.rs",
+          "cmux-tui/crates/cmux-tui-platform/src/request_path.rs",
+          "plans/cmux-next/ipc-targets.json",
+          "scripts/cmux-next/ipc-census.py"
+        ],
+        "change": "p05-ipc-120 leaves a counted read barrier (read_barrier_waits) for cold reads not yet on the admitted overlay (p05-ipc.md section 4: 'queue Q18 moves them to projections'). Make each barrier wait a request_path note of its own kind (`kind=read_barrier`, at the read's #[track_caller] site, with the request's op= as every record line), so a record run lists the (site, op) pairs that wait; ipc-census.py Q18 and its runtime.Q18 record keep kind=read_barrier pairs beside kind=sqlite ones. Record the core suite and bench-daemon-latency.py --ops all --scenario small,scale --request-path-record, add every kind=read_barrier pair of an IPC-5 op to runtime.Q18 and triage.Q18, and move each read to the 401-403 projections (or the 133 overlay); a read no projection serves gets its own child task here. Chromium's IndexedDB answers reads from the transaction's own view, never by waiting for the backing store to commit (content/browser/indexed_db/indexed_db_transaction.cc).",
+        "acceptance": "RUST(registry_connection): a cold read that waits on the barrier notes kind=read_barrier at its caller with its op. A Q18 record run (core suite and the B3 bench, small and scale, with --request-path-record) has no kind=read_barrier pair under an IPC-5 op, and after the bench server-stats read_barrier_waits == 0 on request threads for every IPC-5 op (IPC-6).",
+        "test_phase": "RUST(registry_connection); RUST(request_path); BENCH(python3 cmux-tui/scripts/bench-daemon-latency.py --ops all --scenario small,scale --request-path-record rec.txt; python3 scripts/cmux-next/ipc-census.py --io-record rec.txt --queue Q18)",
+        "size": "M",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-120",
+          "p05-ipc-401",
+          "p05-ipc-402",
+          "p05-ipc-403"
         ]
       }
     ]
