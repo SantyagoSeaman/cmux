@@ -5,7 +5,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use serde::de::{self, Deserializer, Visitor};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use super::{
@@ -13,8 +13,11 @@ use super::{
     StreamPublicId, WireDecimal, validate_idempotency_key,
 };
 
+/// The derives generate inherent `serialize`/`deserialize` (`remote =
+/// "Self"`); the trait impls below wrap them so a request decodes from a JSON
+/// object only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct RequestEnvelope {
     pub protocol: String,
     #[serde(rename = "type", deserialize_with = "string_form")]
@@ -38,6 +41,51 @@ pub struct RequestEnvelope {
     /// is never serialized, logged or part of a fingerprint.
     #[serde(default, skip_serializing)]
     pub credential: Option<crate::launch_credential::PresentedCredential>,
+}
+
+impl Serialize for RequestEnvelope {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        RequestEnvelope::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestEnvelope {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        RequestEnvelope::deserialize(ObjectOnly(deserializer))
+    }
+}
+
+/// A struct from its map form only. The derived struct decoder also takes
+/// the sequence form (`["cmux.protocol/2","request",...]`), which the request
+/// head (server/request_head.rs) does not route as v2, so the head and the
+/// envelope would disagree on whether a line is v2.
+struct ObjectOnly<D>(D);
+
+impl<'de, D: Deserializer<'de>> Deserializer<'de> for ObjectOnly<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
+        self.0.deserialize_any(visitor)
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, D::Error> {
+        self.0.deserialize_map(visitor)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.0.is_human_readable()
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
+    }
 }
 
 /// A unit enum member from its JSON string only. The derived decoder also

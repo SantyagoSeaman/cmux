@@ -163,7 +163,9 @@ fn check_restore(record: &SessionJournalRecord, state: serde_json::Value, source
     let alone = journal_restore_preview(state.clone(), source, &[], source);
     let preview =
         journal_restore_preview(state, source, std::slice::from_ref(record), record.sequence);
-    if record.replay == JournalReplayPolicy::Required || record.sequence != source.wrapping_add(1) {
+    if record.replay == JournalReplayPolicy::Required
+        || source.checked_add(1) != Some(record.sequence)
+    {
         return;
     }
     match (alone, preview) {
@@ -264,8 +266,12 @@ fuzz_target!(|row: Row| {
     let Ok(record) = journal_record(row) else {
         return;
     };
-    let source = if contiguous { record.sequence.wrapping_sub(1) } else { source };
-    check_restore(&record, state, source);
+    // The reducer appends with checked arithmetic (journal_checkpoint.rs
+    // `RestoreReducer::apply`), so a record at sequence 0 follows no source.
+    let source = if contiguous { record.sequence.checked_sub(1) } else { Some(source) };
+    if let Some(source) = source {
+        check_restore(&record, state, source);
+    }
     let archived = journal_record_for_archive(&record);
     match journal::seal(std::slice::from_ref(&archived)) {
         Ok(segment) => match cmux_tui_core::fuzz_entry::journal_segment(segment) {

@@ -1,5 +1,5 @@
 {
-  "recorded_on": "origin/perf/chrome-parity 7a59be1cabb1176fcfe19320ad4d3331bff4f532, before p05-ipc-062; the unknown-command variant lists re-recorded after p05-ipc-026, which appends the generated terminal-io variants to the Command enum and after p05-ipc-029, which appends the generated tabs variants after them (same names, new order)",
+  "recorded_on": "origin/perf/chrome-parity 7a59be1cabb1176fcfe19320ad4d3331bff4f532, before p05-ipc-062; the unknown-command variant lists re-recorded after p05-ipc-026, which appends the generated terminal-io variants to the Command enum and after p05-ipc-029, which appends the generated tabs variants after them (same names, new order); r-8 re-recorded after p15-oracle-220, which refuses the map form of an envelope enum member (invalid request envelope)",
   "cases": [
     {
       "line": "{\"id\":100,\"cmd\":\"ping\"}",
@@ -358,7 +358,7 @@
     {
       "line": "{\"protocol\":\"cmux.protocol/2\",\"type\":\"request\",\"id\":\"r-8\",\"operation\":{\"session.ping\":null},\"params\":{}}",
       "replies": [
-        "{\"error\":{\"code\":\"validation.invalid\",\"details\":{\"field\":\"machine\",\"reason\":\"required selector is missing\"},\"message\":\"required selector is missing\",\"retryable\":false},\"id\":\"r-8\",\"ok\":false,\"protocol\":\"cmux.protocol/2\",\"type\":\"response\"}"
+        "{\"error\":{\"code\":\"validation.invalid\",\"details\":{\"reason\":\"invalid request envelope\"},\"message\":\"invalid request envelope\",\"retryable\":false},\"id\":\"r-8\",\"ok\":false,\"protocol\":\"cmux.protocol/2\",\"type\":\"response\"}"
       ]
     },
     {

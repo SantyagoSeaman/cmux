@@ -64,3 +64,40 @@ fn request_envelope_refuses_the_map_form_of_an_enum_member() {
     assert!(parse(line(r#"{"session.ping":null}"#, r#""request""#)).is_err(), "map-form operation");
     assert!(parse(line(r#""session.ping""#, r#"{"request":null}"#)).is_err(), "map-form type");
 }
+
+/// A request is a JSON object only. serde's derived struct decoder also
+/// takes the sequence form (the members in declaration order), which the
+/// request head (server/request_head.rs) does not route as v2, so the head
+/// and the envelope disagreed on whether the line is v2 (found by the
+/// cmux-tui/fuzz `control_request` target, p15-oracle task 220).
+#[test]
+fn request_envelope_refuses_the_sequence_form() {
+    let parse = |line: &str| serde_json::from_str::<super::RequestEnvelope>(line);
+    let accepted = parse(
+        r#"{"protocol":"cmux.protocol/2","type":"request","id":"r-1","operation":"session.ping","params":{}}"#,
+    )
+    .expect("the object form");
+    assert_eq!(accepted.operation, ResourceOperation::SessionPing);
+    assert!(
+        parse(r#"["cmux.protocol/2","request","r-1","session.ping",{}]"#).is_err(),
+        "sequence-form envelope"
+    );
+    assert!(
+        serde_json::from_value::<super::RequestEnvelope>(serde_json::json!([
+            "cmux.protocol/2",
+            "request",
+            "r-1",
+            "session.ping",
+            {}
+        ]))
+        .is_err(),
+        "sequence-form envelope value"
+    );
+    assert!(
+        crate::resource_router::parse_resource_line(
+            r#"["cmux.protocol/2","request","r-1","session.ping",{}]"#
+        )
+        .is_none(),
+        "a sequence is not a v2 line"
+    );
+}
