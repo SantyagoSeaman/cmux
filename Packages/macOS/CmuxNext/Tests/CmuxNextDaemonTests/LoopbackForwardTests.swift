@@ -13,6 +13,8 @@ import Testing
         let path = "/tmp/cmux-lbf-\(UUID().uuidString.prefix(8)).sock"
         private var listener: Int32 = -1
         private var peer: Int32 = -1
+        /// Bytes read past the last whole line.
+        private var unread = Data()
 
         init() throws {
             listener = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -44,13 +46,15 @@ import Testing
 
         /// Reads one line the transport wrote, as a JSON object.
         func readObject() throws -> [String: Any] {
-            var line = Data()
-            var byte: UInt8 = 0
-            while true {
-                guard read(peer, &byte, 1) == 1 else { throw POSIXError(.ECONNRESET) }
-                if byte == 0x0A { break }
-                line.append(byte)
+            var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+            while unread.firstIndex(of: 0x0A) == nil {
+                let count = chunk.withUnsafeMutableBytes { read(peer, $0.baseAddress, $0.count) }
+                guard count > 0 else { throw POSIXError(.ECONNRESET) }
+                unread.append(contentsOf: chunk[..<count])
             }
+            let end = try #require(unread.firstIndex(of: 0x0A))
+            let line = Data(unread[unread.startIndex..<end])
+            unread = Data(unread[(end + 1)...])
             return try #require(try JSONSerialization.jsonObject(with: line) as? [String: Any])
         }
 
@@ -192,5 +196,37 @@ import Testing
         #expect(data["data"] as? String == Data("hello".utf8).base64EncodedString())
         let shutdown = try daemon.readObject()
         #expect(shutdown["cmd"] as? String == "loopback-shutdown", "the half close passed the data it follows")
+    }
+
+    /// A stream's lines queue at bulk priority (``TransportLineSender``): a control line written while they wait
+    /// for a daemon that does not read goes out before them, and they keep their own order. At control priority
+    /// the control line would come out after every one of them.
+    @Test func streamLinesWaitBehindAControlLine() throws {
+        let daemon = try FakeDaemon()
+        let transport = try connect(daemon, events: ControlEvents())
+        defer { transport.close() }
+        let sender = TransportLineSender(transport: transport)
+        // 1 MiB of stream lines, far past what the socket buffers: most of them wait in the writer.
+        let count = 128
+        let payload = Data(count: 6 * 1024).base64EncodedString()
+        for sequence in 0..<count {
+            let line = #"{"cmd":"loopback-data","stream":1,"seq":\#(sequence),"data":"\#(payload)"}"#
+            #expect(sender.send(Data(line.utf8)), "the transport refused stream line \(sequence)")
+        }
+        #expect(transport.sendLine(Data(#"{"cmd":"control-probe"}"#.utf8)))
+
+        var order: [Int] = []
+        var controlAt: Int?
+        while order.count < count || controlAt == nil {
+            let object = try daemon.readObject()
+            if object["cmd"] as? String == "control-probe" {
+                controlAt = order.count
+            } else {
+                order.append(try #require((object["seq"] as? NSNumber)?.intValue))
+            }
+        }
+        let position = try #require(controlAt)
+        #expect(position < count,"the control line waited behind every queued stream line (they went out at control)")
+        #expect(order == Array(0..<count), "the stream lines left their FIFO order")
     }
 }
