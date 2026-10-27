@@ -1,5 +1,5 @@
 {
-  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there. p05-ipc-128 recorded the Q9 run: `runtime.Q9` (items {file, line, key}, read by ipc-census.py for Q9 and Q18) and `runtime.Q9_run` (sha, host, command, runs); `triage.Q9` gives every (kind, site) of that run a `task` (`tasks.Q9` defines the p05-ipc-3NN ones; others are existing tasks), a `reason`, or both; `why` holds the backtrace that ties a site to its task.",
+  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there. p05-ipc-128 recorded the Q9 run: `runtime.Q9` (items {file, line, key}, read by ipc-census.py for Q9 and Q18) and `runtime.Q9_run` (sha, host, command, runs); `triage.Q9` gives every (kind, site) of that run a `task` (a list when each of several tasks removes one wait at the site) (`tasks.Q9` defines the p05-ipc-3NN ones; others are existing tasks), a `reason`, or both; `why` holds the backtrace that ties a site to its task. The request_path detector-test sites of `triage.Q9` (reason only, no task) are also `allowlist` entries {queue Q9 or Q18, file, key kind=...}, so Q9 and Q18 count only sites that a task removes.",
   "allowlist": [
     {
       "queue": "Q4",
@@ -74,6 +74,108 @@
       "file": "Packages/macOS/CmuxNext/Sources/CmuxNextDaemon/Connection/ResourceOperationClient.swift",
       "key": "resourceRequest",
       "reason": "The typed funnel itself: it sends a generated ResourceRequestLine through DaemonConnection's one resource request path (p05-ipc-045)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/conversation_attachment_close_tests.rs",
+      "key": "kind=fs_write",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+      "key": "kind=journal_wait",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+      "key": "kind=lock_hold_over_1ms",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+      "key": "kind=lock_hold_over_1ms",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+      "key": "kind=lock_hold_over_1ms",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+      "key": "kind=lock_hold_over_1ms",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q9",
+      "file": "crates/cmux-tui-core/src/workspace_registry/registry_intent_tests.rs",
+      "key": "kind=journal_wait",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+      "key": "kind=sqlite",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts the note at its file!/line!; no daemon request reaches it (triage.Q9 lists each line)."
     }
   ],
   "ipc5_ops": [
@@ -250,8 +352,8 @@
       },
       "Q9": {
         "title": "request-path I/O",
-        "count": 165,
-        "found": 165,
+        "count": 142,
+        "found": 171,
         "source": "plans/cmux-next/ipc-targets.json runtime.Q9",
         "recorded_sha": "31f1fd5480211e614fcad92ac25cb22951b3bc10"
       },
@@ -479,8 +581,8 @@
       },
       "Q18": {
         "title": "request-path SQLite reads",
-        "count": 89,
-        "found": 89,
+        "count": 73,
+        "found": 91,
         "source": "plans/cmux-next/ipc-targets.json runtime.Q9",
         "recorded_sha": "31f1fd5480211e614fcad92ac25cb22951b3bc10"
       }
@@ -492,6 +594,11 @@
         "file": "/rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs",
         "line": 250,
         "key": "kind=proc_scan"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/browser_host.rs",
+        "line": 384,
+        "key": "kind=process_spawn"
       },
       {
         "file": "crates/cmux-tui-core/src/conversation_attachment_close_tests.rs",
@@ -905,6 +1012,16 @@
       },
       {
         "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 296,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 296,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
         "line": 308,
         "key": "kind=lock_hold_over_1ms"
       },
@@ -1101,6 +1218,21 @@
       {
         "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
         "line": 385,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/conversation_tabs_wire.rs",
+        "line": 250,
+        "key": "kind=journal_wait"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/conversation_tabs_wire.rs",
+        "line": 250,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/conversation_tabs_wire.rs",
+        "line": 250,
         "key": "kind=sqlite"
       },
       {
@@ -1326,19 +1458,29 @@
           "env": {
             "CMUX_TUI_REQUEST_PATH_IO": "record"
           },
-          "result": "83 sites. 207 lib tests failed and cargo stopped before the integration targets; the 8 server::capabilities::ipc_grant_tests hang on Linux and were killed after every other test ended."
+          "result": "83 sites. 207 lib tests failed and cargo stopped before the integration targets; the 8 server::capabilities::ipc_grant_tests and the 6 server::remote_entry tests did not finish and were killed after every other test ended."
         },
         {
-          "what": "each test binary on its own (lib minus ipc_grant_tests, and the 20 tests/*.rs targets)",
+          "what": "each test binary on its own (lib minus the 8 ipc_grant_tests and the 6 remote_entry tests, and the 20 tests/*.rs targets)",
           "env": {
             "CMUX_TUI_REQUEST_PATH_IO": "record",
             "CMUX_DAEMON_BLOCKING": "record"
           },
-          "result": "165 sites, a superset of the first run's. With the thread blocking detector panicking (its Debug default), mux-line-out panics at server/outbound_batch.rs:57 (condvar-wait), which fails most socket tests before their handlers run. In record mode all 20 integration targets pass and the lib has 3245 passed, 246 failed, 14 ignored."
+          "result": "165 sites, a superset of the first run's; a lower bound. All 20 integration targets pass; the lib has 3245 passed, 246 failed, 14 ignored, 14 filtered out. CMUX_DAEMON_BLOCKING=record did not hold for the lib binary: server/request_thread_tests.rs:21 and :36 (on_request_thread, on_request_thread_with) call set_mode(BlockingMode::Panic) for the whole process and never restore it, so after the first such test every later test ran in panic mode. 152 failures are the thread blocking detector panicking mux-line-out at server/outbound_batch.rs:57 (condvar-wait), before the request's handler ran; the rest are panics at sqlite and fs calls on mux-seq-control (server/cmd_server.rs:107, cmd_tabs.rs:473, ...) and timing tests. By module: server::agent_transfer 39, server::agent_inventory_tests 38, mux::tests 37, server::agent_session_attach_tests 27, server::client_hello 21, server::frame_dispatch 12."
+        },
+        {
+          "what": "run 2's 246 failed lib tests and its 14 skipped ones (8 ipc_grant_tests, 6 remote_entry), each in its own process: the lib test binary with --exact NAME --test-threads=1, 48 processes at a time, so no other test's set_mode reaches it",
+          "env": {
+            "CMUX_TUI_REQUEST_PATH_IO": "record",
+            "CMUX_DAEMON_BLOCKING": "record",
+            "TMPDIR": "a directory only this user can replace (the shell_integration tests refuse /work/tmp)",
+            "CMUX_BROWSER_HOST_BIN": "the cmux-browser-host the test build made (its own nested cargo build fails outside cargo test)"
+          },
+          "result": "171 sites with runs 1 and 2: 6 new ones (server/conversation_tabs_wire.rs:250 journal_wait, sqlite and lock_hold_over_1ms; server/cmd_panes.rs:296 sqlite and lock_hold_over_1ms; browser_host.rs:384 process_spawn). No blocking detector panic. 256 of the 260 pass, the 8 ipc_grant_tests and 6 remote_entry tests too (they hang only in the full run). 4 fail after their handlers ran: connection_frame_replies_match_the_recorded_dispatch, frame_dispatch_a_cancel_must_name_its_request_method and tab_marked_unread_column_is_added_and_an_empty_row_is_dropped fail the same assertion without the record env (base failures); fork_count_bash_forks_nothing_at_startup_or_per_command_on_bash_5_3 refuses a noisy host baseline. local_resize_bounds_the_drain_to_a_queued_snapshot failed once and passes on its own (timing)."
         }
       ],
-      "sites": 165,
-      "notes": "Linux run: proc_scan sites read /proc here, sysctl or proc_pidinfo on macOS, at the same call sites. lock_hold_over_1ms depends on timing, so a fleet run can show a different subset of the sqlite sites. Backtraces for the non-sqlite sites come from CMUX_TUI_REQUEST_PATH_IO=panic:<kind> runs with RUST_BACKTRACE=1."
+      "sites": 171,
+      "notes": "Linux run: proc_scan sites read /proc here, sysctl or proc_pidinfo on macOS, at the same call sites. lock_hold_over_1ms depends on timing, so a fleet run can show a different subset of the sqlite sites. Backtraces for the non-sqlite sites come from CMUX_TUI_REQUEST_PATH_IO=panic:<kind> runs with RUST_BACKTRACE=1. request_thread_tests.rs leaves the process in BlockingMode::Panic, so a single-process lib run cannot hold CMUX_DAEMON_BLOCKING=record: run the tests that fail in it again one per process (run 3)."
     }
   },
   "triage": {
@@ -1351,10 +1493,17 @@
         "why": "Not a cmux line: process-info (cmd_terminals.rs:372-376, tests/pty.rs process_info_reports_live_foreground_cwd) passes platform::foreground_* to Option::and_then as a fn item, so #[track_caller] stops at core's FnOnce::call_once. Three notes per call."
       },
       {
+        "kind": "process_spawn",
+        "file": "crates/cmux-tui-core/src/browser_host.rs",
+        "line": 384,
+        "task": "p05-ipc-305",
+        "why": "The note's own line in browser_host.rs start (Inner::credentials and start are not #[track_caller]). Backtrace (panic:process_spawn, browser_host_command the_verified_app_dials_the_daemons_host_and_receives_the_session_end_close): command_dispatch.rs:80 browser-host-provider -> browser_host_command.rs:53 run -> browser_host.rs:246 credentials -> :384 start, which spawns cmux-browser-host on the request thread when no host runs."
+      },
+      {
         "kind": "fs_write",
         "file": "crates/cmux-tui-core/src/conversation_attachment_close_tests.rs",
         "line": 62,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
@@ -1409,79 +1558,79 @@
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 31,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 31,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 46,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 56,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 72,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 85,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 85,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 109,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 135,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 147,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 147,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "journal_wait",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 174,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/request_path_tests.rs",
         "line": 175,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "lock_hold_over_1ms",
@@ -1620,8 +1769,11 @@
         "kind": "journal_wait",
         "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
         "line": 339,
-        "task": "p05-ipc-121",
-        "why": "Backtrace (panic:journal_wait): workspace.create and terminal creates reach surface_spawn.rs:276 commit_terminal -> commit_registry_intent -> wait_for_commit_result."
+        "task": [
+          "p05-ipc-121",
+          "p05-ipc-125"
+        ],
+        "why": "Two waits, every frame #[track_caller] up to topology.rs:339 (resource_topology_operation -> commit_resource_topology_operation -> effectful_operation.rs -> creation_settlement.rs resource_correlated_creation_operation). Wait 1, p05-ipc-121: execute_resource_topology_effect -> surface_spawn.rs:276 commit_terminal -> commit_registry_intent -> wait_for_commit_result (backtrace, panic:journal_wait). Wait 2, p05-ipc-125: creation_settlement.rs:125 commit_full_resource_effect_projection -> resource_effects.rs:218 commit_resource_effect_projection -> effect_commit.rs:59 commit_effect_intent -> commit_registry_intent -> wait_for_commit_result, the wait of effects.rs:166 (same chain in the conversation_tabs_wire.rs:250 backtrace). The site leaves Q9 when both have landed."
       },
       {
         "kind": "lock_hold_over_1ms",
@@ -1913,6 +2065,20 @@
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 296,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 296,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
         "line": 308,
         "task": "p05-ipc-136",
         "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
@@ -2191,6 +2357,27 @@
         "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
       },
       {
+        "kind": "journal_wait",
+        "file": "crates/cmux-tui-core/src/server/conversation_tabs_wire.rs",
+        "line": 250,
+        "task": "p05-ipc-125",
+        "why": "Backtrace (panic:journal_wait, agent_transfer a_landed_chat_still_opens_in_a_tab_of_this_machine_after_a_restart): new-conversation-tab create -> conversation_tabs.rs:150 new_conversation_tab_as -> topology_ops.rs:133 new_browser_tab_with_fields_as -> creation_settlement.rs:125 commit_full_resource_effect_projection -> effect_commit.rs:59 commit_effect_intent -> commit_registry_intent -> effect_intents.rs:164 send_effect -> wait_for_commit_result."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/conversation_tabs_wire.rs",
+        "line": 250,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/conversation_tabs_wire.rs",
+        "line": 250,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
         "line": 95,
@@ -2299,13 +2486,13 @@
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
         "line": 109,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
         "line": 110,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "lock_hold_over_1ms",
@@ -2379,43 +2566,43 @@
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
         "line": 69,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
         "line": 88,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
         "line": 88,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
         "line": 91,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
         "line": 91,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
         "line": 47,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
         "line": 49,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "process_spawn",
@@ -2435,37 +2622,37 @@
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
         "line": 74,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "lock_hold_over_1ms",
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
         "line": 86,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
         "line": 86,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
         "line": 98,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "sqlite",
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
         "line": 135,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9, Q18)."
       },
       {
         "kind": "journal_wait",
         "file": "crates/cmux-tui-core/src/workspace_registry/registry_intent_tests.rs",
         "line": 31,
-        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line. Allowlisted (Q9)."
       }
     ]
   },
@@ -2537,6 +2724,24 @@
         "depends_on": [
           "p05-ipc-003",
           "p05-ipc-130"
+        ]
+      },
+      {
+        "id": "p05-ipc-305",
+        "title": "Q9 process_spawn: browser-host-provider launches its host off the request thread",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/browser_host.rs",
+          "cmux-tui/crates/cmux-tui-core/src/server/browser_host_command.rs",
+          "cmux-tui/crates/cmux-tui-core/src/server/deferred_commands.rs",
+          "cmux-tui/crates/cmux-tui-core/src/server/browser_host_provider_tests.rs"
+        ],
+        "change": "Site browser_host.rs:384: the first browser-host-provider request (browser_host_command.rs:53 -> browser_host.rs:246 credentials) spawns cmux-browser-host and waits for its credentials on the request thread. Launch it on a launcher thread and answer from the launch's completion through server/deferred_commands.rs (AsyncReply), as Chrome launches child processes on its process-launcher thread and replies on completion (content/browser/child_process_launcher_helper.cc LaunchOnLauncherThread). Requests that arrive during the launch wait on the same launch, not a second one.",
+        "acceptance": "A Q9 record run has no process_spawn site in browser_host.rs; a first browser-host-provider call has request_path_io.process_spawn == 0 and two concurrent first calls start one host; browser_host_provider_tests pass.",
+        "test_phase": "RUST(browser_host_command); Q9 record run (p05-ipc-128 test_phase)",
+        "size": "M",
+        "machine_queue": "Q9",
+        "depends_on": [
+          "p05-ipc-003"
         ]
       }
     ]
