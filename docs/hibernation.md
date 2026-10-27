@@ -29,7 +29,7 @@ screen (`_acpmux/attach` shown, `_acpmux/view` visible). The agent resumes its c
 (`claude --resume`, ACP `session/load`). The prompt is accepted and drawn at once, before the
 agent is up. A hibernation and its wake add no row to the transcript. A wake that fails fails
 its prompt the way any failed start does, with Retry. A hibernation survives a daemon restart
-(`SessionMeta::hibernated`).
+(`SessionMeta::hibernated_ms`).
 
 Every hibernation logs `hibernated` (cause, how long the chat was idle, how long the exit took).
 Every wake logs `woke` or `wake failed` (cause `prompt`, `typing`, `click` or `request`, how

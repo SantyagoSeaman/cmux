@@ -53,7 +53,7 @@ async fn each_gate_keeps_a_session_awake() {
 async fn a_stored_hibernation_comes_back_and_clearing_it_drops_every_trace() {
     let (hub, session) = chat().await;
     let mut meta = session.meta();
-    meta.hibernated = true;
+    meta.hibernated_ms = 1;
     meta.id = format!("{}-restored", meta.id);
     let restored = hub.make_session(meta);
     assert_ne!(restored.hibernated_at.load(Ordering::SeqCst), 0, "a restart lost the hibernation");
@@ -61,6 +61,6 @@ async fn a_stored_hibernation_comes_back_and_clearing_it_drops_every_trace() {
     hub.clear_hibernation(&restored);
     assert_eq!(restored.hibernated_at.load(Ordering::SeqCst), 0);
     assert!(restored.wake_cause.lock().unwrap().is_none(), "a stale wake cause");
-    assert!(!restored.meta().hibernated);
+    assert_eq!(restored.meta().hibernated_ms, 0);
     hub.shutdown_all().await;
 }

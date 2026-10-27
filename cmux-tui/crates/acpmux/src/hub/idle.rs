@@ -216,7 +216,8 @@ impl Hub {
                     tracing::info!(session = %session.id, "stopped while the idle exit ended it: not hibernated");
                     continue;
                 }
-                session.meta.lock().unwrap_or_else(|e| e.into_inner()).hibernated = true;
+                session.meta.lock().unwrap_or_else(|e| e.into_inner()).hibernated_ms =
+                    crate::store::now_ms().max(1);
                 self.save_meta(&session);
                 tracing::info!(
                     session = %session.id,
@@ -238,9 +239,10 @@ impl Hub {
     pub(super) fn clear_hibernation(&self, session: &Session) {
         session.hibernated_at.store(0, Ordering::SeqCst);
         session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let was =
-            std::mem::take(&mut session.meta.lock().unwrap_or_else(|e| e.into_inner()).hibernated);
-        if was {
+        let was = std::mem::take(
+            &mut session.meta.lock().unwrap_or_else(|e| e.into_inner()).hibernated_ms,
+        );
+        if was != 0 {
             self.save_meta(session);
         }
     }
@@ -270,8 +272,9 @@ impl Hub {
     /// A start of `session`'s agent begins (`ensure_child`): a wake when the idle exit hibernated
     /// it, timed from here.
     pub(super) fn wake_began(&self, session: &Session) -> Option<(std::time::Instant, u64)> {
-        let at = session.hibernated_at.load(Ordering::SeqCst);
-        (at != 0).then(|| (std::time::Instant::now(), at))
+        // Wall time (Unix ms) it hibernated at, kept across a restart; 0 when not stored yet.
+        let at = session.meta().hibernated_ms;
+        (session.hibernated_at.load(Ordering::SeqCst) != 0).then(|| (std::time::Instant::now(), at))
     }
 
     /// The start `wake_began` timed ended: logs the wake with its cause and duration. A failed
@@ -285,16 +288,16 @@ impl Hub {
         // `at`: the mark when the wake began (a stop meanwhile clears the session's).
         let Some((began, at)) = began else { return };
         let took_ms = began.elapsed().as_millis() as u64;
-        let slept_secs = self.clock_now().saturating_sub(at) / 1_000_000_000;
+        let slept_secs = (at != 0).then(|| crate::store::now_ms().saturating_sub(at) / 1000);
         let cause = *session.wake_cause.lock().unwrap_or_else(|e| e.into_inner());
         let cause = cause.unwrap_or("request");
         match failed {
             None => {
                 self.clear_hibernation(session);
-                tracing::info!(session = %session.id, cause, took_ms, slept_secs, "woke");
+                tracing::info!(session = %session.id, cause, took_ms, ?slept_secs, "woke");
             }
             Some(e) => {
-                tracing::warn!(session = %session.id, cause, took_ms, slept_secs, "wake failed: {}", e.message)
+                tracing::warn!(session = %session.id, cause, took_ms, ?slept_secs, "wake failed: {}", e.message)
             }
         }
     }

@@ -817,7 +817,7 @@ impl Hub {
 
     pub(super) fn make_session(&self, mut meta: SessionMeta) -> Arc<Session> {
         // Hibernated before a restart: marked again, so it wakes on a click and draws no row.
-        let hibernated_at = if meta.hibernated { self.clock_now().max(1) } else { 0 };
+        let hibernated_at = if meta.hibernated_ms != 0 { self.clock_now().max(1) } else { 0 };
         let (inbound_tx, inbound_rx) = mpsc::channel(1024);
         // A Claude chat saved without `steering` (an older build) still steers once adopted.
         meta.steering |= crate::claude_stdio::steers_by_info(meta.agent_info.as_ref());

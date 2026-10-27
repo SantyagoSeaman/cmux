@@ -424,11 +424,12 @@ fn a_hibernation_and_its_wake_draw_no_row() {
         mux(1, "stopped", json!({"code": 0, "hibernated": true})),
         mux(2, "exited", json!({"code": -15, "hibernated": true})),
         mux(3, "resumed", json!({"level": "exact", "wake": true})),
+        mux(4, "config", json!({"replayed": true})),
     ] {
         t.apply_event(&ev);
     }
     assert!(t.items.is_empty(), "{:?}", t.items);
-    t.apply_event(&mux(4, "stopped", json!({"code": 0, "hibernated": false})));
-    t.apply_event(&mux(5, "resumed", json!({"level": "exact", "wake": false})));
+    t.apply_event(&mux(5, "stopped", json!({"code": 0, "hibernated": false})));
+    t.apply_event(&mux(6, "resumed", json!({"level": "exact", "wake": false})));
     assert_eq!(t.items.len(), 2, "{:?}", t.items);
 }

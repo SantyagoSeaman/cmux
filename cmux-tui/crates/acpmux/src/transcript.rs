@@ -786,6 +786,9 @@ impl Transcript {
                     text: format!("model: {}", self.model.clone().unwrap_or_default()),
                 });
             }
+            // The settings a new agent was given again (`replay_config`): nothing changed, and a
+            // wake from hibernation does it every time.
+            "config" if msg.get("replayed").and_then(Value::as_bool) == Some(true) => {}
             "config" => {
                 if msg.get("configId").and_then(Value::as_str) == Some("model") {
                     self.model = msg.get("value").and_then(Value::as_str).map(str::to_owned);
