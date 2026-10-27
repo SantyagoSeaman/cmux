@@ -31,6 +31,7 @@ impl WorkspaceRegistry {
         let fingerprint = terminal_close_fingerprint(mutation, terminal_id, expected_incarnation)?;
         let resource_result_json = canonical_json(resource_result)?;
         let resource_deltas = &self.prune_stated_topology_deltas(resource_deltas)?;
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let terminal_batch = [(terminal_id.to_string(), expected_incarnation.map(str::to_string))];

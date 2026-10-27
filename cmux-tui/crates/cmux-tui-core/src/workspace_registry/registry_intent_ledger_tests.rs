@@ -2,6 +2,12 @@
 //! written: the replay check, the revision CAS and the revision the writer
 //! writes (p05-ipc-132, `mutation_ledger_cache`).
 
+use std::collections::VecDeque;
+use std::sync::{Mutex, Weak};
+use std::time::Duration;
+
+use cmux_threads::sync::mpsc::{SyncSender, sync_channel};
+
 use super::*;
 
 fn registry_workspace(id: u64, key: &str) -> RegistryWorkspace {
@@ -26,12 +32,22 @@ fn create_intent(
     key: &str,
     expected_revision: Option<u64>,
 ) -> WorkspaceCommitIntent {
+    create_intent_in(registry, mutation_id, key, None, expected_revision)
+}
+
+fn create_intent_in(
+    registry: &WorkspaceRegistry,
+    mutation_id: &str,
+    key: &str,
+    expected_generation: Option<&str>,
+    expected_revision: Option<u64>,
+) -> WorkspaceCommitIntent {
     let mutation = WorkspaceMutation::daemon(mutation_id, "test").expect("mutation");
     registry
         .prepare_workspace_commit(
             &mutation,
             &create_fingerprint(key),
-            None,
+            expected_generation,
             expected_revision,
             "workspace-added",
             key,
@@ -242,4 +258,337 @@ fn terminals_committed_together_keep_contiguous_revisions_when_one_fails() {
     assert_eq!(registry.terminal_revision().expect("terminal revision"), terminal_base + 1);
     let head = registry.ledger_cache.head(mutation_ledger::KeyedLedger::Terminal);
     assert_eq!(head, terminal_base + 1);
+}
+
+/// What the scripted writer does with the next intent it is sent.
+enum WriterStep {
+    /// Apply it in a batch transaction and answer.
+    Apply,
+    /// Answer an error without applying it (the batch was refused).
+    Refuse,
+    /// Take it but answer late, an indeterminate receipt
+    /// ([`ScriptedWriter::answer_held`]).
+    Hold,
+    /// Hand it back: the writer stopped before it queued.
+    NotQueued,
+}
+
+type HeldIntent = (RegistryIntent, SyncSender<Result<RegistryReceipt, String>>);
+
+/// The journal writer's part, scripted: it applies an intent in its own
+/// batch transaction under the intent's SAVEPOINT on its own thread, as
+/// `writer_batch` does, and keeps every intent error it answered.
+struct ScriptedWriter {
+    connection: Weak<RegistryConnection>,
+    steps: Mutex<VecDeque<WriterStep>>,
+    held: Mutex<Option<HeldIntent>>,
+    applied: Mutex<usize>,
+    errors: Mutex<Vec<String>>,
+}
+
+impl ScriptedWriter {
+    fn install(
+        registry: &WorkspaceRegistry,
+        steps: impl IntoIterator<Item = WriterStep>,
+    ) -> Arc<Self> {
+        let writer = Arc::new(Self {
+            connection: Arc::downgrade(&registry.connection),
+            steps: Mutex::new(steps.into_iter().collect()),
+            held: Mutex::new(None),
+            applied: Mutex::new(0),
+            errors: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn RegistryIntentSink> = writer.clone();
+        registry.connection.install_intent_sink(sink);
+        writer
+    }
+
+    /// One writer batch with `intent`, on a writer thread.
+    fn apply(&self, intent: &RegistryIntent) -> Result<RegistryReceipt, String> {
+        let connection = self.connection.upgrade().expect("connection");
+        let answer = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let db = connection.get();
+                    let tx = db.unchecked_transaction().expect("batch");
+                    let answer = intent.apply_in_savepoint(&tx).expect("the batch itself");
+                    tx.commit().expect("batch commit");
+                    answer
+                })
+                .join()
+                .expect("writer thread")
+        });
+        *self.applied.lock().unwrap() += 1;
+        if let Err(error) = &answer {
+            self.errors.lock().unwrap().push(error.clone());
+        }
+        answer
+    }
+
+    /// The late answer of the held intent: the writer applies it now and
+    /// answers its request. Returns the committed revision.
+    fn answer_held(&self) -> Result<u64, String> {
+        let (intent, answer) = self.held.lock().unwrap().take().expect("a held intent");
+        let result = self.apply(&intent);
+        let revision = result.as_ref().map_err(String::clone).map(|receipt| match receipt {
+            RegistryReceipt::Terminal(commit) => commit.revision,
+            RegistryReceipt::Workspace(receipt) => receipt.commit.revision,
+            RegistryReceipt::Effect(receipt) => receipt.revision(),
+        });
+        answer.send(result).expect("the request keeps the receipt channel");
+        revision
+    }
+
+    fn applied(&self) -> usize {
+        *self.applied.lock().unwrap()
+    }
+
+    fn errors(&self) -> Vec<String> {
+        self.errors.lock().unwrap().clone()
+    }
+}
+
+impl RegistryIntentSink for ScriptedWriter {
+    fn accepts(&self) -> bool {
+        true
+    }
+
+    fn send(
+        &self,
+        intent: RegistryIntent,
+        _site: &'static std::panic::Location<'static>,
+    ) -> EffectSend {
+        let step = self.steps.lock().unwrap().pop_front().expect("a scripted writer step");
+        match step {
+            WriterStep::Apply => {
+                EffectSend::Sent(self.apply(&intent).map_err(|error| anyhow::anyhow!(error)))
+            }
+            WriterStep::Refuse => {
+                EffectSend::Sent(Err(anyhow::anyhow!("the writer refused the batch")))
+            }
+            WriterStep::Hold => {
+                let (answer, receipt) = sync_channel(1);
+                *self.held.lock().unwrap() = Some((intent, answer));
+                EffectSend::Indeterminate(
+                    anyhow::anyhow!("the registry commit is indeterminate"),
+                    PendingRegistryReceipt::for_test(receipt),
+                )
+            }
+            WriterStep::NotQueued => EffectSend::NotQueued(Box::new(intent)),
+        }
+    }
+}
+
+fn reserve_terminal(
+    registry: &WorkspaceRegistry,
+    terminal_id: &str,
+    workspace_key: &str,
+) -> TerminalCommitIntent {
+    let terminal = RegistryTerminal {
+        terminal_id: terminal_id.into(),
+        workspace_key: workspace_key.into(),
+        incarnation: None,
+        lifecycle: TerminalLifecycle::Launching,
+        launch_spec: serde_json::json!({
+            "command": ["/bin/zsh"], "cwd": "/tmp", "rows": 24, "cols": 80
+        }),
+        exit: None,
+        on_exit: TerminalOnExit::Close,
+    };
+    let mutation = WorkspaceMutation::daemon(format!("reserve-{terminal_id}"), "test").unwrap();
+    registry
+        .prepare_terminal_commit(
+            &mutation,
+            &serde_json::json!({"op": "reserve", "id": terminal_id}),
+            None,
+            None,
+            "terminal-reserved",
+            &terminal,
+            &serde_json::json!({"terminal_id": terminal_id}),
+        )
+        .expect("prepare")
+}
+
+#[test]
+fn the_writer_applies_a_mutation_once_and_its_retry_replays_the_committed_revision() {
+    let mut registry = WorkspaceRegistry::in_memory("ledger-writer-once").expect("registry");
+    let writer = ScriptedWriter::install(&registry, [WriterStep::Apply]);
+    let base = stored_workspace_revision(&registry);
+    let first = create_intent(&registry, "create-once", "once", Some(base));
+    let committed =
+        into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(first)).unwrap());
+    assert!(!committed.replayed);
+    assert_eq!(committed.revision, base + 1);
+
+    for expected_revision in [Some(base), None] {
+        let retry = create_intent(&registry, "create-once", "once", expected_revision);
+        let replayed =
+            into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(retry)).unwrap());
+        assert!(replayed.replayed);
+        assert_eq!(replayed.revision, committed.revision, "the reply is the committed revision");
+    }
+    assert_eq!(writer.applied(), 1, "the retries replay before the writer");
+    assert_eq!(writer.errors(), Vec::<String>::new());
+    assert_eq!(ledger_rows(&registry, "create-once"), [committed.revision]);
+    assert_eq!(stored_workspace_revision(&registry), committed.revision);
+}
+
+#[test]
+fn an_indeterminate_intent_commits_at_its_admitted_revision_and_its_retry_replays() {
+    let mut registry = WorkspaceRegistry::in_memory("ledger-writer-late").expect("registry");
+    let writer = ScriptedWriter::install(&registry, [WriterStep::Hold]);
+    let base = stored_workspace_revision(&registry);
+    let late = create_intent(&registry, "create-late", "late", Some(base));
+    let error = registry.commit_registry_intent(RegistryIntent::Workspace(late)).unwrap_err();
+    assert!(error.to_string().contains("indeterminate"), "{error:#}");
+    assert_eq!(registry.ledger_cache.head(mutation_ledger::KeyedLedger::Workspace), base + 1);
+
+    let late = writer.answer_held().expect("the late commit");
+    assert_eq!(late, base + 1, "the writer wrote the admitted revision");
+
+    // The retry drains the late answer, then replays it from SQLite.
+    let retry = create_intent(&registry, "create-late", "late", Some(base));
+    let replayed =
+        into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(retry)).unwrap());
+    assert!(replayed.replayed);
+    assert_eq!(replayed.revision, late);
+    assert_eq!(writer.applied(), 1);
+    assert_eq!(writer.errors(), Vec::<String>::new());
+    assert_eq!(ledger_rows(&registry, "create-late"), [late]);
+    let settled = registry.connection.take_settled_receipts();
+    assert_eq!(settled.len(), 1, "the late commit still owes its state update");
+}
+
+#[test]
+fn a_direct_store_waits_for_an_indeterminate_admitted_intent_before_its_revision() {
+    let mut registry = WorkspaceRegistry::in_memory("ledger-direct-after-late").expect("registry");
+    let writer = ScriptedWriter::install(
+        &registry,
+        [WriterStep::Apply, WriterStep::Apply, WriterStep::Hold],
+    );
+    let base = stored_workspace_revision(&registry);
+    let home = create_intent(&registry, "create-home", "home", Some(base));
+    registry.commit_registry_intent(RegistryIntent::Workspace(home)).expect("workspace");
+    let closed_id = "00000000000040008000000000000001";
+    let late_id = "00000000000040008000000000000002";
+    let closed = reserve_terminal(&registry, closed_id, "home");
+    let closed = registry.commit_registry_intent(RegistryIntent::Terminal(closed)).unwrap();
+    let terminal_base = closed.into_terminal().expect("terminal").revision;
+
+    let late = reserve_terminal(&registry, late_id, "home");
+    let error = registry.commit_registry_intent(RegistryIntent::Terminal(late)).unwrap_err();
+    assert!(error.to_string().contains("indeterminate"), "{error:#}");
+
+    // A store that writes the terminal revision in its own transaction runs
+    // while the late intent is still queued in the writer.
+    let (done, finished) = std::sync::mpsc::channel();
+    let (waited, store, late) = std::thread::scope(|scope| {
+        let store = scope.spawn(|| {
+            let mutation = WorkspaceMutation::daemon("close-direct", "test").unwrap();
+            let closed = registry.close_terminal(&mutation, None, None, closed_id, None);
+            done.send(()).expect("test thread");
+            closed
+        });
+        let waited = finished.recv_timeout(Duration::from_millis(200)).is_err();
+        let late = writer.answer_held();
+        (waited, store.join().expect("store thread"), late)
+    });
+    assert_eq!(writer.errors(), Vec::<String>::new(), "no writer-side revision failure");
+    assert_eq!(late, Ok(terminal_base + 1), "the late intent commits at its admitted revision");
+    assert!(waited, "the store waited for the late answer");
+    let store = store.expect("the direct store commits after it");
+    assert_eq!(store.revision, terminal_base + 2);
+    assert_eq!(registry.terminal_revision().unwrap(), terminal_base + 2);
+}
+
+#[test]
+fn a_refused_writer_commit_gives_its_admitted_revision_back() {
+    let mut registry = WorkspaceRegistry::in_memory("ledger-writer-refused").expect("registry");
+    let writer = ScriptedWriter::install(&registry, [WriterStep::Refuse, WriterStep::Apply]);
+    let base = stored_workspace_revision(&registry);
+    let refused = create_intent(&registry, "create-refused", "refused", Some(base));
+    registry.commit_registry_intent(RegistryIntent::Workspace(refused)).unwrap_err();
+    assert_eq!(registry.ledger_cache.head(mutation_ledger::KeyedLedger::Workspace), base);
+
+    let kept = create_intent(&registry, "create-kept", "kept", Some(base));
+    let kept =
+        into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(kept)).unwrap());
+    assert_eq!(kept.revision, base + 1);
+    assert!(ledger_rows(&registry, "create-refused").is_empty());
+    assert_eq!(writer.applied(), 1);
+    assert_eq!(writer.errors(), Vec::<String>::new());
+}
+
+#[test]
+fn an_intent_the_writer_did_not_queue_commits_locally_at_its_admitted_revision() {
+    let mut registry = WorkspaceRegistry::in_memory("ledger-writer-stopped").expect("registry");
+    let writer = ScriptedWriter::install(&registry, [WriterStep::NotQueued]);
+    let base = stored_workspace_revision(&registry);
+    let intent = create_intent(&registry, "create-local", "local", Some(base));
+    let committed =
+        into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(intent)).unwrap());
+    assert!(!committed.replayed);
+    assert_eq!(committed.revision, base + 1);
+    let cached = registry.ledger_cache.committed(mutation_ledger::KeyedLedger::Workspace);
+    assert_eq!(cached, base + 1);
+    assert_eq!(writer.applied(), 0);
+}
+
+#[test]
+fn a_retry_after_a_restart_replays_before_the_generation_check() {
+    let root = std::env::temp_dir().join(format!("cmux-registry-ledger-restart-{}", new_uuid_v4()));
+    let session = "ledger-restart";
+    let mut registry = WorkspaceRegistry::open(&root, session).expect("registry");
+    let old_generation = registry.generation().to_string();
+    let base = stored_workspace_revision(&registry);
+    let first = create_intent_in(&registry, "create-old", "old", Some(&old_generation), Some(base));
+    let committed =
+        into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(first)).unwrap());
+    {
+        // Newer rows push the key out of the cache the reopen seeds.
+        let db = registry.connection.get();
+        let revision = i64::try_from(committed.revision).unwrap();
+        for index in 0..mutation_ledger::LEDGER_CACHE_CAPACITY {
+            let newer = WorkspaceMutation::daemon(format!("newer-{index}"), "test").unwrap();
+            let ledger = mutation_ledger::KeyedLedger::Workspace;
+            mutation_ledger::insert_keyed_mutation(&db, ledger, &newer, "{}", "{}", revision)
+                .expect("newer row");
+        }
+    }
+    drop(registry);
+
+    let mut registry = WorkspaceRegistry::open(&root, session).expect("reopen");
+    assert_ne!(registry.generation(), old_generation, "a new generation per open");
+    let retry = create_intent_in(&registry, "create-old", "old", Some(&old_generation), Some(base));
+    let replayed =
+        into_commit(registry.commit_registry_intent(RegistryIntent::Workspace(retry)).unwrap());
+    assert!(replayed.replayed);
+    assert_eq!(replayed.revision, committed.revision);
+
+    let fresh = create_intent_in(&registry, "create-new", "new", Some(&old_generation), None);
+    let conflict = registry.commit_registry_intent(RegistryIntent::Workspace(fresh)).unwrap_err();
+    assert!(conflict.to_string().starts_with("workspace generation conflict"), "{conflict:#}");
+    drop(registry);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn an_effect_commit_leaves_the_cached_revisions_alone() {
+    let mut registry = WorkspaceRegistry::in_memory("ledger-effect-commit").expect("registry");
+    let (key, operation) = ("effect-key", "notification.create");
+    let fingerprint = serde_json::json!({"title": "hello"});
+    let intent = serde_json::json!({"notification_id": "notification_reserved"});
+    registry
+        .prepare_resource_effect(key, operation, &fingerprint, &intent, None, Some(0))
+        .expect("prepare");
+    registry.mark_resource_effect_executing(key, operation, &fingerprint).expect("executing");
+    assert!(!registry.ledger_cache.is_stale());
+    let outcome = ResourceEffectOutcome::Success(serde_json::json!({"id": "notice"}));
+    let deltas = serde_json::json!([{"kind": "upsert"}]);
+    let revision = registry
+        .commit_resource_effect(key, operation, &fingerprint, &outcome, Some(&deltas))
+        .expect("effect commit");
+    assert_eq!(revision, 1, "it wrote resource_revision");
+    assert_eq!(registry.resource_revision().unwrap(), revision);
+    assert!(!registry.ledger_cache.is_stale(), "resource_revision is not a ledger revision");
 }

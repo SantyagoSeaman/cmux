@@ -174,6 +174,7 @@ impl WorkspaceRegistry {
                 "terminal exit topology changes must be a JSON array"
             );
         }
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let mut terminal = read_terminal(&tx, terminal_id)?

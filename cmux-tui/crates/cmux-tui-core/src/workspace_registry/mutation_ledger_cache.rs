@@ -16,15 +16,21 @@
 //! The cache is seeded at open from `meta` and the newest rows of each
 //! ledger. A key older than the cache still replays: the writer keeps its
 //! in-transaction ledger check, and a revision conflict looks the key up in
-//! SQLite before it refuses. Stores that still commit their own request-side
-//! transactions advance a revision without admitting: the connection's update
-//! hook marks the cache stale on any `meta` write outside an admitted apply,
-//! and the next admission rereads both revisions.
+//! SQLite before it refuses (as does a generation conflict: replay first).
+//!
+//! Stores that still commit their own request-side transactions advance a
+//! revision without admitting. They first wait for every indeterminate
+//! admitted intent (`settle_admissions_before_direct_write`): one still queued
+//! in the writer must commit at its admitted revision before they take the
+//! next. The connection's update hook then marks the cache stale when a write
+//! outside an admitted apply touches the `revision` or `terminal_revision` row
+//! of `meta`, and the next admission rereads both revisions. Other `meta` rows
+//! (`resource_revision`, the active workspace) leave the cache alone.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use anyhow::Context as _;
 use rusqlite::Connection;
@@ -383,14 +389,58 @@ fn stored_revision(connection: &Connection, ledger: KeyedLedger) -> anyhow::Resu
         .with_context(|| format!("{} registry revision is invalid", ledger.label()))
 }
 
+/// What the connection's update hook watches: the `meta` rowids of the two
+/// revision rows. Their writes are UPDATEs, which keep the rowid; an INSERT
+/// into `meta` may recreate one under a new rowid, so it counts too.
+#[derive(Debug)]
+struct RevisionRows {
+    stale: AtomicBool,
+    rowids: [AtomicI64; 2],
+}
+
+impl RevisionRows {
+    fn new(connection: &Connection) -> anyhow::Result<Self> {
+        let rows = Self { stale: AtomicBool::new(false), rowids: [-1, -1].map(AtomicI64::new) };
+        rows.reread(connection)?;
+        Ok(rows)
+    }
+
+    fn reread(&self, connection: &Connection) -> anyhow::Result<()> {
+        for (slot, ledger) in
+            self.rowids.iter().zip([KeyedLedger::Workspace, KeyedLedger::Terminal])
+        {
+            let rowid = connection
+                .query_row(
+                    "SELECT rowid FROM meta WHERE key = ?1",
+                    [ledger.revision_key()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .with_context(|| format!("{} registry revision is missing", ledger.label()))?;
+            slot.store(rowid, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// The update hook: a revision row written outside an admitted apply.
+    fn note_write(&self, action: Action, table: &str, rowid: i64) {
+        if table != "meta" || ADMITTED_WRITE.with(Cell::get) {
+            return;
+        }
+        let revision_row = self.rowids.iter().any(|slot| slot.load(Ordering::Acquire) == rowid);
+        if revision_row || action == Action::SQLITE_INSERT {
+            self.stale.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// Both ledgers' in-memory revisions and recent entries, owned by the
 /// workspace registry (its lock guards them).
 #[derive(Debug)]
 pub(crate) struct LedgerCache {
     workspace: KeyedCache,
     terminal: KeyedCache,
-    /// Set by the connection's update hook (see the module docs).
-    stale: Arc<AtomicBool>,
+    /// Shared with the connection's update hook (see the module docs).
+    revision_rows: Arc<RevisionRows>,
 }
 
 impl LedgerCache {
@@ -400,13 +450,11 @@ impl LedgerCache {
         let cache = Self {
             workspace: KeyedCache::seed(connection, KeyedLedger::Workspace)?,
             terminal: KeyedCache::seed(connection, KeyedLedger::Terminal)?,
-            stale: Arc::new(AtomicBool::new(false)),
+            revision_rows: Arc::new(RevisionRows::new(connection)?),
         };
-        let stale = Arc::clone(&cache.stale);
-        connection.update_hook(Some(move |_: Action, _: &str, table: &str, _: i64| {
-            if table == "meta" && !ADMITTED_WRITE.with(Cell::get) {
-                stale.store(true, Ordering::Release);
-            }
+        let revision_rows = Arc::clone(&cache.revision_rows);
+        connection.update_hook(Some(move |action: Action, _: &str, table: &str, rowid: i64| {
+            revision_rows.note_write(action, table, rowid);
         }))?;
         Ok(cache)
     }
@@ -427,20 +475,28 @@ impl LedgerCache {
 
     /// True when a revision may have moved outside an admitted intent.
     pub(crate) fn is_stale(&self) -> bool {
-        self.stale.load(Ordering::Acquire)
+        self.revision_rows.stale.load(Ordering::Acquire)
     }
 
-    /// Reread both revisions if [`Self::is_stale`].
+    /// True while an admitted intent's commit has no answer: the writer may
+    /// still write its revision. Between requests only indeterminate ones
+    /// remain (a request settles its own before it lets the registry go).
+    pub(crate) fn has_unanswered(&self) -> bool {
+        !self.workspace.admitted.is_empty() || !self.terminal.admitted.is_empty()
+    }
+
+    /// Reread both revisions (and their rows) if [`Self::is_stale`].
     pub(crate) fn refresh(&mut self, connection: &Connection) -> anyhow::Result<()> {
-        if !self.stale.swap(false, Ordering::AcqRel) {
+        if !self.revision_rows.stale.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
         let resynced = self
-            .workspace
-            .resync(connection, KeyedLedger::Workspace)
+            .revision_rows
+            .reread(connection)
+            .and_then(|()| self.workspace.resync(connection, KeyedLedger::Workspace))
             .and_then(|()| self.terminal.resync(connection, KeyedLedger::Terminal));
         if resynced.is_err() {
-            self.stale.store(true, Ordering::Release);
+            self.revision_rows.stale.store(true, Ordering::Release);
         }
         resynced
     }
@@ -474,7 +530,7 @@ impl LedgerCache {
         let workspace = self.workspace.forget_indeterminate();
         let terminal = self.terminal.forget_indeterminate();
         if workspace || terminal {
-            self.stale.store(true, Ordering::Release);
+            self.revision_rows.stale.store(true, Ordering::Release);
         }
     }
 

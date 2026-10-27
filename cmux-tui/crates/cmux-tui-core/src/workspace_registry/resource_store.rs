@@ -1488,6 +1488,9 @@ impl WorkspaceRegistry {
         validate_resource_patch(patch)?;
         let fingerprint = canonical_json(fingerprint)?;
         let started = std::time::Instant::now();
+        if workspace_ledger.is_some() {
+            self.settle_admissions_before_direct_write()?;
+        }
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         if let Some(replayed) = resource_patch_replay(&tx, mutation, operation, &fingerprint)? {

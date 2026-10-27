@@ -586,6 +586,9 @@ impl WorkspaceRegistry {
         let result_json = canonical_json(result)?;
         let created_path_json = canonical_json(created_path)?;
         let generation = self.generation.clone();
+        if workspace_ledger.is_some() {
+            self.settle_admissions_before_direct_write()?;
+        }
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let stored = read_creation_record(&tx, correlation_key)?.ok_or_else(|| {
@@ -916,6 +919,7 @@ impl WorkspaceRegistry {
         let generation = self.generation.clone();
         let (started, mut spans) = (std::time::Instant::now(), CommitSpans::default());
         let deltas = &self.prune_stated_topology_deltas(deltas)?;
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let (patch, deltas) = complete_terminal_close_patch(&tx, terminals, patch, deltas)?;

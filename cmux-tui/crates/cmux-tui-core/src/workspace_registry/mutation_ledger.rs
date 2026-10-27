@@ -14,6 +14,8 @@ use super::{new_uuid_v4, validate_identifier};
 #[path = "mutation_ledger_cache.rs"]
 mod cache;
 
+#[cfg(test)]
+pub(crate) use cache::LEDGER_CACHE_CAPACITY;
 pub(crate) use cache::{
     Admission, AdmittedWriteScope, LedgerCache, LedgerOutcome, LedgerRefusal, LedgerRequest,
     LedgerTicket, RevisionPlan,

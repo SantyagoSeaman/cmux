@@ -3173,6 +3173,7 @@ impl WorkspaceRegistry {
         expected_incarnation: Option<&str>,
     ) -> anyhow::Result<TerminalRegistryCommit> {
         let fingerprint = terminal_close_fingerprint(mutation, terminal_id, expected_incarnation)?;
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let commit = close_terminal_in_transaction(
@@ -3211,6 +3212,7 @@ impl WorkspaceRegistry {
         terminals: &[(String, Option<String>)],
     ) -> anyhow::Result<TerminalBatchClose> {
         validate_terminal_batch_close(mutation, terminals)?;
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let result = close_terminals_in_transaction(&tx, mutation, terminals, "topology-closed")?;

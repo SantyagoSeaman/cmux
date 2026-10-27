@@ -17,7 +17,8 @@ fn ledger_database(workspace_revision: u64, terminal_revision: u64) -> Connectio
         .expect("schema");
     connection
         .execute(
-            "INSERT INTO meta(key, value) VALUES('revision', ?1), ('terminal_revision', ?2)",
+            "INSERT INTO meta(key, value) VALUES('revision', ?1), ('terminal_revision', ?2),
+               ('resource_revision', '0')",
             params![workspace_revision.to_string(), terminal_revision.to_string()],
         )
         .expect("revisions");
@@ -147,6 +148,34 @@ fn only_meta_writes_outside_an_admitted_apply_mark_the_cache_stale() {
     cache.refresh(&connection).expect("refresh");
     assert!(!cache.is_stale());
     assert_eq!(cache.head(KeyedLedger::Workspace), 9);
+}
+
+#[test]
+fn only_the_revision_rows_of_meta_mark_the_cache_stale() {
+    let connection = ledger_database(2, 4);
+    let mut cache = LedgerCache::seed(&connection).expect("seed");
+    // Every effect commit writes resource_revision: the ledgers did not move.
+    connection
+        .execute("UPDATE meta SET value = '7' WHERE key = 'resource_revision'", [])
+        .expect("resource revision");
+    assert!(!cache.is_stale());
+    connection
+        .execute("UPDATE meta SET value = '5' WHERE key = 'terminal_revision'", [])
+        .expect("terminal revision");
+    assert!(cache.is_stale());
+    cache.refresh(&connection).expect("refresh");
+    assert_eq!(cache.head(KeyedLedger::Terminal), 5);
+
+    // A recreated revision row has a new rowid; the refresh follows it.
+    connection.execute("DELETE FROM meta WHERE key = 'revision'", []).expect("delete");
+    connection.execute("INSERT INTO meta(key, value) VALUES('revision', '1')", []).expect("insert");
+    assert!(cache.is_stale());
+    cache.refresh(&connection).expect("refresh");
+    assert_eq!(cache.head(KeyedLedger::Workspace), 1);
+    connection.execute("UPDATE meta SET value = '3' WHERE key = 'revision'", []).expect("write");
+    assert!(cache.is_stale());
+    cache.refresh(&connection).expect("refresh");
+    assert_eq!(cache.head(KeyedLedger::Workspace), 3);
 }
 
 #[test]

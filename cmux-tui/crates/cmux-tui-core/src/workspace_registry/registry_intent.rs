@@ -421,8 +421,10 @@ impl WorkspaceRegistry {
 
     /// Replay `intent` from the ledger cache, or check its generation, CAS
     /// its expected revision against the newest admitted one and admit it at
-    /// the next. A conflict looks the key up in SQLite first: a retry older
-    /// than the cache still replays. Returns the replayed receipt, if any.
+    /// the next. A generation or revision conflict looks the key up in
+    /// SQLite first, so the order stays replay, generation, CAS: a retry
+    /// older than the cache still replays (after a restart too, when the
+    /// generation changed). Returns the replayed receipt, if any.
     #[track_caller]
     pub(crate) fn admit_ledger_intent(
         &mut self,
@@ -435,7 +437,11 @@ impl WorkspaceRegistry {
         if let Some(replay) = self.ledger_cache.replay(&request)? {
             return intent.replayed(replay.revision, &replay.result_json).map(Some);
         }
-        intent.check_generation()?;
+        if let Err(conflict) = intent.check_generation() {
+            return self
+                .replay_stored(intent)?
+                .map_or(Err(conflict), |replayed| Ok(Some(replayed)));
+        }
         let refusal = match self.ledger_cache.admit(&request) {
             Ok(mutation_ledger::Admission::Admitted(revision)) => {
                 intent.admit_at(revision);
@@ -449,17 +455,39 @@ impl WorkspaceRegistry {
         if !matches!(refusal, mutation_ledger::LedgerRefusal::RevisionConflict { .. }) {
             return Err(refusal.into());
         }
+        self.replay_stored(intent)?.map_or(Err(refusal.into()), |replayed| Ok(Some(replayed)))
+    }
+
+    /// The replay of `intent` from its stored ledger row, for a key the
+    /// cache no longer holds; `None` when it never committed.
+    #[track_caller]
+    fn replay_stored(
+        &self,
+        intent: &(impl LedgerIntent + ?Sized),
+    ) -> anyhow::Result<Option<RegistryReceipt>> {
         let request = intent.ledger_request();
         let stored = mutation_ledger::stored_keyed_mutation(
             &self.connection.get(),
             request.ledger,
             request.mutation,
         )?;
-        let Some((fingerprint, result_json, revision)) = stored else {
-            return Err(refusal.into());
-        };
+        let Some((fingerprint, result_json, revision)) = stored else { return Ok(None) };
         let replay = request.replay_of(&fingerprint, result_json, revision)?;
         intent.replayed(replay.revision, &replay.result_json).map(Some)
+    }
+
+    /// Run before a store that writes `revision` or `terminal_revision` in
+    /// its own transaction (`RevisionPlan::Next`): an admitted intent the
+    /// writer may still commit must take its admitted revision first, or its
+    /// commit would find that revision taken. Waits for those answers
+    /// (bounded, as every prepare does) only while there are any.
+    #[track_caller]
+    pub(crate) fn settle_admissions_before_direct_write(&mut self) -> anyhow::Result<()> {
+        if self.ledger_cache.has_unanswered() {
+            self.connection.drain_unsettled()?;
+            self.ledger_cache.reconcile_indeterminate();
+        }
+        Ok(())
     }
 
     /// Commit an intent in its own request-side transaction and fsync: the

@@ -51,6 +51,7 @@ impl WorkspaceRegistry {
         validate_resource_patch(patch)?;
         let fingerprint = canonical_json(fingerprint)?;
         let deltas = &self.prune_stated_topology_deltas(deltas)?;
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         if let Some(resource) = resource_patch_replay(&tx, mutation, operation, &fingerprint)? {

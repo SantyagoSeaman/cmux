@@ -63,6 +63,7 @@ impl WorkspaceRegistry {
         old_incarnation: &str,
         any_end: bool,
     ) -> anyhow::Result<Option<u64>> {
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let Some(terminal) = read_terminal(&tx, terminal_id)? else { return Ok(None) };
@@ -122,6 +123,7 @@ impl WorkspaceRegistry {
         incarnation: &str,
         terminal_snapshot: Value,
     ) -> anyhow::Result<Option<(u64, u64)>> {
+        self.settle_admissions_before_direct_write()?;
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
         let Some(terminal) = read_terminal(&tx, terminal_id)? else { return Ok(None) };
