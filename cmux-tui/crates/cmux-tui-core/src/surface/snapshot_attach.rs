@@ -297,7 +297,6 @@ impl Surface {
     /// The ack of a gap lets the viewer's READY go. Takes only the `pty.taps`
     /// lock, never the terminal lock: an ack never waits for the parser.
     #[cfg(unix)]
-    #[cfg_attr(not(test), expect(dead_code, reason = "routed by attach frames once bound"))]
     pub(crate) fn ring_ack(
         &self,
         receiver: &AttachFrameReceiver,
@@ -394,6 +393,42 @@ impl Surface {
             return Err(ghostty_vt::Error::InvalidValue);
         };
         let term = pty.term.lock().unwrap();
+        self.viewer_snapshot_locked(pty, term, receiver, images_cap)
+    }
+
+    /// [`Self::take_viewer_snapshot`] for a ring viewer: none while its READY
+    /// waits for the ring to release its cursor (a stall), checked under the
+    /// terminal lock that the snapshot is taken under. Only output, under that
+    /// lock, gaps a viewer, so a gap that lands after the viewer's Snapshot
+    /// event (between `recv_viewer_event` and this call) keeps the snapshot
+    /// pending instead of sending a READY the stall's next skip passes. The
+    /// worker waits for the release and asks again.
+    #[cfg(unix)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "taken by attach frames once bound"))]
+    pub(crate) fn take_ring_viewer_snapshot(
+        &self,
+        receiver: &AttachFrameReceiver,
+        images_cap: Option<u64>,
+    ) -> ghostty_vt::Result<Option<TerminalSnapshotFrame>> {
+        let Some(pty) = self.as_pty() else {
+            return Err(ghostty_vt::Error::InvalidValue);
+        };
+        let term = pty.term.lock().unwrap();
+        if receiver.ring_gap_pending() {
+            return Ok(None);
+        }
+        self.viewer_snapshot_locked(pty, term, receiver, images_cap).map(Some)
+    }
+
+    /// The snapshot a viewer's worker owes it, encoded under `term`, which is
+    /// released once the frames it supersedes are dropped.
+    fn viewer_snapshot_locked(
+        &self,
+        pty: &PtySurface,
+        term: RankedGuard<'_, terminal_runtime::TerminalSlot>,
+        receiver: &AttachFrameReceiver,
+        images_cap: Option<u64>,
+    ) -> ghostty_vt::Result<TerminalSnapshotFrame> {
         let mut data = term.encode_snapshot(SnapshotPhase::Complete)?;
         let cut = pty.snapshot_position.load();
         let (generation, offset) = cut;

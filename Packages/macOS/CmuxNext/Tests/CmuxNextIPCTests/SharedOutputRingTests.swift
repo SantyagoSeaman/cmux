@@ -123,8 +123,8 @@ import Testing
         #expect(watched == nil)
     }
 
-    /// p05-ipc-119: the ack is the start of the oldest live span, or the end of the last cut when none is, sent only
-    /// when it moved (one per display frame).
+    /// p05-ipc-119: the ack is the start of the oldest live span, or the end of what was handed to the consumer when
+    /// none is, sent only when it moved (one per display frame). A range only checked (and queued) moves nothing.
     @Test func theAckIsTheOldestLiveSpanAndOnlyWhenItMoved() throws {
         let file = try RingFile()
         let ring = try SharedOutputRing(adopting: file.readOnlyDescriptor())
@@ -132,6 +132,7 @@ import Testing
         #expect(ring.takeAck() == nil) // nothing cut: the cursor is where the ring started
         var first: SharedOutputRing.Spans? = try ring.cut(from: 0, to: 40)
         var second: SharedOutputRing.Spans? = try ring.cut(from: 40, to: 100)
+        ring.consumed(through: 100) // both handed to the consumer
         #expect(first?.head != nil && second?.head != nil)
         #expect(ring.takeAck() == nil) // the span at 0 is live
         first = nil
@@ -140,6 +141,29 @@ import Testing
         second = nil
         #expect(ring.takeAck() == 100)
         #expect(ring.takeAck() == nil)
+
+        // The decoder checks a range, then queues it: its spans go at once, and the consumer will cut it again.
+        file.push(Self.bytes(50, seed: 10))
+        do { _ = try ring.cut(from: 100, to: 150) }
+        #expect(ring.takeAck() == nil, "a queued range is still to be parsed")
+        ring.consumed(through: 150)
+        #expect(ring.takeAck() == 150)
+    }
+
+    /// p05-ipc-119: a RING_ACK is the 16-byte header alone (kind 11, the stream, no payload), its aux the offset.
+    @Test func aRingAckIsTheHeaderAloneWithTheOffsetAsItsAux() throws {
+        let frame = SharedOutputRing.ringAckFrame(stream: 0x0203, offset: 0x0102_0304_0506_0708)
+        #expect(frame == [0xFF, 11, 0x03, 0x02, 0, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
+        var reader = FrameReader()
+        reader.negotiateFrames()
+        frame.withUnsafeBytes { reader.push($0) }
+        guard case .frame(let decoded)? = try reader.next() else {
+            Issue.record("a RING_ACK is not a frame")
+            return
+        }
+        #expect(decoded.header.kind == SharedOutputRing.ringAckKind)
+        #expect(decoded.header.stream == 0x0203)
+        #expect(decoded.header.length == 0 && decoded.payload.isEmpty)
     }
 
     /// p05-ipc-119, flood while holding: Ghostty holds a span while the daemon floods a full ring and more. A daemon
@@ -151,6 +175,7 @@ import Testing
         let printed = Self.bytes(100, seed: 11)
         file.push(printed)
         var held: SharedOutputRing.Spans? = try ring.cut(from: 0, to: 100)
+        ring.consumed(through: 100) // Ghostty parses it
         var cursor: UInt64 = 0
         var skips = 0
         for round in 0 ..< 60 {

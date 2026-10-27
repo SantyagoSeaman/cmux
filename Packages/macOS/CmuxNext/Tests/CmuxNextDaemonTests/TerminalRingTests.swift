@@ -1,4 +1,5 @@
 import CmuxNextCompat
+import CmuxNextIPC
 import Darwin
 import Foundation
 import Testing
@@ -405,6 +406,84 @@ struct TerminalRingTests {
         }
     }
 
+    // MARK: Consumer cursor (RING_ACK, p05-ipc-119)
+
+    /// A backlog against a daemon that honors the cursor, through the real ring: advances decoded while the
+    /// consumer is behind are queued, still to be parsed, so the stream's RING_ACK stays at their start however
+    /// far the decoder checked. The daemon floods past that ack plus the capacity and skips instead of
+    /// overwriting the queued bytes. When the consumer comes back, its take finds the one gap (the run starts
+    /// before the ring's base): no lap at the cut, no torn span, one request for the fresh READY, and the ack
+    /// of the gap follows once the app holds nothing.
+    @Test func aQueuedRunHoldsTheAckSoAFloodSkipsItAndGapsOnce() async throws {
+        let file = try DaemonRingFile(capacity: 4096)
+        let shared = try SharedOutputRing(adopting: file.readOnlyDescriptor())
+        let ring = TerminalSharedOutputRing(shared)
+        let hooks = RingHooks()
+        let queue = TerminalEventQueue(recorder: nil)
+        let acks = TerminalRingAcks(stream: 5, send: hooks.sendRingAck)
+        var decoder = TerminalAttachFrameDecoder(surface: Self.surface,
+                                                 rings: Self.streams(Self.mapping(ring), queue, hooks))
+        deliver(Self.ready(offset: 0, generation: 1), &decoder, queue, hooks)
+        deliver(Self.ringFrame(meta: #"{"capacity":4096,"base":0,"layout":1}"#), &decoder, queue, hooks)
+        #expect(await queue.next() == .snapshot(Self.readyFrame(offset: 0, generation: 1)))
+
+        // Two advances while the consumer is behind: one queued run, not handed over, so no ack moves.
+        for (value, end) in [(UInt8(0x61), UInt64(1000)), (0x62, 2000)] {
+            file.push(Self.bytes(value, count: Int(end - file.publishedEnd)))
+            deliver(Self.advance(to: end), &decoder, queue, hooks)
+        }
+        #expect(queue.queuedItemCount == 1)
+        #expect(acks.displayFrame(ring: ring) == nil)
+
+        // The daemon floods, one ack per display frame, until it must skip rather than write over the queued run.
+        var cursor: UInt64 = 0
+        var round = 0
+        var skipped = false
+        while !skipped, round < 10 {
+            if let ack = acks.displayFrame(ring: ring) { cursor = ack }
+            skipped = file.push(Self.bytes(UInt8(truncatingIfNeeded: round), count: 1000), cursor: cursor)
+            round += 1
+        }
+        #expect(skipped)
+        #expect(cursor == 0)  // the queued run held the ack at its start
+        #expect(hooks.ringAcks.withLock { $0 }.isEmpty)
+
+        // The consumer comes back: the run is one gap, never a lapped or torn span.
+        queue.finish()
+        #expect(await Self.drain(queue).isEmpty)
+        #expect(hooks.requests.withLock { $0 } == [.gap])
+        #expect(shared.cutLapCount == 0 && shared.releaseLapCount == 0)
+        // It holds nothing: its ack reaches the ring's base, which releases the gap.
+        #expect(acks.displayFrame(ring: ring) == shared.base)
+        #expect(hooks.ringAcks.withLock { $0 } == [Data(SharedOutputRing.ringAckFrame(stream: 5, offset: shared.base))])
+    }
+
+    /// A consumer that keeps up: output it took moves the ack once its span is released, and one display frame
+    /// sends one RING_ACK however many spans it parsed.
+    @Test func handedOverOutputMovesTheAckOncePerFrame() async throws {
+        let file = try DaemonRingFile(capacity: 4096)
+        let shared = try SharedOutputRing(adopting: file.readOnlyDescriptor())
+        let ring = TerminalSharedOutputRing(shared)
+        let hooks = RingHooks()
+        let queue = TerminalEventQueue(recorder: nil)
+        let acks = TerminalRingAcks(stream: 5, send: hooks.sendRingAck)
+        var decoder = TerminalAttachFrameDecoder(surface: Self.surface,
+                                                 rings: Self.streams(Self.mapping(ring), queue, hooks))
+        deliver(Self.ready(offset: 0, generation: 1), &decoder, queue, hooks)
+        deliver(Self.ringFrame(meta: #"{"capacity":4096,"base":0,"layout":1}"#), &decoder, queue, hooks)
+        _ = await queue.next()  // the READY
+        for end in [UInt64(300), 700, 1200] {
+            file.push(Self.bytes(0x61, count: Int(end - file.publishedEnd)))
+            deliver(Self.advance(to: end), &decoder, queue, hooks)
+        }
+        await Self.parse(queue) {
+            #expect(acks.displayFrame(ring: ring) == nil)  // the span 0 ..< 1200 is live
+        }
+        #expect(acks.displayFrame(ring: ring) == 1200)
+        #expect(acks.displayFrame(ring: ring) == nil)  // coalesced: it did not move
+        #expect(hooks.ringAcks.withLock { $0 } == [Data(SharedOutputRing.ringAckFrame(stream: 5, offset: 1200))])
+    }
+
     @Test func aMappedRingTakesTheFramesDescriptor() throws {
         let ring = InProcessRing(capacity: 1024)
         let frame = Self.ringFrame(ring, end: 0)
@@ -428,6 +507,14 @@ struct TerminalRingTests {
     private static func streams(_ mapper: @escaping TerminalRingMapper, _ queue: TerminalEventQueue,
                                 _ hooks: RingHooks) -> TerminalAttachFrameDecoder.RingStreams {
         TerminalAttachFrameDecoder.RingStreams(mapper: mapper, queue: queue, delivery: hooks.delivery)
+    }
+
+    /// A mapper that hands out `ring` for any RING (and closes the descriptor).
+    private static func mapping(_ ring: any TerminalOutputRing) -> TerminalRingMapper {
+        { (descriptor: Int32, _: TerminalRingGrant) throws(TerminalRingRefusal) -> any TerminalOutputRing in
+            Darwin.close(descriptor)
+            return ring
+        }
     }
 
     private func deliver(_ frame: TerminalAttachFrame, _ decoder: inout TerminalAttachFrameDecoder,

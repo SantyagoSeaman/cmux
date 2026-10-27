@@ -14,20 +14,29 @@
 //! producer has against its consumer's read position
 //! (mojo/core/data_pipe_producer_dispatcher.cc, `available_capacity_`). It
 //! does not wait either: it skips the chunk, moves `base` past it and gaps
-//! every cursor ([`Publish::gapped`]). A gapped reader cannot cut across the
-//! hole ([`SpanError::BeforeBase`]); its ack at or past the hole
-//! ([`RingAck::GapReleased`]) says it holds nothing more, and it resumes at a
-//! snapshot taken after that ack. So a span a reader holds is never
-//! overwritten: a slow reader costs one resync, never torn bytes.
+//! every reading cursor ([`Publish::gapped`]). A gapped reader cannot cut
+//! across the hole ([`SpanError::BeforeBase`]); its ack at or past the hole
+//! ([`RingAck::GapAcked`]) says it holds nothing more. So a span a reader
+//! holds is never overwritten: a slow reader costs a resync, never torn bytes.
+//!
+//! One stall, one resync per reader. The skips of a stall last while any
+//! gapped cursor has not acked its gap; a cursor that acked waits, holding
+//! nothing and blocking nothing, and is not gapped again. When the last gap
+//! is acked the stall is over, and every waiting cursor is released together
+//! ([`Publish::released`], [`RingAcked::released`]): it reads again from the
+//! ring's end, where its stream resumes at a snapshot taken after the release.
+//! A reader that opens during a stall waits for its end the same way.
 //!
 //! The ring is shared by every viewer of a terminal, so a skip costs them all
-//! the skipped bytes. A gapped cursor therefore holds the writer back only
-//! for [`GAP_HOLD_CAPACITIES`] capacities of skipped output: time for its
-//! reader to finish the span it parses. A reader still holding a span after
-//! that has stopped (a hung app); the writer writes again, and that reader's
-//! release check finds the lap ([`OutputRingReader::check`]), as before
-//! cursors existed.
-//!
+//! the skipped bytes. A gapped cursor therefore holds the stall for
+//! [`GAP_HOLD_CAPACITIES`] capacities of output since its gap, no longer:
+//! time for its reader to finish the span it parses. A reader that has not
+//! acked by then has stopped (a hung app) or does not ack. Its cursor lapses
+//! and is released: the writer no longer honors it, its stream resyncs, and
+//! a span it still holds is found lapped by its release check
+//! ([`OutputRingReader::check`]), as before cursors existed. Its next ack
+//! that leaves the writer a capacity of room makes it a reading cursor again.
+
 //! Layout (little endian, [`HEADER`] bytes, then `capacity` data bytes):
 //!
 //! ```text
@@ -211,6 +220,23 @@ impl RingReader {
     }
 }
 
+/// Where one reader's cursor stands with the writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Standing {
+    /// It reads the ring and holds no span below `acked`.
+    Reading,
+    /// A skip left a hole that ends at `gap`; the reader may still hold
+    /// spans at or after `acked`. `since` counts the output pushed since the
+    /// gap, against [`GAP_HOLD_CAPACITIES`].
+    Gapped { gap: u64, since: u64 },
+    /// It acked its gap (or opened during a stall): it holds nothing and
+    /// blocks nothing, and is released when the stall is over.
+    Waiting,
+    /// It did not ack its gap within the hold: the writer no longer honors
+    /// it, until an ack leaves the writer a capacity of room.
+    Lapsed,
+}
+
 /// The writer's view of one reader's cursor.
 #[derive(Debug)]
 struct Cursor {
@@ -218,23 +244,22 @@ struct Cursor {
     live: Weak<ReaderToken>,
     /// The reader holds no span below this offset and cuts none below it.
     acked: u64,
-    /// Gapped: the base after the skipped chunk, which the reader acks once
-    /// it holds nothing more.
-    gap: Option<u64>,
-    /// Output skipped since the gap.
-    skipped_since_gap: u64,
+    standing: Standing,
 }
 
 impl Cursor {
     /// Whether writing up to `end` could overwrite a published byte at or
     /// after `acked` while the ring ends at `published`: the reader may hold
     /// such a byte, and the byte at `o` shares its slot with `o + capacity`.
-    /// A gapped cursor stops holding the writer after
-    /// [`GAP_HOLD_CAPACITIES`] capacities of skipped output.
+    /// A waiting or lapsed cursor holds nothing the writer honors.
     fn blocks(&self, published: u64, end: u64, capacity: u64) -> bool {
-        let held_too_long = self.gap.is_some()
-            && self.skipped_since_gap >= capacity.saturating_mul(GAP_HOLD_CAPACITIES);
-        !held_too_long && self.acked < published && end > self.acked.saturating_add(capacity)
+        matches!(self.standing, Standing::Reading | Standing::Gapped { .. })
+            && self.acked < published
+            && end > self.acked.saturating_add(capacity)
+    }
+
+    fn gapped(&self) -> bool {
+        matches!(self.standing, Standing::Gapped { .. })
     }
 }
 
@@ -247,23 +272,38 @@ pub struct Publish {
     /// `base` moved to `end`.
     pub skipped: bool,
     /// Cursors this push gapped (by [`RingReader::id`]): each reader's next
-    /// cut fails, and it resyncs after it acks the gap.
+    /// cut fails, and its stream resyncs once the cursor is released.
     pub gapped: Vec<u64>,
+    /// Cursors this push released: the stall ended (the last gapped cursor
+    /// lapsed) or the cursor itself lapsed. Each stream resyncs now, by a
+    /// snapshot taken after this push.
+    pub released: Vec<u64>,
 }
 
 /// What a RING_ACK did to its cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RingAck {
-    /// The cursor moved to the acked offset.
+    /// The cursor moved to the acked offset (a lapsed cursor reads again).
     Moved,
-    /// The cursor was at or past the offset already (an ack may arrive late).
+    /// The cursor was at or past the offset already (an ack may arrive late),
+    /// or holds nothing the offset could move.
     Stale,
-    /// The reader acked its gap: it holds nothing, so its cursor moved to the
-    /// ring's end. Its stream resyncs now, by a snapshot taken after this ack
-    /// (at or after that end).
-    GapReleased,
+    /// The reader acked its gap: it holds nothing. Its stream resyncs when
+    /// [`RingAcked::released`] names it, now or when the stall ends.
+    GapAcked,
     /// No open cursor of this writer.
     Unknown,
+}
+
+/// What [`OutputRingWriter::ack`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RingAcked {
+    /// What the ack did to its own cursor.
+    pub ack: RingAck,
+    /// Cursors the ack released (it acked the stall's last gap), the acking
+    /// one included: each stream resyncs now, by a snapshot taken after this
+    /// ack.
+    pub released: Vec<u64>,
 }
 
 /// The ring's only writer: the daemon's output path for one terminal.
@@ -351,43 +391,55 @@ impl OutputRingWriter {
         self.skipped_bytes
     }
 
+    /// Whether a stall is on: a gapped cursor has not acked its gap yet. A
+    /// reader that opens now waits for its end ([`Self::open_reader`]).
+    pub fn stalled(&self) -> bool {
+        self.cursors.iter().any(|cursor| cursor.gapped() && cursor.live.strong_count() > 0)
+    }
+
     /// A consumer cursor for one more reader, acked at the ring's end now:
-    /// the reader's first span starts at or after it.
+    /// the reader's first span starts at or after it. During a stall
+    /// ([`Self::stalled`]) the cursor waits: the stall's skips would gap it
+    /// anyway, so its stream's first snapshot waits for the stall's end.
     pub fn open_reader(&mut self) -> RingReader {
         let id = self.next_reader;
         self.next_reader += 1;
         let token = Arc::new(ReaderToken { id });
-        self.cursors.push(Cursor {
-            id,
-            live: Arc::downgrade(&token),
-            acked: self.end,
-            gap: None,
-            skipped_since_gap: 0,
-        });
+        let standing = if self.stalled() { Standing::Waiting } else { Standing::Reading };
+        self.cursors.push(Cursor { id, live: Arc::downgrade(&token), acked: self.end, standing });
         RingReader { token }
     }
 
     /// `reader` acked `offset` (RING_ACK): it holds no span below it and cuts
     /// none below it. An offset past the end counts as the end.
-    pub fn ack(&mut self, reader: &RingReader, offset: u64) -> RingAck {
-        let end = self.end;
+    pub fn ack(&mut self, reader: &RingReader, offset: u64) -> RingAcked {
+        let (end, capacity) = (self.end, self.capacity);
         let token = Arc::as_ptr(&reader.token);
         let Some(cursor) = self.cursors.iter_mut().find(|cursor| cursor.live.as_ptr() == token)
         else {
-            return RingAck::Unknown;
+            return RingAcked { ack: RingAck::Unknown, released: Vec::new() };
         };
         let offset = offset.min(end);
-        if cursor.gap.is_some_and(|gap| offset >= gap) {
-            cursor.gap = None;
-            cursor.skipped_since_gap = 0;
-            cursor.acked = end;
-            return RingAck::GapReleased;
-        }
-        if offset <= cursor.acked {
-            return RingAck::Stale;
-        }
-        cursor.acked = offset;
-        RingAck::Moved
+        let ack = match cursor.standing {
+            Standing::Gapped { gap, .. } if offset >= gap => {
+                cursor.standing = Standing::Waiting;
+                RingAck::GapAcked
+            }
+            Standing::Reading | Standing::Gapped { .. } if offset > cursor.acked => {
+                cursor.acked = offset;
+                RingAck::Moved
+            }
+            Standing::Lapsed if offset.saturating_add(capacity) >= end => {
+                cursor.standing = Standing::Reading;
+                cursor.acked = offset;
+                RingAck::Moved
+            }
+            Standing::Reading | Standing::Gapped { .. } | Standing::Waiting | Standing::Lapsed => {
+                RingAck::Stale
+            }
+        };
+        let released = if ack == RingAck::GapAcked { self.end_stall() } else { Vec::new() };
+        RingAcked { ack, released }
     }
 
     /// Append `bytes` and publish them. Never waits. A chunk that could
@@ -396,24 +448,65 @@ impl OutputRingWriter {
     /// last `capacity` bytes (the offsets before them are lost, and a reader
     /// of them is lapped).
     pub fn push(&mut self, bytes: &[u8]) -> Publish {
-        let end = self.end + bytes.len() as u64;
+        let len = bytes.len() as u64;
+        let end = self.end + len;
         if bytes.is_empty() {
-            return Publish { end, skipped: false, gapped: Vec::new() };
+            return Publish { end, skipped: false, gapped: Vec::new(), released: Vec::new() };
         }
         self.cursors.retain(|cursor| cursor.live.strong_count() > 0);
         let (published, capacity) = (self.end, self.capacity);
-        if self.cursors.iter().any(|cursor| cursor.blocks(published, end, capacity)) {
-            return self.skip(end, bytes.len() as u64);
+        let skipped = self.cursors.iter().any(|cursor| cursor.blocks(published, end, capacity));
+        if skipped {
+            self.skip(end, len);
+        } else {
+            self.write(end, bytes);
         }
-        self.write(end, bytes);
-        Publish { end, skipped: false, gapped: Vec::new() }
+        let mut gapped = Vec::new();
+        let mut released = Vec::new();
+        let hold = capacity.saturating_mul(GAP_HOLD_CAPACITIES);
+        for cursor in &mut self.cursors {
+            match cursor.standing {
+                Standing::Reading if skipped => {
+                    cursor.standing = Standing::Gapped { gap: end, since: 0 };
+                    gapped.push(cursor.id);
+                }
+                Standing::Gapped { gap, since } => {
+                    let since = since.saturating_add(len);
+                    if since >= hold {
+                        cursor.standing = Standing::Lapsed;
+                        released.push(cursor.id);
+                    } else {
+                        cursor.standing = Standing::Gapped { gap, since };
+                    }
+                }
+                Standing::Reading | Standing::Waiting | Standing::Lapsed => {}
+            }
+        }
+        released.extend(self.end_stall());
+        Publish { end, skipped, gapped, released }
+    }
+
+    /// When no gapped cursor is left, the stall is over: every waiting cursor
+    /// reads again from the ring's end. The ids it released.
+    fn end_stall(&mut self) -> Vec<u64> {
+        if self.stalled() {
+            return Vec::new();
+        }
+        let end = self.end;
+        let mut released = Vec::new();
+        for cursor in &mut self.cursors {
+            if cursor.standing == Standing::Waiting && cursor.live.strong_count() > 0 {
+                cursor.standing = Standing::Reading;
+                cursor.acked = end;
+                released.push(cursor.id);
+            }
+        }
+        released
     }
 
     /// Moves the ring past a chunk without writing it: `base` first, then
     /// `end` (release), so a reader that sees the new end sees the hole.
-    /// Every cursor not gapped yet is gapped at the new base; every gapped
-    /// one counts the skipped bytes against its hold.
-    fn skip(&mut self, end: u64, len: u64) -> Publish {
+    fn skip(&mut self, end: u64, len: u64) {
         let map = self.mapping.as_ptr();
         // SAFETY: header words of the writer's mapping.
         unsafe {
@@ -424,15 +517,6 @@ impl OutputRingWriter {
         self.end = end;
         self.skips += 1;
         self.skipped_bytes += len;
-        let mut gapped = Vec::new();
-        for cursor in &mut self.cursors {
-            if cursor.gap.is_none() {
-                cursor.gap = Some(end);
-                gapped.push(cursor.id);
-            }
-            cursor.skipped_since_gap = cursor.skipped_since_gap.saturating_add(len);
-        }
-        Publish { end, skipped: true, gapped }
     }
 
     /// The copy of one chunk that ends at `end`, then its publication.

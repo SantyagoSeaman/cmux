@@ -20,9 +20,11 @@
 //! acks the offset below which it holds no span (RING_ACK), and the ring
 //! never writes a byte the app may still parse. Output that would skips the
 //! ring instead and gaps the viewers ([`RingPublish::gapped`]); a gapped
-//! viewer's resync waits for its app's ack of the gap, so the READY it gets
-//! is taken after the app let go of every old span (attach_tap.rs,
-//! `ring_gap`).
+//! viewer's resync waits until the ring releases its cursor
+//! ([`RingPublish::released`]): when every gapped viewer acked its gap (the
+//! stall is over) or its own hold lapsed. So the READY it gets is taken
+//! after its app let go of every old span, and after the last skip of the
+//! stall: one stall is one READY per viewer (attach_tap.rs, `ring_gap`).
 
 use super::super::TerminalColors;
 
@@ -33,6 +35,8 @@ pub(crate) struct RingPublish {
     pub(crate) end: u64,
     /// Cursors the chunk gapped (the ring skipped it for one of them).
     pub(crate) gapped: Vec<u64>,
+    /// Cursors the chunk released: their viewers' READY goes now.
+    pub(crate) released: Vec<u64>,
 }
 
 /// The end of the published ring bytes a ring viewer may read next: one
@@ -76,13 +80,13 @@ impl RingAdvance {
 }
 
 #[cfg(unix)]
-pub(crate) use ring::{OutputRingGrant, TerminalOutputRing};
+pub(crate) use ring::{OutputRingGrant, RingCursor, TerminalOutputRing};
 
 #[cfg(unix)]
 mod ring {
     use super::RingPublish;
     use cmux_ipc::output_ring::{
-        DEFAULT_CAPACITY, LAYOUT, OutputRingWriter, RingAck, RingError, RingReader,
+        DEFAULT_CAPACITY, LAYOUT, OutputRingWriter, RingAcked, RingError, RingReader,
     };
     use std::os::fd::OwnedFd;
 
@@ -102,11 +106,11 @@ mod ring {
         /// may still hold a byte they would overwrite. Never waits.
         pub(crate) fn publish(&mut self, bytes: &[u8]) -> RingPublish {
             let publish = self.writer.push(bytes);
-            RingPublish { end: publish.end, gapped: publish.gapped }
+            RingPublish { end: publish.end, gapped: publish.gapped, released: publish.released }
         }
 
         /// A viewer's RING_ACK.
-        pub(crate) fn ack(&mut self, cursor: &RingReader, offset: u64) -> RingAck {
+        pub(crate) fn ack(&mut self, cursor: &RingReader, offset: u64) -> RingAcked {
             self.writer.ack(cursor, offset)
         }
 
@@ -125,7 +129,7 @@ mod ring {
         /// read-only descriptor, and the viewer's consumer cursor, acked at
         /// the ring's end now. The viewer's tap keeps the cursor: it closes
         /// when the viewer goes.
-        pub(crate) fn grant(&mut self) -> Result<(OutputRingGrant, RingReader), RingError> {
+        pub(crate) fn grant(&mut self) -> Result<(OutputRingGrant, RingCursor), RingError> {
             let grant = OutputRingGrant {
                 descriptor: self.writer.reader_fd()?,
                 layout: LAYOUT,
@@ -133,8 +137,18 @@ mod ring {
                 base: self.writer.base(),
                 end: self.writer.end(),
             };
-            Ok((grant, self.writer.open_reader()))
+            let waits = self.writer.stalled();
+            Ok((grant, RingCursor { reader: self.writer.open_reader(), waits }))
         }
+    }
+
+    /// A ring viewer's consumer cursor, as its tap gets it.
+    #[derive(Debug)]
+    pub(crate) struct RingCursor {
+        pub(crate) reader: RingReader,
+        /// It opened during a stall: the viewer's first READY waits for the
+        /// ring to release it.
+        pub(crate) waits: bool,
     }
 
     /// The ring one viewer may map: the RING frame's meta and the descriptor

@@ -7,7 +7,7 @@
 mod output_ring {
     use cmux_ipc::output_ring::{
         DEFAULT_CAPACITY, GAP_HOLD_CAPACITIES, HEADER, MAX_CAPACITY, OutputRingReader,
-        OutputRingWriter, Publish, RingAck, RingError, SpanError,
+        OutputRingWriter, Publish, RingAck, RingAcked, RingError, SpanError,
     };
     use cmux_ipc::shm::{self, Mapping, Protection, SegmentKind};
     use std::io;
@@ -301,6 +301,14 @@ mod output_ring {
         assert!(accepted > 0);
     }
 
+    fn publish(end: u64, skipped: bool, gapped: Vec<u64>, released: Vec<u64>) -> Publish {
+        Publish { end, skipped, gapped, released }
+    }
+
+    fn acked(ack: RingAck, released: Vec<u64>) -> RingAcked {
+        RingAcked { ack, released }
+    }
+
     /// p05-ipc-119: a reader holds a span (Ghostty parsing it) while the
     /// writer floods. The writer never overwrites it: it skips the chunk that
     /// would, gaps the cursor once, and keeps skipping without waiting until
@@ -314,17 +322,11 @@ mod output_ring {
         reader.cut(0, 40).unwrap(); // held from here on
 
         // Up to acked + capacity the writer writes: the held span is whole.
-        assert_eq!(
-            writer.push(&pattern(40, 24)),
-            Publish { end: 64, skipped: false, gapped: vec![] }
-        );
+        assert_eq!(writer.push(&pattern(40, 24)), publish(64, false, vec![], vec![]));
         // One byte more would overwrite offset 0: skipped, and the cursor gapped once.
-        let publish = writer.push(&pattern(64, 1));
-        assert_eq!(publish, Publish { end: 65, skipped: true, gapped: vec![cursor.id()] });
-        assert_eq!(
-            writer.push(&pattern(65, 10)),
-            Publish { end: 75, skipped: true, gapped: vec![] }
-        );
+        assert_eq!(writer.push(&pattern(64, 1)), publish(65, true, vec![cursor.id()], vec![]));
+        assert_eq!(writer.push(&pattern(65, 10)), publish(75, true, vec![], vec![]));
+        assert!(writer.stalled());
         // Every skip moves the base: the ring holds nothing before it.
         assert_eq!((reader.base(), reader.end()), (75, 75));
         assert_eq!(reader.check(0), Ok(()), "the held span was never overwritten");
@@ -335,12 +337,14 @@ mod output_ring {
 
         // An ack below the gap moves the cursor but keeps the gap: the
         // reader may still hold a span.
-        assert_eq!(writer.ack(&cursor, 40), RingAck::Moved);
-        assert_eq!(writer.ack(&cursor, 30), RingAck::Stale);
+        assert_eq!(writer.ack(&cursor, 40), acked(RingAck::Moved, vec![]));
+        assert_eq!(writer.ack(&cursor, 30), acked(RingAck::Stale, vec![]));
         assert!(writer.push(&pattern(75, 40)).skipped);
-        // The ack of the gap: the reader holds nothing; it resumes at a
-        // snapshot taken now, at the ring's end or later.
-        assert_eq!(writer.ack(&cursor, reader.base()), RingAck::GapReleased);
+        // The ack of the gap: the reader holds nothing, the stall is over and
+        // the cursor is released; it resumes at a snapshot taken now, at the
+        // ring's end or later.
+        assert_eq!(writer.ack(&cursor, reader.base()), acked(RingAck::GapAcked, vec![cursor.id()]));
+        assert!(!writer.stalled());
         let resume = writer.end();
         assert!(!writer.push(&pattern(resume, 64)).skipped);
         assert_eq!(read(&reader, resume, resume + 64).unwrap(), pattern(resume, 64));
@@ -359,7 +363,7 @@ mod output_ring {
             assert!(!writer.push(&pattern(offset, len)).skipped, "{offset}+{len}");
             assert_eq!(read(&reader, offset, offset + len as u64).unwrap(), pattern(offset, len));
             offset += len as u64;
-            assert_eq!(writer.ack(&cursor, offset), RingAck::Moved);
+            assert_eq!(writer.ack(&cursor, offset).ack, RingAck::Moved);
         }
         assert!(!writer.push(&pattern(offset, 100)).skipped, "nothing published is held");
         assert_eq!(read(&reader, offset + 36, offset + 100).unwrap(), pattern(offset + 36, 64));
@@ -375,46 +379,123 @@ mod output_ring {
         let slow = writer.open_reader();
         let fast = writer.open_reader();
         writer.push(&pattern(0, 16));
-        assert_eq!(writer.ack(&fast, 16), RingAck::Moved);
+        assert_eq!(writer.ack(&fast, 16).ack, RingAck::Moved);
         let publish = writer.push(&pattern(16, 1));
         assert!(publish.skipped, "the slow cursor holds offset 0");
         assert_eq!(publish.gapped, vec![slow.id(), fast.id()]);
-        assert_eq!(writer.ack(&fast, 17), RingAck::GapReleased);
+        // The fast reader acked its gap, but the slow one has not: it waits.
+        assert_eq!(writer.ack(&fast, 17), acked(RingAck::GapAcked, vec![]));
         drop(slow);
-        assert!(!writer.push(&pattern(17, 16)).skipped, "a closed cursor holds nothing");
+        // A closed cursor holds nothing: the stall is over.
+        assert_eq!(writer.push(&pattern(17, 16)), publish_end(33, vec![fast.id()]));
         let other = OutputRingWriter::create(0, 16).unwrap().open_reader();
         assert_eq!(other.id(), 0, "the same id as the closed cursor");
-        assert_eq!(writer.ack(&other, 1), RingAck::Unknown);
+        assert_eq!(writer.ack(&other, 1).ack, RingAck::Unknown);
+    }
+
+    fn publish_end(end: u64, released: Vec<u64>) -> Publish {
+        publish(end, false, vec![], released)
+    }
+
+    /// p05-ipc-119, two viewers: A stalls (it holds a span and never acks),
+    /// B acks every frame. B is gapped once and released once, when the stall
+    /// ends (A's hold lapses): one resync for B, however many skips the
+    /// stall takes. A is released when it lapses, so its stream resyncs too,
+    /// and the writer stops honoring it.
+    #[test]
+    fn output_ring_one_stall_is_one_resync_for_every_other_viewer() {
+        let mut writer = OutputRingWriter::create(0, 16).unwrap();
+        let reader = OutputRingReader::open(writer.reader()).unwrap();
+        let stalled = writer.open_reader();
+        let healthy = writer.open_reader();
+        writer.push(&pattern(0, 16));
+        reader.cut(0, 16).unwrap(); // A holds this span forever
+        assert_eq!(writer.ack(&healthy, 16).ack, RingAck::Moved);
+        let (mut gaps, mut releases, mut offset) = (0, 0, 16);
+        let mut released_stalled = false;
+        loop {
+            let publish = writer.push(&pattern(offset, 4));
+            offset += 4;
+            gaps += publish.gapped.iter().filter(|id| **id == healthy.id()).count();
+            releases += publish.released.iter().filter(|id| **id == healthy.id()).count();
+            released_stalled |= publish.released.contains(&stalled.id());
+            if !publish.skipped {
+                break;
+            }
+            // B acks every frame, its gap included; A never does.
+            let ack = writer.ack(&healthy, writer.base());
+            releases += ack.released.iter().filter(|id| **id == healthy.id()).count();
+        }
+        assert_eq!((gaps, releases), (1, 1), "one gap and one release for the healthy viewer");
+        assert!(released_stalled, "the lapsed viewer resyncs too");
+        // The gapping chunk, then the hold.
+        assert_eq!(writer.skipped_bytes(), 4 + 16 * GAP_HOLD_CAPACITIES);
+        assert!(!writer.stalled());
+        // The lapsed cursor no longer holds the writer back: B keeps up, and
+        // A's held span laps (its release check finds it).
+        for _ in 0..8 {
+            let publish = writer.push(&pattern(offset, 4));
+            offset += 4;
+            assert!(!publish.skipped && publish.gapped.is_empty());
+            writer.ack(&healthy, writer.end());
+        }
+        assert!(matches!(reader.check(0), Err(SpanError::Lapped { .. })), "the hung span lapped");
+        // A comes back: an ack that leaves the writer a capacity of room
+        // makes it a reading cursor again; an older one does not.
+        assert_eq!(writer.ack(&stalled, 0).ack, RingAck::Stale);
+        assert_eq!(writer.ack(&stalled, writer.end()).ack, RingAck::Moved);
+    }
+
+    /// A viewer that attaches during a stall waits for its end with the
+    /// gapped ones (its first READY would be passed by the stall's next
+    /// skip), and is released with them.
+    #[test]
+    fn output_ring_a_reader_opened_during_a_stall_waits_for_its_end() {
+        let mut writer = OutputRingWriter::create(0, 16).unwrap();
+        let first = writer.open_reader();
+        writer.push(&pattern(0, 16));
+        assert!(writer.push(&pattern(16, 1)).skipped);
+        assert!(writer.stalled());
+        let late = writer.open_reader();
+        let publish = writer.push(&pattern(17, 4));
+        assert!(publish.skipped && publish.gapped.is_empty(), "the waiting reader is not gapped");
+        assert_eq!(
+            writer.ack(&first, writer.base()),
+            acked(RingAck::GapAcked, vec![first.id(), late.id()])
+        );
+        assert!(!writer.push(&pattern(21, 4)).skipped);
     }
 
     /// A reader that stops (a hung app) holds the shared ring back for
-    /// GAP_HOLD_CAPACITIES capacities of skipped output, no longer: then the
-    /// writer writes again for the viewers that ack, and the hung reader's
-    /// release check finds the lap.
+    /// GAP_HOLD_CAPACITIES capacities of output since its gap, no longer:
+    /// then the writer writes again, and the hung reader's release check
+    /// finds the lap.
     #[test]
     fn output_ring_a_hung_cursor_holds_the_writer_for_a_bounded_skip() {
         let mut writer = OutputRingWriter::create(0, 16).unwrap();
         let reader = OutputRingReader::open(writer.reader()).unwrap();
         let hung = writer.open_reader();
-        let live = writer.open_reader();
         writer.push(&pattern(0, 16));
         reader.cut(0, 16).unwrap(); // the hung app holds this span forever
-        assert_eq!(writer.ack(&live, 16), RingAck::Moved);
         let mut offset = 16;
-        while writer.skipped_bytes() < 16 * GAP_HOLD_CAPACITIES {
-            assert!(writer.push(&pattern(offset, 4)).skipped);
+        let released = loop {
+            let publish = writer.push(&pattern(offset, 4));
             offset += 4;
-            // The live viewer acks its gap each frame; the hung one never does.
-            writer.ack(&live, writer.base());
-        }
+            assert!(publish.skipped);
+            if !publish.released.is_empty() {
+                break publish.released;
+            }
+        };
+        assert_eq!(released, vec![hung.id()], "a lapsed reader's stream resyncs");
+        // The gapping chunk, then the hold.
+        assert_eq!(writer.skipped_bytes(), 4 + 16 * GAP_HOLD_CAPACITIES);
         let resume = writer.end();
         assert!(!writer.push(&pattern(offset, 4)).skipped, "the hold is over");
         assert_eq!(read(&reader, resume, resume + 4).unwrap(), pattern(offset, 4));
-        assert_eq!(writer.skipped_bytes(), 16 * GAP_HOLD_CAPACITIES);
         writer.push(&pattern(offset + 4, 16));
         assert!(matches!(reader.check(0), Err(SpanError::Lapped { .. })), "the hung span lapped");
-        // The hung app acks at last: its gap is released like any other.
-        assert_eq!(writer.ack(&hung, writer.base()), RingAck::GapReleased);
+        // Its late ack of the old gap leaves the writer no room: stale.
+        assert_eq!(writer.ack(&hung, 16).ack, RingAck::Stale);
     }
 
     /// The flood-while-holding run of p05-ipc-119 across threads. A reader
@@ -476,13 +557,17 @@ mod output_ring {
             (accepted, gaps)
         });
         let mut acked_at = 0u64;
-        let take = |writer: &mut OutputRingWriter, acked_at: &mut u64, ack: u64| {
-            if writer.ack(&cursor, ack) == RingAck::GapReleased {
+        // The daemon's READY for a released cursor: a snapshot at the ring's end.
+        let resync = |writer: &OutputRingWriter, acked_at: &mut u64, released: &[u64]| {
+            if released.contains(&cursor.id()) {
                 *acked_at = writer.end();
                 ready.send(*acked_at).unwrap();
-            } else {
-                *acked_at = (*acked_at).max(ack);
             }
+        };
+        let take = |writer: &mut OutputRingWriter, acked_at: &mut u64, ack: u64| {
+            let acked = writer.ack(&cursor, ack);
+            *acked_at = (*acked_at).max(ack);
+            resync(writer, acked_at, &acked.released);
         };
         let mut offset = 0u64;
         while offset < TOTAL {
@@ -497,8 +582,17 @@ mod output_ring {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
+            // Ghostty finishes the held span well within the gap's hold
+            // (GAP_HOLD_CAPACITIES): the flood is not paced, but once it
+            // gapped the reader the test waits for the parse to end rather
+            // than race the hold on a loaded machine.
+            if stalling.load(Ordering::Acquire) && writer.stalled() {
+                std::thread::yield_now();
+                continue;
+            }
             let len = (1 + (offset % 977) as usize).min((TOTAL - offset) as usize);
-            writer.push(&pattern(offset, len));
+            let publish = writer.push(&pattern(offset, len));
+            resync(&writer, &mut acked_at, &publish.released);
             offset += len as u64;
         }
         // Acks until the reader is done (it may wait for its READY).

@@ -187,3 +187,58 @@ fn output_ring_attach_a_ring_ack_is_an_empty_offset_frame_of_its_ring_stream() {
     drop(attach.stream);
     surface.kill();
 }
+
+/// p05-ipc-119: the RING_ACK bytes the app writes (CmuxNextIPC
+/// `SharedOutputRing.ringAckFrame`, the same 16 bytes its test pins) decode
+/// to a header the ring stream routes to its viewer's cursor: the ack of the
+/// gap releases the viewer, and its READY goes.
+#[test]
+fn output_ring_attach_the_apps_ring_ack_bytes_route_to_the_viewers_cursor() {
+    use cmux_ipc::FrameHeader;
+    use cmux_ipc::output_ring::RingAck;
+    let (_mux, surface) = quiet_terminal("output-ring-ack-route");
+    let attach =
+        surface.attach_snapshot_ring_stream(AttachLifecycle::default(), 1 << 20, false).unwrap();
+    let (stream, grant) = (attach.stream, attach.ring.unwrap());
+    let ring = OutputRingReader::open(grant.descriptor.as_fd()).unwrap();
+    let ready = surface.take_viewer_snapshot(&stream.receiver, None).unwrap();
+    let budget = Arc::new(OutboundByteBudget::new(1 << 20));
+    let mut encoder =
+        AttachFrameEncoder::new(STREAM, SURFACE, AttachWireShape::default(), ready.offset).unwrap();
+    encoder.ring(grant, &budget).unwrap();
+    let app_ack = |offset: u64| {
+        let mut wire =
+            [0xFF, 11, STREAM as u8, (STREAM >> 8) as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        wire[8..].copy_from_slice(&offset.to_le_bytes());
+        FrameHeader::decode(wire, 1 << 20).unwrap()
+    };
+
+    // The app holds the first output and acks nothing while the program floods.
+    let mut index = 0;
+    while ring.base() == ready.offset {
+        index += 1;
+        surface.inject_output_for_test(format!("row {index:06} {}\r\n", "x".repeat(64)).as_bytes());
+        assert!(index < 100_000, "the ring never skipped");
+    }
+    assert!(stream.receiver.ring_gap_pending());
+    assert_eq!(
+        encoder.route_ring_ack(&app_ack(ready.offset), &surface, &stream.receiver).unwrap(),
+        RingAck::Stale
+    );
+    assert_eq!(
+        encoder.route_ring_ack(&app_ack(ring.base()), &surface, &stream.receiver).unwrap(),
+        RingAck::GapAcked
+    );
+    assert!(!stream.receiver.ring_gap_pending());
+    assert!(matches!(
+        stream.receiver.recv_viewer_event(&StreamInterrupt::new(), Some(std::time::Instant::now())),
+        Ok(ViewerEvent::Snapshot)
+    ));
+    let other = FrameHeader::new(FrameKind::RingAck, STREAM + 1, 0, Aux::Offset(1)).unwrap();
+    assert!(matches!(
+        encoder.route_ring_ack(&other, &surface, &stream.receiver),
+        Err(AttachFrameError::RingAckStream { .. })
+    ));
+    drop(stream);
+    surface.kill();
+}

@@ -298,28 +298,39 @@ the torn bytes only after the parser used them. The consumer cursor removes that
 producer is bounded by its consumer's read position (`mojo/core/data_pipe_producer_dispatcher.cc`).
 
 - App: every span a `SharedOutputRing` cuts holds a slot with its start until its `Data` is released, after
-  Ghostty's lane parsed it (32 slots; past them the ack waits). Once per display frame `takeAck()` gives the
-  offset to send: the start of the oldest live span, or with none live the end of the last cut and at least
-  the ring's `base`; nothing when it did not move. A slot is taken before the cut reads `base`, and the ack
-  reads `base` before the slots (sequentially consistent), so no live span starts below an acked offset.
-  A wrapper that hands the parser other `Data` keeps the ring's span alive until it is released
-  (`TerminalRingSpan`).
+  Ghostty's lane parsed it (32 slots; past them the ack waits). The stream marks how far it handed bytes to
+  its consumer (`consumed(through:)`): the event queue does when a waiting consumer takes a span or when it
+  cuts a queued run for the consumer. A range the decoder only checked and queued (a `TerminalRingRun`) is
+  not handed over: it is cut again when the consumer takes it, so the ack stays at or below its start while
+  it waits. Once per display frame `takeAck()` gives the offset to send: the start of the oldest live span,
+  or with none live the end of what was handed over and at least the ring's `base`; nothing when it did not
+  move. A slot is taken before the cut reads `base`, a hand-over happens while its spans hold their slots,
+  and the ack reads `base`, then the handed-over end, then the slots (sequentially consistent), so no live or
+  queued span starts below an acked offset. A wrapper that hands the parser other `Data` keeps the ring's
+  span alive until it is released (`TerminalRingSpan`). `TerminalRingAcks` writes the RING_ACK frame
+  (`SharedOutputRing.ringAckFrame`) when the cursor moved; `TerminalSharedOutputRing` is the stream's ring
+  over `SharedOutputRing`.
 - Daemon: each ring viewer has a cursor in its terminal's `OutputRingWriter` (`open_reader` at grant, closed
   with the viewer's tap), acked at the ring's end when granted. RING_ACK moves it (an older offset is stale;
   one past the end counts as the end). A chunk that would write a published byte at or after a cursor's
-  acked offset plus the capacity is skipped: the writer moves `base` past it and gaps every cursor. It
+  acked offset plus the capacity is skipped: the writer moves `base` past it and gaps every reading cursor. It
   never waits; the PTY read, the parse and the other viewers do not slow down.
-- A gapped viewer drops its queued advances and owes a READY, but the READY waits until its app acks an
-  offset at or past the gap (the app does once it holds no span: the ack then reaches `base`). The app's own
-  `snapshot-request` for the gap collapses into that one resync. The READY is taken after the ack, at or
-  after the ring's end then, and the ring writes again from there. One stall is one gap and one resync.
+- A gapped viewer drops its queued advances and owes a READY, but the READY waits until the ring releases
+  its cursor. Its app acks an offset at or past the gap once it holds no span (the ack then reaches `base`);
+  the cursor then waits, holding nothing and blocking nothing, and is not gapped again. The stall lasts
+  while any gapped cursor has not acked; when the last one acks, the ring releases every waiting cursor
+  together, at the ring's end. A viewer that attaches during a stall waits for its end the same way. The
+  app's own `snapshot-request` for the gap collapses into that resync. The READY is taken after the
+  release, under the terminal lock that output gaps a viewer under, and is not taken while the viewer
+  waits (`Surface::take_ring_viewer_snapshot`), so a gap that lands between the worker's Snapshot event
+  and its encode keeps the READY pending. One stall is one gap and one READY for every viewer.
 - The ring is shared by a terminal's viewers, so a skip costs every viewer the skipped bytes. A gapped
-  cursor holds the writer back for at most `GAP_HOLD_CAPACITIES` (2) capacities of skipped output, the
-  time to finish the span it parses; a reader still holding one after that has stopped (a hung app), the
-  writer writes again for the others, and that reader's release check finds the lap. One hung app costs the
-  other viewers one resync, never a frozen ring.
-- An app that never acks freezes its own stream at the first gap (its READY waits for the ack):
-  RING_ACK is part of `terminal-output-ring-v1`, so a client that asks for the ring acks.
+  cursor holds the stall for `GAP_HOLD_CAPACITIES` (2) capacities of output since its gap, the time to
+  finish the span it parses. A cursor that has not acked by then (a hung app, or one that does not ack)
+  lapses and is released: its stream resyncs, the writer no longer honors it, and a span it still holds is
+  found lapped by its release check. Its next ack that leaves the writer a capacity of room makes it a
+  reading cursor again. One hung app costs the other viewers one resync, never a frozen ring, and an app
+  that never acks costs one bounded stall, never a frozen stream.
 - The release-time check stays, as a counter: with a cursor-honoring daemon `releaseLapCount` is 0.
 
 ## 5. App side
@@ -390,3 +401,4 @@ touched: `CmuxNextTerminal` (TerminalSession, TerminalOutputLane, TerminalSurfac
 |---|---|---|---|---|---|
 | 2026-10-27 | RING_ACK writer cost: `OutputRingWriter::push` of 4 KiB, 1 MiB ring, 200k pushes (`cargo test --release -p cmux-ipc --test output_ring -- --ignored --nocapture`) | 360-core Linux VM / cp/p05-ipc-119 / - | 0 cursors 86.3 ns, 3 cursors acked every push 75.5 ns | not run | Within noise: the cursor check is one pass over the open cursors per chunk. ipc-soak.py not run (fleet) |
 | 2026-10-27 | RING_ACK flood while holding (`output_ring_flood_while_holding_tears_no_span`, 4 MiB through a 4 KiB ring, one held span) | 360-core Linux VM / cp/p05-ipc-119 / - | 0 torn spans, 1 gap, 20 of 20 runs | not run | Daemon side: `output_ring_attach_a_held_span_is_skipped_never_overwritten` (1 resync) |
+| 2026-10-27 | RING_ACK after the fixes (stall states, queued runs hold the ack): writer cost as above; flood while holding; two viewers, one hung | 360-core Linux VM / cp/p05-ipc-119 / - | 6 runs on a loaded VM: 0 cursors 89 to 140 ns, 3 cursors acked every push 96 to 160 ns, the same spread; flood 200 of 200 runs 0 torn spans, 1 gap; healthy viewer 1 READY per stall (`output_ring_attach_one_stall_is_one_resync_for_a_healthy_viewer`) | not run | Writer cost within run-to-run noise of the row above (one pass over the cursors per chunk). ipc-soak.py does not exist yet (p05-ipc-116) and the ring is not bound (p05-ipc-195): not run |

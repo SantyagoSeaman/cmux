@@ -18,6 +18,14 @@ protocol TerminalOutputRing: AnyObject, Sendable {
     /// after the reserve rule passed; an empty range checks the rule and gives no span. Refuses a range past
     /// the published end. The mapping stays while the ring or any span is alive.
     func cut(from: UInt64, to: UInt64) throws(TerminalRingCutError) -> TerminalRingCut
+    /// The stream handed the bytes before `offset` to its consumer, as spans it still holds (RING_ACK,
+    /// p05-ipc-119). Ranges it only checked and queued are not handed over, so the consumer cursor stays below
+    /// them until the queue cuts them again for the consumer.
+    func consumed(through offset: UInt64)
+    /// The offset of the stream's next RING_ACK, or nil when it did not move: the start of the oldest live span,
+    /// or the end of what was handed over (at least the ring's base). The stream sends it once per display frame
+    /// (``TerminalRingAcks``).
+    func takeAck() -> UInt64?
 }
 
 /// The bytes of one cut range, in stream order (`SharedOutputRing.Spans`).

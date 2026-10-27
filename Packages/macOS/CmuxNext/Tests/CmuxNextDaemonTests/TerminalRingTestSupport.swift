@@ -14,6 +14,8 @@ final class InProcessRing: TerminalOutputRing {
     private let published = Atomic<UInt64>(0)
     private let spans = Atomic<Int>(0)
     private let mapped = Atomic<Int>(0)
+    private let consumedEnd = Atomic<UInt64>(0)
+    private let lastAck = Atomic<UInt64>(0)
 
     init(capacity: Int) {
         self.capacity = UInt64(capacity)
@@ -75,6 +77,25 @@ final class InProcessRing: TerminalOutputRing {
         published.store(start + count, ordering: .releasing)
     }
 
+    /// The end of what the stream handed to its consumer (`SharedOutputRing.consumed(through:)`).
+    func consumed(through offset: UInt64) {
+        var current = consumedEnd.load(ordering: .relaxed)
+        while offset > current {
+            let (exchanged, found) = consumedEnd.compareExchange(expected: current, desired: offset, ordering: .relaxed)
+            if exchanged { return }
+            current = found
+        }
+    }
+
+    /// `SharedOutputRing.takeAck` without per-span slots: the handed-over end once no span is live, when it moved.
+    func takeAck() -> UInt64? {
+        guard liveSpans == 0 else { return nil }
+        let floor = consumedEnd.load(ordering: .relaxed)
+        guard floor > lastAck.load(ordering: .relaxed) else { return nil }
+        lastAck.store(floor, ordering: .relaxed)
+        return floor
+    }
+
     /// A writer that has reserved `count` bytes past the end and not published them yet.
     func beginWrite(count: UInt64) {
         reserve.store(end + count, ordering: .sequentiallyConsistent)
@@ -126,10 +147,16 @@ final class RingSequence: Sendable {
     }
 }
 
-/// What the decoder asked the attachment for.
+/// What the decoder asked the attachment for, and the RING_ACK frames the stream sent.
 final class RingHooks: Sendable {
     let requests = Mutex<[SnapshotRequestReason]>([])
     let closes = Mutex<[String]>([])
+    let ringAcks = Mutex<[Data]>([])
+
+    /// The connection's write of a RING_ACK frame.
+    var sendRingAck: @Sendable (Data) -> Void {
+        { frame in self.ringAcks.withLock { $0.append(frame) } }
+    }
 
     var delivery: TerminalAttachFrameDecoder.Delivery {
         TerminalAttachFrameDecoder.Delivery(

@@ -489,6 +489,7 @@ check it.
 | 117 | macOS 14/15 behavior in Tart VMs | S | low | - | 111, 112, 080, 138 |
 | 118 | Old/new compat matrix | M | normal | - | 092, 095 |
 | 119 | Ring consumer cursor (RING_ACK) | M | high | - | 111, 113 |
+| 195 | Bind attach frames and the output ring end to end | L | high | - | 076, 077, 113, 119 |
 | 132 | F10 prereq: in-memory revisions and ledger | L | high | - | 003 |
 | 133 | F10 prereq: admitted-topology overlay | L | high | - | 132 |
 | 120 | F10 core: admit then reply | L | high | Q3 | 132, 133, 007 |
@@ -1118,6 +1119,19 @@ sends RING_ACK{offset} (coalesced to one per display frame); daemon never writes
 capacity, it skips and marks gap-pending; next RING_ADVANCE is a gap; release-time lap check stays as a counter.
 PL-ghostty and PL-holder sign off. Acceptance: the flood-while-holding test shows 0 torn spans parsed (release
 laps == 0) and exactly one gap/resync; writer latency unchanged (numbers); receipt. Test: RUST(output_ring); SWIFT(SharedOutputRingTests); BENCH(python3 scripts/cmux-next/ipc-soak.py --minutes 10 --flood 10).
+
+**p05-ipc-195 bind attach frames and the output ring (risk:high).** Files: core:server/capabilities.rs,
+core:server/attach_frames.rs, core:server/frame_dispatch.rs, core:server/terminal_snapshot.rs,
+app:CmuxNextDaemon/Terminal/TerminalAttachment+Decoding.swift, app:CmuxNextDaemon/Terminal/TerminalSharedOutputRing.swift.
+Change: add AttachFrames and OutputRing to `IpcTransports::BOUND`; the attach-frames writer sends RING and
+RING_ADVANCE and takes every ring READY with `take_ring_viewer_snapshot`; the frame reader routes a RING_ACK on a ring
+stream to `AttachFrameEncoder::route_ring_ack`; the app maps RING with `TerminalSharedOutputRing.mapper` and sends
+`TerminalRingAcks.displayFrame` once per display frame. 111, 113 and 119 built every piece; this task connects them.
+PL-ghostty and PL-holder review. Acceptance: only a local same-euid app is offered `terminal-output-ring-v1`; ring
+output reaches Ghostty with `outputBytesCopiedApp == 0`; at most one RING_ACK per display frame per stream;
+flood-while-holding end to end gives release laps 0 and one READY per stall per viewer; ipc-soak resyncs/min recorded;
+receipt. Test: RUST(output_ring_attach); SWIFT(TerminalRingTests, SharedOutputRingTests); BENCH(python3
+scripts/cmux-next/ipc-soak.py --minutes 10 --flood 10).
 
 ### Phase 7: F10 (PL-daemon review on every task)
 

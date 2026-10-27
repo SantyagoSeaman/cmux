@@ -22,16 +22,18 @@ public import Foundation
 /// after that copy.
 ///
 /// Consumer cursor (RING_ACK, p05-ipc-119). The ring knows which of its bytes the app may still read in place:
-/// every live span holds a slot with its start until its release (after Ghostty parsed it). ``takeAck()``, once
-/// per display frame, gives the offset to send in a RING_ACK: the start of the oldest live span, or, with none
-/// live, the end of the last cut (at least the ring's base). The daemon never writes past that offset plus the
-/// capacity; it skips output instead, moves the ring's base past it, and holds the stream's READY until an ack
-/// reaches the new base, which this ring sends once the app holds no span of the old screen. A held span is
-/// then never overwritten, so the release check above only counts (``releaseLapCount`` stays 0 with a daemon that
-/// honors the cursor). Chromium's data pipes give their producer the same bound, the consumer's read position
-/// (mojo/core/data_pipe_producer_dispatcher.cc). The parser must read a span's own `Data` (or keep it alive
-/// while it reads the bytes): a span released early frees its slot, and the next ack may let the writer reuse
-/// its bytes.
+/// every live span holds a slot with its start until its release (after Ghostty parsed it), and the stream says
+/// how far it handed bytes to its consumer (``consumed(through:)``). A range the stream checked and queued is not
+/// handed over: the queue cuts it again when the consumer takes it, so it stays above the cursor while it waits.
+/// ``takeAck()``, once per display frame, gives the offset to send in a RING_ACK: the start of the oldest live
+/// span, or, with none live, the end of what was handed over (at least the ring's base). The daemon never writes
+/// past that offset plus the capacity; it skips output instead, moves the ring's base past it, and holds the
+/// stream's READY until an ack reaches the new base, which this ring sends once the app holds no span of the old
+/// screen. A held or queued span is then never overwritten, so the release check above only counts
+/// (``releaseLapCount`` stays 0 with a daemon that honors the cursor). Chromium's data pipes give their producer
+/// the same bound, the consumer's read position (mojo/core/data_pipe_producer_dispatcher.cc). The parser must
+/// read a span's own `Data` (or keep it alive while it reads the bytes): a span released early frees its slot,
+/// and the next ack may let the writer reuse its bytes.
 public final class SharedOutputRing: Sendable {
     /// Bytes before the data area.
     public static let headerByteCount = 64
@@ -122,8 +124,8 @@ public final class SharedOutputRing: Sendable {
     private let heldSlots: [AtomicPointerSlot]
     /// Live spans that found no free slot.
     private let untracked = Atomic<Int>(0)
-    /// The end of the last range cut; where the cursor goes when no span is live.
-    private let cutEnd: Atomic<UInt64>
+    /// The end of the bytes the stream handed to its consumer; where the cursor goes when no span is live.
+    private let consumedEnd: Atomic<UInt64>
     /// The offset of the last ``takeAck()``.
     private let lastAck: Atomic<UInt64>
 
@@ -174,7 +176,7 @@ public final class SharedOutputRing: Sendable {
         unsafe held.initialize(repeating: SharedOutputRing.freeSlot, count: SharedOutputRing.heldSlotCount)
         heldStorage = unsafe Atomic(UnsafeMutableRawPointer(held))
         heldSlots = (0 ..< SharedOutputRing.heldSlotCount).map { index in unsafe AtomicPointerSlot(held + index) }
-        cutEnd = Atomic(fields.end)
+        consumedEnd = Atomic(fields.end)
         lastAck = Atomic(fields.end)
         let dataStart = unsafe UInt(bitPattern: mapping + SharedOutputRing.headerByteCount)
         dataAddresses = dataStart ..< dataStart + UInt(fields.capacity)
@@ -224,18 +226,31 @@ public final class SharedOutputRing: Sendable {
         // The tail's slot is taken while the head's still holds the cursor below it.
         let tail = length > first
             ? span(at: 0, count: length - first, from: from + first, slot: claimSlot(start: from + first)) : nil
-        advanceCutEnd(to: to)
         return Spans(range: from ..< to, head: head, tail: tail)
     }
 
+    /// The stream handed the bytes before `offset` to its consumer, as spans it still holds: once they are
+    /// released the cursor may pass them. Call it while the spans are live (their slots keep the cursor below
+    /// them until then). A range the stream only checked and queued is not handed over.
+    public func consumed(through offset: UInt64) {
+        var current = consumedEnd.load(ordering: .relaxed)
+        while offset > current {
+            let (exchanged, found) = consumedEnd.compareExchange(expected: current, desired: offset,
+                                                                 ordering: .sequentiallyConsistent)
+            if exchanged { return }
+            current = found
+        }
+    }
+
     /// The offset to send in the stream's RING_ACK now, or nil when it did not move since the last one (or a live
-    /// span is untracked): the start of the oldest live span, or, with none live, the end of the last cut and at
-    /// least the ring's base, since after a gap the app holds nothing before it. Call it once per display frame:
-    /// that coalesces the acks to one per frame.
+    /// span is untracked): the start of the oldest live span, or, with none live, the end of what was handed to the
+    /// consumer and at least the ring's base, since after a gap the app holds nothing before it. Call it once per
+    /// display frame: that coalesces the acks to one per frame.
     public func takeAck() -> UInt64? {
-        // Base first, then the slots: a cut takes its slot before it reads the base (sequentially consistent).
+        // Base first, then the handed-over end, then the slots: a cut takes its slot before it reads the base, and
+        // a hand-over happens while its spans hold their slots (sequentially consistent).
         let base = self.base
-        var floor = max(cutEnd.load(ordering: .sequentiallyConsistent), base)
+        var floor = max(consumedEnd.load(ordering: .sequentiallyConsistent), base)
         guard untracked.load(ordering: .sequentiallyConsistent) == 0 else { return nil }
         for slot in heldSlots {
             let start = slot.load(ordering: .sequentiallyConsistent)
@@ -249,6 +264,22 @@ public final class SharedOutputRing: Sendable {
         }
         return nil
     }
+
+    /// The RING_ACK frame of `offset` on attach stream `stream` (frame kind 11, cmux-ipc frame.rs `FrameKind::RingAck`):
+    /// the 16-byte header alone, magic, kind, stream (LE u16), payload length 0 (LE u32), then the offset as the aux
+    /// (LE u64).
+    public static func ringAckFrame(stream: UInt16, offset: UInt64) -> [UInt8] {
+        var frame: [UInt8] = [0xFF, ringAckKind, UInt8(truncatingIfNeeded: stream), UInt8(truncatingIfNeeded: stream >> 8),
+                              0, 0, 0, 0]
+        frame.reserveCapacity(16)
+        for shift in stride(from: 0, to: 64, by: 8) {
+            frame.append(UInt8(truncatingIfNeeded: offset >> shift))
+        }
+        return frame
+    }
+
+    /// The wire kind of RING_ACK.
+    public static let ringAckKind: UInt8 = 11
 
     /// Whether a released span found that the writer lapped it while it was used; clears the mark.
     public func takeLapped() -> Bool {
@@ -290,16 +321,6 @@ public final class SharedOutputRing: Sendable {
         switch held {
         case .slot(let slot): slot.store(Self.freeSlot, ordering: .sequentiallyConsistent)
         case .untracked: untracked.subtract(1, ordering: .sequentiallyConsistent)
-        }
-    }
-
-    private func advanceCutEnd(to offset: UInt64) {
-        var current = cutEnd.load(ordering: .relaxed)
-        while offset > current {
-            let (exchanged, found) = cutEnd.compareExchange(expected: current, desired: offset,
-                                                            ordering: .sequentiallyConsistent)
-            if exchanged { return }
-            current = found
         }
     }
 

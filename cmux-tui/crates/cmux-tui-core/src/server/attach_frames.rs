@@ -489,10 +489,7 @@ impl AttachFrameEncoder {
     /// bad message from the app. The offset is not checked against what
     /// the stream announced: after a gap the app acks the ring's base, which
     /// may be past the last advance, and the ring clamps an ack to its end.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the attach-frames reader once bound")
-    )]
+    #[cfg(unix)]
     pub(super) fn ring_ack(&self, header: &FrameHeader) -> Result<u64, AttachFrameError> {
         if header.kind() != FrameKind::RingAck {
             return Err(AttachFrameError::NotRingAck { kind: header.kind() });
@@ -512,6 +509,26 @@ impl AttachFrameEncoder {
                 Err(AttachFrameError::Frame(BadMessage::AuxMismatch { kind: FrameKind::RingAck }))
             }
         }
+    }
+
+    /// The app's RING_ACK `header` on this ring stream, routed to the consumer
+    /// cursor of the viewer `receiver` reads ([`crate::Surface::ring_ack`]): the
+    /// one call the attach-frames reader makes for a RING_ACK (p05-ipc-195).
+    /// It takes the `pty.taps` lock only, never the terminal lock, so an ack
+    /// never waits for the parser. A refused frame moves no cursor.
+    #[cfg(unix)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by the attach-frames reader once bound (p05-ipc-195)")
+    )]
+    pub(super) fn route_ring_ack(
+        &self,
+        header: &FrameHeader,
+        surface: &crate::Surface,
+        receiver: &crate::AttachFrameReceiver,
+    ) -> Result<cmux_ipc::output_ring::RingAck, AttachFrameError> {
+        let offset = self.ring_ack(header)?;
+        Ok(surface.ring_ack(receiver, offset))
     }
 
     /// Another attach event (`detached`, `overflow`) as an EVENT frame at

@@ -23,7 +23,9 @@ extension TerminalEventQueue.State {
     /// Queues ring output, or hands it to a waiting consumer as it was cut. A span of a screen claimed lapped
     /// is dropped. Before it is queued, the oldest queued run of its ring is checked: once the writer laps it,
     /// its screen is claimed and its runs go, so ring runs never hold more than one ring of bytes, and the
-    /// stream asks for the fresh screen now rather than when the consumer comes back.
+    /// stream asks for the fresh screen now rather than when the consumer comes back. Only output handed to the
+    /// consumer moves the ring's consumer cursor (``TerminalOutputRing/consumed(through:)``): a queued run is
+    /// still to be parsed, so the app's RING_ACK stays at or below its start and the daemon never writes over it.
     mutating func enqueue(ring span: TerminalRingSpan,
                           mergeLimit: Int) -> (TerminalEventQueue.Waiter, TerminalChannelEvent)? {
         let run = span.run
@@ -31,7 +33,10 @@ extension TerminalEventQueue.State {
             lapped(oldest.laps)
         }
         guard !finished, !run.laps.isMarked else { return nil }
-        if let waiter = waiter.take() { return (waiter, .output(span.bytes, colors: nil)) }
+        if let waiter = waiter.take() {
+            run.ring.consumed(through: run.range.upperBound)  // the span holds its slot until the parse ends
+            return (waiter, .output(span.bytes, colors: nil))
+        }
         if items.count > head, case .ring(let tail)? = items.last, tail.count < UInt64(clamping: mergeLimit),
            let wider = tail.joined(with: run) {
             _ = items.popLast()
@@ -57,6 +62,7 @@ extension TerminalEventQueue.State {
             lapped(joined.laps)
             return nil
         }
+        joined.ring.consumed(through: joined.range.upperBound)  // the span holds its slot until the parse ends
         return .output(cut.head.bytes, colors: nil)
     }
 
