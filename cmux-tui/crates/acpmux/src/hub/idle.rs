@@ -243,8 +243,9 @@ impl Hub {
 
     /// A start of `session`'s agent begins (`ensure_child`): a wake when the idle exit hibernated
     /// it, timed from here.
-    pub(super) fn wake_began(&self, session: &Session) -> Option<std::time::Instant> {
-        (session.hibernated_at.load(Ordering::SeqCst) != 0).then(std::time::Instant::now)
+    pub(super) fn wake_began(&self, session: &Session) -> Option<(std::time::Instant, u64)> {
+        let at = session.hibernated_at.load(Ordering::SeqCst);
+        (at != 0).then(|| (std::time::Instant::now(), at))
     }
 
     /// The start `wake_began` timed ended: logs the wake with its cause and duration. A failed
@@ -252,12 +253,12 @@ impl Hub {
     pub(super) fn wake_ended(
         &self,
         session: &Session,
-        began: Option<std::time::Instant>,
+        began: Option<(std::time::Instant, u64)>,
         failed: Option<&RpcError>,
     ) {
-        let Some(began) = began else { return };
+        // `at`: the mark when the wake began (a stop meanwhile clears the session's).
+        let Some((began, at)) = began else { return };
         let took_ms = began.elapsed().as_millis() as u64;
-        let at = session.hibernated_at.load(Ordering::SeqCst);
         let slept_secs = self.clock_now().saturating_sub(at) / 1_000_000_000;
         let cause = session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).take();
         let cause = cause.unwrap_or("request");
