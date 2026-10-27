@@ -3,6 +3,7 @@
 // in for the accounts service. DESKTOP-FEEL (R139): the shared desktop layer loads first.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -21,7 +22,11 @@ export function mountCodeRouterPage(root: HTMLElement, client: PageClient | null
   const strings = createStrings(table);
   document.documentElement.lang = strings.language;
   document.title = strings.t("page.title");
-  createRoot(root).render(<CodeRouterPage store={store} strings={strings} />);
+  createRoot(root).render(
+    <PageErrorBoundary page="coderouter">
+      <CodeRouterPage store={store} strings={strings} />
+    </PageErrorBoundary>,
+  );
   return store;
 }
 

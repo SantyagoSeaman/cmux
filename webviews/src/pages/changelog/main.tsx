@@ -2,6 +2,7 @@
 // `cmuxPage` bridge; in the browser dev loop (`/changelog/?mock`) the mock provider stands in.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -31,10 +32,12 @@ export function mountChangelogPage(root: HTMLElement, client: PageClient | null 
   const react = createRoot(root);
   const render = () =>
     react.render(
-      // The pull request card's Open in menu follows the page's language direction (arrow keys, placement).
-      <UiProvider container={root} dir={languageDirection(strings.language)}>
-        <ChangelogPage store={store} strings={strings} design={parseDesign(location.hash)} />
-      </UiProvider>,
+      <PageErrorBoundary page="changelog">
+        {/* The pull request card's Open in menu follows the page's language direction (arrow keys, placement). */}
+        <UiProvider container={root} dir={languageDirection(strings.language)}>
+          <ChangelogPage store={store} strings={strings} design={parseDesign(location.hash)} />
+        </UiProvider>
+      </PageErrorBoundary>,
     );
   render();
   void store.start(parseSpan(location.hash));

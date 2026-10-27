@@ -95,6 +95,16 @@ export const PAGES = {
     out: "webviews/src/ui/variant-pick/generated/strings.json",
     catalogs: [{ file: "webviews/src/ui/variant-pick/Localizable.xcstrings" }],
   },
+  // Every page's crash card (ui/PageErrorBoundary.tsx) says what the browser's sad tab says.
+  pageError: {
+    out: "webviews/src/ui/page-error/generated/strings.json",
+    catalogs: [
+      {
+        file: `${sources}/CmuxNextBrowser/Resources/Localizable.xcstrings`,
+        keys: () => ["browser.pageGone.title.crashed", "browser.pageGone.message", "browser.pageGone.reload"],
+      },
+    ],
+  },
   // Every key the settings schema names (CmuxNextSettings catalog), every `settingsPage.` and
   // `settingsWindow.` key (CmuxNextSettingsWindow catalog); merged from the Settings lead's generate-strings.mjs with the
   // same output.

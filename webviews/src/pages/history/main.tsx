@@ -3,6 +3,7 @@
 // DESKTOP-FEEL (R139): the shared desktop layer loads first.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -40,9 +41,11 @@ export function mountHistoryPage(root: HTMLElement, client: PageClient | null = 
   document.documentElement.lang = strings.language;
   document.title = strings.t("page.title");
   createRoot(root).render(
-    <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
-      <HistoryPage store={store} strings={strings} />
-    </UiProvider>,
+    <PageErrorBoundary page="history">
+      <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
+        <HistoryPage store={store} strings={strings} />
+      </UiProvider>
+    </PageErrorBoundary>,
   );
   return store;
 }

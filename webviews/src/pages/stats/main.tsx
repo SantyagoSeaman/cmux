@@ -2,6 +2,7 @@
 // `cmuxPage` bridge; in the browser dev loop (`/stats/?mock`) the mock provider stands in.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -19,7 +20,11 @@ export function mountStatsPage(root: HTMLElement, client: PageClient | null = de
   const strings = createStrings(table);
   document.documentElement.lang = strings.language;
   document.title = strings.t("stats.page.title");
-  createRoot(root).render(<StatsPage store={store} strings={strings} />);
+  createRoot(root).render(
+    <PageErrorBoundary page="stats">
+      <StatsPage store={store} strings={strings} />
+    </PageErrorBoundary>,
+  );
   void store.start();
   // Coming back to the tab reads the logs again: agents kept working meanwhile.
   document.addEventListener("visibilitychange", () => {

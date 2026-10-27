@@ -2,6 +2,7 @@
 // the `cmuxPage` bridge; in the browser dev loop (`/mobile-pairing/?mock`) the mock provider stands in.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -23,7 +24,11 @@ export function mountMobilePairingPage(
   const strings = createStrings(table);
   document.documentElement.lang = strings.language;
   document.title = strings.t("mobilePairing.page.title");
-  createRoot(root).render(<MobilePairingPage store={store} strings={strings} />);
+  createRoot(root).render(
+    <PageErrorBoundary page="mobile-pairing">
+      <MobilePairingPage store={store} strings={strings} />
+    </PageErrorBoundary>,
+  );
   void store.start();
   // Coming back to the tab reads the status again (a code may have expired meanwhile).
   document.addEventListener("visibilitychange", () => {

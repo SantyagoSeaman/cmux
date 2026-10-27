@@ -4,6 +4,7 @@
 // stream; Fleet and Landing read when a shown view needs them and on Refresh.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState, restoredPageInputs } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -26,7 +27,11 @@ export function mountChiefViewsPage(root: HTMLElement, client: PageClient | null
   const strings = createStrings(table);
   document.documentElement.lang = strings.language;
   document.title = strings.t("chiefViews.page.title");
-  createRoot(root).render(<ChiefViewsPage store={store} strings={strings} />);
+  createRoot(root).render(
+    <PageErrorBoundary page="chief-views">
+      <ChiefViewsPage store={store} strings={strings} />
+    </PageErrorBoundary>,
+  );
   void store.start();
   return store;
 }

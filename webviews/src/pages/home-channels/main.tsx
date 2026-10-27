@@ -11,6 +11,7 @@
 import "../shared/desktop";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState, restoredPageInputs } from "../shared/pageState";
 import { PAGE_COMMAND, type PageCommand } from "../shared/pageStreams";
@@ -46,9 +47,11 @@ export function mountHomeChannelsPage(
   const strings = createStrings(table);
   document.title = strings.t("page.title");
   createRoot(root).render(
-    <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
-      <HomeChannelsPage store={store} strings={strings} />
-    </UiProvider>,
+    <PageErrorBoundary page="home-channels">
+      <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
+        <HomeChannelsPage store={store} strings={strings} />
+      </UiProvider>
+    </PageErrorBoundary>,
   );
   return store;
 }
@@ -83,19 +86,28 @@ export function mountDaemonHomeChannelsPage(
     })
     .catch(() => {});
   createRoot(root).render(
-    <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
-      <ComposerEdit.Provider value={edit}>
-        <ComposerDraftsContext.Provider value={drafts}>
-          <DaemonGate source={source} strings={strings}>
-            {(daemon, _pages, owner) => (
-              <div className="hc-daemon">
-                <DaemonHome daemon={daemon} owner={owner} host={client} strings={strings} carry={carry} texts={texts} />
-              </div>
-            )}
-          </DaemonGate>
-        </ComposerDraftsContext.Provider>
-      </ComposerEdit.Provider>
-    </UiProvider>,
+    <PageErrorBoundary page="home-channels">
+      <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
+        <ComposerEdit.Provider value={edit}>
+          <ComposerDraftsContext.Provider value={drafts}>
+            <DaemonGate source={source} strings={strings}>
+              {(daemon, _pages, owner) => (
+                <div className="hc-daemon">
+                  <DaemonHome
+                    daemon={daemon}
+                    owner={owner}
+                    host={client}
+                    strings={strings}
+                    carry={carry}
+                    texts={texts}
+                  />
+                </div>
+              )}
+            </DaemonGate>
+          </ComposerDraftsContext.Provider>
+        </ComposerEdit.Provider>
+      </UiProvider>
+    </PageErrorBoundary>,
   );
 }
 

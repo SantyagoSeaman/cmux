@@ -43,6 +43,7 @@
   "optchat-inspector/Term.tsx": 1,
   "pages/apps/AppsPage.tsx": 3,
   "pages/apps/parts.tsx": 1,
+  "pages/changelog/surface.tsx": 1,
   "pages/cloud/CreateSheet.tsx": 3,
   "pages/cloud/FilesSection.tsx": 1,
   "pages/cloud/MachineDetail.tsx": 1,

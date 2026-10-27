@@ -4,6 +4,7 @@
 // DESKTOP-FEEL (R139): the shared desktop layer loads first.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -34,7 +35,11 @@ export function mountKeybindingsPage(root: HTMLElement, client: PageClient | nul
   const strings = createStrings(table);
   document.documentElement.lang = strings.language;
   document.title = strings.t("keybindings.page.title");
-  createRoot(root).render(<KeybindingsPage store={store} strings={strings} />);
+  createRoot(root).render(
+    <PageErrorBoundary page="keybindings">
+      <KeybindingsPage store={store} strings={strings} />
+    </PageErrorBoundary>,
+  );
   return store;
 }
 

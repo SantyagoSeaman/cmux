@@ -2,6 +2,7 @@
 // `cmuxPage` bridge; in the browser dev loop (`/files/?mock`) the mock provider stands in.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -20,7 +21,11 @@ export function mountFilesPage(root: HTMLElement, client: PageClient | null = de
   const strings = createStrings(table);
   document.documentElement.lang = strings.language;
   document.title = strings.t("files.page.title");
-  createRoot(root).render(<FilesPage store={store} strings={strings} />);
+  createRoot(root).render(
+    <PageErrorBoundary page="files">
+      <FilesPage store={store} strings={strings} />
+    </PageErrorBoundary>,
+  );
   const scroller = () => root.querySelector<HTMLElement>(".files-scroll");
   // Before the host discards the hidden page: the open folders, the selection and the scroll its
   // next page goes back to, once its folders listed again (the next frame lays them out).

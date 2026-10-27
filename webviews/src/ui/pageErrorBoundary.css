@@ -1,0 +1,47 @@
+/* The crash card of every app page (PageErrorBoundary.tsx). Colors come from the shared web theme
+   (--cmux-*) with system fallbacks, so the card follows light, dark and custom themes. No animation:
+   the card replaces the page in one frame. */
+.page-error {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 32px 16px;
+  color: var(--cmux-text, CanvasText);
+}
+
+.page-error-card {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  max-width: 420px;
+  text-align: center;
+}
+
+.page-error-title {
+  margin: 0;
+  font-size: var(--text-title);
+  line-height: var(--text-title--line-height);
+  font-weight: 600;
+}
+
+.page-error-message {
+  margin: 0;
+  color: var(--cmux-text-secondary, color-mix(in srgb, CanvasText 70%, transparent));
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+}
+
+.page-error-reload {
+  margin-top: 8px;
+  min-height: 24px;
+  padding: 0 12px;
+  border: 1px solid var(--cmux-separator, color-mix(in srgb, CanvasText 12%, transparent));
+  border-radius: 6px;
+  background: var(--cmux-hover, color-mix(in srgb, CanvasText 6%, transparent));
+  font-size: var(--text-control);
+  line-height: var(--text-control--line-height);
+}
+
+.page-error-reload:hover {
+  background: var(--cmux-selection, color-mix(in srgb, CanvasText 10%, transparent));
+}

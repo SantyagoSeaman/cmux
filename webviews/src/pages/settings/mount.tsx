@@ -2,6 +2,7 @@
 // the page host) or the browser's; the theme comes from the one web theme (--cmux-*); the
 // route comes from the URL fragment (#/settings/<section>?focus=<key>).
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { SettingsPage } from "./components/SettingsPage";
 import { createSectionLoader, type SectionLoader } from "./lazySections";
 import type { SettingsClient } from "./ops";
@@ -32,7 +33,11 @@ export async function mountSettingsPage(
   document.title = t("settingsPage.title");
   const store = new SettingsStore(client);
   const reactRoot = createRoot(root);
-  reactRoot.render(<SettingsPage store={store} sections={sections} />);
+  reactRoot.render(
+    <PageErrorBoundary page="settings">
+      <SettingsPage store={store} sections={sections} />
+    </PageErrorBoundary>,
+  );
   const started = store.start();
   // The host shows the page once its first screen is in: the user's values (no control drawn
   // disabled with its default), the host's lists (no card added after the first frame), and the

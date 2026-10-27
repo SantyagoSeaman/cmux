@@ -4,6 +4,7 @@
 // DESKTOP-FEEL (R139): the shared desktop layer loads first.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { openPageState } from "../shared/pageState";
 import { createStrings } from "../shared/i18n";
@@ -42,9 +43,11 @@ export function mountDebugSettingsPage(
   document.documentElement.lang = strings.language;
   document.title = strings.t("debugSettings.title");
   createRoot(root).render(
-    <UiProvider container={root} dir={languageDirection(strings.language)}>
-      <DebugSettingsPage store={store} strings={strings} />
-    </UiProvider>,
+    <PageErrorBoundary page="debug-settings">
+      <UiProvider container={root} dir={languageDirection(strings.language)}>
+        <DebugSettingsPage store={store} strings={strings} />
+      </UiProvider>
+    </PageErrorBoundary>,
   );
   return store;
 }

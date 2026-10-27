@@ -5,6 +5,7 @@
 import "../shared/desktop";
 import { lazy, Suspense, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { applyDiffViewerAppearance, followHostTerminalTheme, resolveDiffViewerAppearance } from "../../appearance";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { createStrings, type Strings } from "../shared/i18n";
@@ -368,18 +369,20 @@ export function mountMarkdownPage(root: HTMLElement, client: PageClient | null =
   // empty state, so it is in hand before the empty phase renders (Suspense covers the rare miss).
   const emptyState = client ? lazyEmptyState(client, store) : undefined;
   createRoot(root).render(
-    <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
-      <MarkdownPage
-        store={store}
-        strings={strings}
-        editorRef={editorRef}
-        emptyState={emptyState}
-        overlays={overlays}
-        onBack={() => void router.go(-1)}
-        onForward={() => void router.go(1)}
-        reading={readingActions(store, zoom)}
-      />
-    </UiProvider>,
+    <PageErrorBoundary page="markdown">
+      <UiProvider container={root} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
+        <MarkdownPage
+          store={store}
+          strings={strings}
+          editorRef={editorRef}
+          emptyState={emptyState}
+          overlays={overlays}
+          onBack={() => void router.go(-1)}
+          onForward={() => void router.go(1)}
+          reading={readingActions(store, zoom)}
+        />
+      </UiProvider>
+    </PageErrorBoundary>,
   );
   void store.start();
   preloadHighlighter();

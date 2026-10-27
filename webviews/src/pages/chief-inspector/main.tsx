@@ -4,6 +4,7 @@
 // DESKTOP-FEEL (R139): the shared desktop layer loads first.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { App, type InspectorView } from "../../optchat-inspector/App";
 import { ApiStore, fetcherFor } from "../../optchat-inspector/store";
 import { StoreContext } from "../../optchat-inspector/useApi";
@@ -22,8 +23,10 @@ if (root && document.documentElement.dataset.cmuxPage === "chief-inspector") {
   let view: Partial<InspectorView> = initial;
   state.keep(() => view);
   createRoot(root).render(
-    <StoreContext.Provider value={store}>
-      <App initial={initial} onView={(next) => (view = next)} />
-    </StoreContext.Provider>,
+    <PageErrorBoundary page="chief-inspector">
+      <StoreContext.Provider value={store}>
+        <App initial={initial} onView={(next) => (view = next)} />
+      </StoreContext.Provider>
+    </PageErrorBoundary>,
   );
 }

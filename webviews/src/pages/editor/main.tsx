@@ -6,6 +6,7 @@
 // DESKTOP-FEEL (R139): the shared desktop layer loads first.
 import "../shared/desktop";
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { applyDiffViewerAppearance, resolveDiffViewerAppearance } from "../../appearance";
 import { createPageClient, type PageClient } from "../shared/pageClient";
 import { createStrings, type Strings } from "../shared/i18n";
@@ -226,14 +227,16 @@ export function mountEditorPage(root: HTMLElement, client: PageClient | null = c
       )
     : undefined;
   createRoot(root).render(
-    <EditorPage
-      store={store}
-      status={status}
-      find={find}
-      strings={strings}
-      editorRef={editorRef}
-      emptyState={emptyState}
-    />,
+    <PageErrorBoundary page="editor">
+      <EditorPage
+        store={store}
+        status={status}
+        find={find}
+        strings={strings}
+        editorRef={editorRef}
+        emptyState={emptyState}
+      />
+    </PageErrorBoundary>,
   );
   void store.start();
   return store;

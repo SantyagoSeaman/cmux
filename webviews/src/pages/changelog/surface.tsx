@@ -6,6 +6,7 @@
 // Updated card also reads the notes of every build the update spans (`cmux.changelog.list` and
 // `get`, the page's own ChangelogStore), so it sums up skipped nightlies too.
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { CARD_SCROLL_ATTRIBUTE } from "../../scrollers";
 import type { PageClient } from "../shared/pageClient";
 import { createStrings } from "../shared/i18n";
@@ -62,17 +63,19 @@ export function mountUpdateSurface(root: HTMLElement, kind: SurfaceKind, client:
   const render = (data: UpdateHighlights | null) => {
     latest = data;
     react.render(
-      data === null ? null : kind === "ready" ? (
-        <UpdateReadyHighlights data={data} strings={strings} actions={actions} />
-      ) : (
-        <UpdatedCard
-          data={data}
-          span={spans?.notes(data.changelog)}
-          strings={strings}
-          actions={actions}
-          closeButton={false}
-        />
-      ),
+      <PageErrorBoundary page="changelog-surface">
+        {data === null ? null : kind === "ready" ? (
+          <UpdateReadyHighlights data={data} strings={strings} actions={actions} />
+        ) : (
+          <UpdatedCard
+            data={data}
+            span={spans?.notes(data.changelog)}
+            strings={strings}
+            actions={actions}
+            closeButton={false}
+          />
+        )}
+      </PageErrorBoundary>,
     );
     // The new rows exist after React's commit: size them from the next frame on.
     requestAnimationFrame(observeCard);

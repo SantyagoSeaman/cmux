@@ -3,6 +3,7 @@
 // event; the page resets its store and focuses the search field. `?mock` runs it in a browser with
 // in-memory stand-ins (dev loop and the bench). main.tsx boots it; tests mount it directly.
 import { createRoot } from "react-dom/client";
+import { PageErrorBoundary } from "../../ui/PageErrorBoundary";
 import { flushSync } from "react-dom";
 import { createStrings, type Strings } from "../shared/i18n";
 import type { PageClient } from "../shared/pageClient";
@@ -78,20 +79,22 @@ export function mountIconPicker(
     : undefined;
   const render = () =>
     reactRoot.render(
-      <UiProvider container={root} popupHost={popupHost} dir={languageDirection(strings.language)}>
-        <IconPicker
-          key={session.id}
-          store={store}
-          strings={strings}
-          onPick={(value: IconValue) => finish({ value: encodeIcon(value) })}
-          onCancel={() => finish({ cancel: true })}
-          onClear={session.canClear ? () => finish({ clear: true }) : undefined}
-          onCopyText={copyText}
-          assets={client && session.assets ? hostAssets(client) : undefined}
-          symbolImageURL={(name, mode) => symbolImageURL(name, mode, session.symbolStyle)}
-          error={failure}
-        />
-      </UiProvider>,
+      <PageErrorBoundary page="icon-picker">
+        <UiProvider container={root} popupHost={popupHost} dir={languageDirection(strings.language)}>
+          <IconPicker
+            key={session.id}
+            store={store}
+            strings={strings}
+            onPick={(value: IconValue) => finish({ value: encodeIcon(value) })}
+            onCancel={() => finish({ cancel: true })}
+            onClear={session.canClear ? () => finish({ clear: true }) : undefined}
+            onCopyText={copyText}
+            assets={client && session.assets ? hostAssets(client) : undefined}
+            symbolImageURL={(name, mode) => symbolImageURL(name, mode, session.symbolStyle)}
+            error={failure}
+          />
+        </UiProvider>
+      </PageErrorBoundary>,
     );
   const open = (next: PickerSession) => {
     const catalog = sessionCatalog(next);
