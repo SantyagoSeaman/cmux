@@ -11,7 +11,7 @@ import Foundation
 @MainActor
 struct AttentionPalettePage {
     /// The marked tabs and their one jump, shared with every agent page's Needs you list.
-    var tabs: AgentPaneAttentionTabs = .shared
+    var tabs: AgentPaneAttentionTabs
 
     static let id: ActionID = "attention.goTo"
     /// The page's `PalettePageSpec.id`.
@@ -20,23 +20,25 @@ struct AttentionPalettePage {
     /// Binds the action and routes every Go to (this page's and the agent pages') through the
     /// user's jump on the row's own machine, ``AppServices/revealTab(_:onMachine:intent:)``.
     static func bind(into registry: ActionRegistry, context: AppActionContext) {
-        AgentPaneAttentionTabs.shared.onOpen = { [weak services = context.services] key in
+        let tabs = context.services.attentionTabs
+        tabs.onOpen = { [weak services = context.services] key in
             guard let services, let (daemon, tab) = AttentionTabsWatch.locate(key, in: services.machines.daemons) else { return false }
             return services.revealTab(tab, onMachine: daemon.machineID)
         }
         // An open page follows the marks: a cleared mark's row goes, a new one comes.
-        AgentPaneAttentionTabs.shared.onChange = { [weak services = context.services] in
+        tabs.onChange = { [weak services = context.services] in
             guard let model = services?.palette.model, model.currentPageID == pageID else { return }
             model.reload()
         }
-        context.services.palette.sources.actionPages[id] = { AttentionPalettePage().page() }
-        registry.bind(id, run: { invocation in
+        context.services.palette.sources.actionPages[id] = { AttentionPalettePage(tabs: tabs).page() }
+        registry.bindEffect(id, requires: nil, effect: { invocation in
             // An agent's `cmux action run attention.goTo` must not open the palette over the
             // person's work; agents read the marks with `tab.list` and focus only when asked.
             guard invocation.allowsViewChange else { throw ActionFailure(message: AttentionPaletteStrings.needsFocus) }
-            let page = AttentionPalettePage()
+            let page = AttentionPalettePage(tabs: tabs)
             guard !page.tabs.items.isEmpty else { throw ActionFailure(message: AttentionPaletteStrings.nothing) }
             context.services.palette.show(page: page.page(), relativeTo: context.activeWindow?.window)
+            return .done
         })
     }
 

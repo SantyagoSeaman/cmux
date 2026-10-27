@@ -201,6 +201,8 @@ public final class AgentPaneModel {
     @ObservationIgnored public var onUpload: (@MainActor () -> AgentPaneUploader?)?
     @ObservationIgnored public var onUploadStage: (@MainActor () -> AgentPaneUploadStager?)?
 
+    /// The application-owned marked-tab list shared by this page and the palette.
+    @ObservationIgnored public let attentionTabs: AgentPaneAttentionTabs?
     @ObservationIgnored let host: any AgentPaneHostProviding
     /// The page's host is another machine's (cx-k21v): it never becomes this Mac's prewarmed spare.
     @ObservationIgnored public var neverPooled = false
@@ -209,6 +211,7 @@ public final class AgentPaneModel {
 
     public init(
         host: any AgentPaneHostProviding,
+        attentionTabs: AgentPaneAttentionTabs? = nil,
         sessionId: String? = nil,
         seed: AgentPaneSeedSource? = nil,
         newTab: AgentPaneNewTab? = nil,
@@ -217,6 +220,7 @@ public final class AgentPaneModel {
     ) {
         self.allowsTabConversion = allowsTabConversion
         self.host = host
+        self.attentionTabs = attentionTabs
         self.transport = transport
         self.sessionId = sessionId
         self.seed = seed
@@ -332,7 +336,7 @@ public final class AgentPaneModel {
         case .editNewTab(let edit): guard let onEditNewTab else { return Self.unsupported(edit.method) }; onEditNewTab(edit); return AgentPaneReply.success()
         case .nowPlaying(let command): return AgentPaneNowPlaying.shared.perform(command) ? AgentPaneReply.success() : Self.unsupported("nowPlaying.command")
         case .attentionOpen where !transport.gestures.consume(): return Self.transportFailure(.gestureRequired)
-        case .attentionOpen(let tab): return AgentPaneAttentionTabs.shared.open(tab) ? AgentPaneReply.success() : Self.unsupported("chat.attention.open")
+        case .attentionOpen(let tab): return attentionTabs?.open(tab) == true ? AgentPaneReply.success() : Self.unsupported("chat.attention.open")
         case .runAction(let id): return runAction(id)
         case .jump(let target, let id): guard newTab != nil, let onJump else { return Self.unsupported("tab.jump") }; onJump(target, id); return AgentPaneReply.success()
         case .chooseFolder where remoteChat: return Self.unsupported("workspace.chooseFolder")

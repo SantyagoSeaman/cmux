@@ -120,6 +120,9 @@ export function applyHostEvent(event: HostEvent): void {
     case "nowPlaying":
       // Direct, like recentlyClosed: a push before the New Tab screen mounts is kept.
       return setNowPlaying(event.value);
+    case "attentionTabs":
+      // Keep a push that arrives before the Needs you header mounts.
+      return setAttentionTabs(event.value);
     case "toolCards":
       // Direct, like deviceChats: a push before the chat mounts is kept.
       return setToolCards(event.value);

@@ -24,7 +24,7 @@ final class AttentionTabsWatch {
                 services.map { AttentionTabsWatch.items(in: $0.machines.allWorkspaces.map { ($0.0, machine: $0.1.machineID) }) } ?? []
             }) {
                 guard services != nil else { return }
-                AgentPaneAttentionTabs.shared.items = marked
+                services?.attentionTabs.items = marked
             }
         }
     }
