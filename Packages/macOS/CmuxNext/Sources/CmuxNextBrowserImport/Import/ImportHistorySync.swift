@@ -22,14 +22,18 @@ public actor ImportHistorySync {
     private let delay: Duration
     private let limit: Int
     private let deliver: Deliver
+    private let reader: any ProfileDataReading
     private var watches: [String: HistoryFileWatch] = [:]
     private var timers: [String: DemandTimer] = [:]
     /// Each watched database's files (size and change time) at its last read.
     private var lastRead: [String: [Int64]] = [:]
 
-    /// `grants`: the folder grants reads need (nil: folders are read directly).
+    /// `grants`: the folder grants reads need (nil: folders are read directly). `reader` parses the
+    /// databases: in this process, or in the sandboxed import service.
     public init(store: ImportedDataStore, grants: BrowserFolderGrants?, delay: Duration = .seconds(20),
-                limit: Int = ImportPlan.defaultHistoryLimit, deliver: @escaping Deliver) {
+                limit: Int = ImportPlan.defaultHistoryLimit, reader: any ProfileDataReading = InProcessProfileReader(),
+                deliver: @escaping Deliver) {
+        self.reader = reader
         self.store = store
         self.grants = grants
         self.delay = delay
@@ -152,7 +156,7 @@ public actor ImportHistorySync {
         // A Preferences or Cookies write also wakes the folder watch: nothing to read then.
         let stamp = HistoryFileWatch.stamp(watch.file)
         guard stamp != lastRead[key], let record = await store.syncedSources().first(where: { $0.sourceKey == key }) else { return }
-        guard let pages = try? BrowserImporter.readHistory(record.browser.family, file: watch.file, limit: limit).items,
+        guard let pages = try? await reader.history(record.browser.family, file: watch.file, limit: limit).items,
               let saved = try? await store.replaceHistory(key, with: pages) else { return }
         lastRead[key] = stamp
         if !saved.changed.isEmpty { await deliver(saved.record.targetProfileID, saved.changed, []) }

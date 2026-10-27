@@ -45,3 +45,8 @@ public struct ImportRead<Item: Sendable>: Sendable {
         self.skipped = skipped
     }
 }
+
+/// A read crosses the sandboxed import service's wire (CmuxNextBrowserImportService) as a value.
+extension ImportRead: Codable where Item: Codable {}
+
+extension ImportRead: Equatable where Item: Equatable {}

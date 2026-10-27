@@ -82,6 +82,10 @@ import Foundation
 //     Chromium page draws through, plans/cmux-next/cef-layer-hosting-DESIGN.md; NSAccessibilityRemoteUIElement,
 //     a hosted page's accessibility, chrome-parity/p01-process.md task 049)
 //   CmuxNextBrowserImport -> system frameworks only (browser detection, parsers, importer; no UI)
+//   CmuxNextBrowserImportService -> BrowserImport (the sandboxed import service's XPC interface, its parse
+//     handler and the App's reader; plans/cmux-next/rule-of-2.md)
+//   CmuxNextBrowserImportServiceMain -> BrowserImportService (the XPC service executable, bundled as
+//     Contents/XPCServices/com.cmuxterm.browser-import.xpc; not linked into the App)
 //   CmuxNextBrowserHistory -> Browser, Daemon, Compat (a browser tab's saved history across relaunches; no UI)
 //   CmuxNextOnboarding -> Design, Icons, BrowserImport (first-run window; the App supplies OnboardingServices)
 //   CmuxNextHome -> Compat, Design, Dictation, Wakeups, MessagesLabHome (the Home transcript: MessagesLabAppKitNative's
@@ -398,6 +402,7 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 "CmuxNextWebUpdates",
                 "CmuxNextResources",
                 "CmuxNextBrowserImport",
+                "CmuxNextBrowserImportService",
                 "CmuxNextOnboarding",
                 "CmuxNextCookieImport",
                 "CmuxNextImportCards",
@@ -579,6 +584,22 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
             ],
             swiftSettings: daemonSwiftSettings
         ),
+        // The sandboxed browser import service (plans/cmux-next/rule-of-2.md, p10-stability-208): the XPC
+        // interface, the service's parse handler and the App's reader. The executable below is bundled as
+        // Contents/XPCServices/com.cmuxterm.browser-import.xpc with Bundle/Info.plist and
+        // Bundle/BrowserImportService.entitlements (App Sandbox, read-only selected files, no network).
+        .target(
+            name: "CmuxNextBrowserImportService",
+            dependencies: ["CmuxNextBrowserImport", "CmuxNextCompat", .product(name: "CmuxSafeConcurrency", package: "CmuxSafeConcurrency")],
+            path: "Sources/CmuxNextBrowserImportService/Service",
+            swiftSettings: daemonSwiftSettings
+        ),
+        .executableTarget(
+            name: "CmuxNextBrowserImportServiceMain",
+            dependencies: ["CmuxNextBrowserImportService"],
+            path: "Sources/CmuxNextBrowserImportService/Main",
+            swiftSettings: daemonSwiftSettings
+        ),
         // First-run onboarding window: theme and density, browser import,
         // default browser and terminal handlers, the key ideas tour. The App
         // supplies `OnboardingServices`.
@@ -612,7 +633,8 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
         // Corrupted Chrome, Firefox and Safari profiles through every import reader (p10-stability-025).
         .testTarget(
             name: "CmuxNextBrowserImportTests",
-            dependencies: ["CmuxNextBrowserImport", "CmuxNextCompat", .product(name: "CmuxFuzzSupport", package: "CmuxFuzzSupport")],
+            dependencies: ["CmuxNextBrowserImport", "CmuxNextBrowserImportService", "CmuxNextCompat",
+                           .product(name: "CmuxFuzzSupport", package: "CmuxFuzzSupport")],
             swiftSettings: daemonSwiftSettings
         ),
         // The cards' center: the scan schedule, the job runner and the `import.*` actions, for

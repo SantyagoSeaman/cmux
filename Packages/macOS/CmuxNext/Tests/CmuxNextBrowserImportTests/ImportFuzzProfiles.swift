@@ -224,10 +224,12 @@ struct ImportFuzzHome: Sendable {
         }
     }
 
-    /// Runs the importer over every profile and checks what it reported for each.
-    func check() async throws {
+    /// Runs the importer over every profile and checks what it reported for each. `reader` parses the
+    /// bookmarks, history and open tabs: in this process, or in the sandboxed import service.
+    func check(reader: any ProfileDataReading = InProcessProfileReader()) async throws {
         let importer = BrowserImporter(cookies: CookieImporter(destination: ImportFuzzCookieSink(), keys: ImportFuzzKeys.storage),
-                                       passwords: PasswordImporter(keys: ImportFuzzKeys.storage, destination: ImportFuzzPasswordSink()))
+                                       passwords: PasswordImporter(keys: ImportFuzzKeys.storage, destination: ImportFuzzPasswordSink()),
+                                       reader: reader)
         let plan = ImportPlan(items: profiles.map { ImportPlan.Item(profile: $0.source, kinds: $0.kinds) })
         try FuzzRun.check(plan.items.count == profiles.count, "the plan dropped a profile")
         let summary = try await importer.run(plan, into: ImportFuzzDiscard()) { _ in }

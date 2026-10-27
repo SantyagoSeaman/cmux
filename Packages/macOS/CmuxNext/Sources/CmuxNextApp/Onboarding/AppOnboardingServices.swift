@@ -2,8 +2,10 @@ import AppKit
 import CmuxNextActions
 import CmuxNextBrowser
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportService
 import CmuxNextCookieImport
 import CmuxNextDesign
+import CmuxNextFeatures
 import CmuxNextOnboarding
 import CmuxNextSettings
 import LocalAuthentication
@@ -66,8 +68,9 @@ final class AppOnboardingServices: OnboardingServices {
                 try await cef.importPasswords(rows, into: profile)
             }, primaryPassword: { profile in await FirefoxPrimaryPassword.prompt(profile) })
         }
+        let reader = BrowserImportServiceReader.preferred(sandboxed: services.features.isEnabled(.browserImportSandboxedService))
         let importer = BrowserImporter(provisioning: AppBrowserProfileProvisioning(profiles: services.browserProfiles), store: owner.importStore,
-                                       cookies: cookies, passwords: passwords)
+                                       cookies: cookies, passwords: passwords, reader: reader)
         let summary: ImportSummary
         let endAccess = folderAccess.access(plan)
         defer { endAccess() }

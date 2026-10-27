@@ -10,14 +10,18 @@ public actor BrowserImporter {
     private let store: ImportedDataStore?
     private let cookies: CookieImporter?
     private let passwords: PasswordImporter?
+    private let reader: any ProfileDataReading
 
-    /// `cookies` or `passwords` nil: that kind is skipped (no store to write to).
+    /// `cookies` or `passwords` nil: that kind is skipped (no store to write to). `reader` parses the
+    /// bookmarks, history and open tabs: in this process, or in the sandboxed import service.
     public init(provisioning: any BrowserProfileProvisioning = DefaultProfileOnly(), store: ImportedDataStore? = nil,
-                cookies: CookieImporter? = nil, passwords: PasswordImporter? = nil) {
+                cookies: CookieImporter? = nil, passwords: PasswordImporter? = nil,
+                reader: any ProfileDataReading = InProcessProfileReader()) {
         self.provisioning = provisioning
         self.store = store
         self.cookies = cookies
         self.passwords = passwords
+        self.reader = reader
     }
 
     public func run(
@@ -47,7 +51,7 @@ public actor BrowserImporter {
                     } else if kind == .passwords {
                         try await importPasswords(item.profile, into: &batch)
                     } else {
-                        try Self.read(kind, from: item.profile, historyLimit: plan.historyLimit, into: &batch)
+                        try await read(kind, from: item.profile, historyLimit: plan.historyLimit, into: &batch)
                     }
                     done += 1
                 }
@@ -117,43 +121,40 @@ public actor BrowserImporter {
         return record
     }
 
-    static func read(_ kind: ImportDataKind, from profile: BrowserSourceProfile, historyLimit: Int, into batch: inout ImportBatch) throws {
-        #if CMUX_NO_BROWSER_DATA_IMPORT || CMUX_NO_HISTORY_IMPORT
-        // The cx-f58x notary test builds read no other browser's history,
-        // tabs, extensions or bookmarks (CMUX_NO_HISTORY_IMPORT is the
-        // history-only notary bisect build).
-        return
-        #else
-        let path = profile.path
-        if kind == .bookmarks {
-            let read = try readBookmarks(profile)
+    private func read(_ kind: ImportDataKind, from profile: BrowserSourceProfile, historyLimit: Int, into batch: inout ImportBatch) async throws {
+        switch kind {
+        case .bookmarks:
+            let read = try await reader.bookmarks(profile)
             batch.bookmarks = read.items
             batch.skippedBookmarks = read.skipped
             return
-        }
-        if kind == .history, let file = profile.historyFile {
-            let read = try readHistory(profile.browser.family, file: file, limit: historyLimit)
+        case .history:
+            guard let file = profile.historyFile else { return }
+            let read = try await reader.history(profile.browser.family, file: file, limit: historyLimit)
             batch.history = read.items
             batch.skippedHistory = read.skipped
             return
+        case .openTabs:
+            let read = try await reader.openTabs(profile)
+            batch.openTabs = read.items
+            batch.skippedOpenTabs = read.skipped
+            return
+        default:
+            break
         }
+        #if CMUX_NO_BROWSER_DATA_IMPORT || CMUX_NO_HISTORY_IMPORT
+        // The cx-f58x notary test builds read no other browser's history,
+        // tabs, extensions or bookmarks (CMUX_NO_HISTORY_IMPORT is the
+        // history-only notary bisect build); ProfileParseSpec.parse(at:)
+        // reads nothing there either.
+        return
+        #else
+        let path = profile.path
         switch (profile.browser.family, kind) {
-        case (.chromium, .openTabs):
-            if let file = ChromiumSessionReader().sessionFile(profile: path) {
-                let read = ChromiumSessionReader().parse(try Data(contentsOf: file))
-                batch.openTabs = read.items
-                batch.skippedOpenTabs = read.skipped
-            }
         case (.chromium, .searchEngines):
             batch.searchEngine = ChromiumSearchEngineReader().read(profile: path)
         case (.chromium, .extensions):
             batch.extensions = ChromiumExtensionsReader().read(profile: path)
-        case (.firefox, .openTabs):
-            if let file = FirefoxSessionReader().sessionFile(in: path) {
-                let read = FirefoxSessionReader().parse(try Data(contentsOf: file))
-                batch.openTabs = read.items
-                batch.skippedOpenTabs = read.skipped
-            }
         case (.firefox, .searchEngines):
             batch.searchEngine = FirefoxSearchEngineReader().read(profile: path)
         case (.safari, .searchEngines):
@@ -166,44 +167,18 @@ public actor BrowserImporter {
 
     /// One history database, newest pages first, with its family's reader, and the pages it left out.
     public static func readHistory(_ family: BrowserFamily, file: URL, limit: Int) throws -> ImportRead<ImportedHistoryEntry> {
-        #if CMUX_NO_BROWSER_DATA_IMPORT || CMUX_NO_HISTORY_IMPORT
-        return ImportRead()
-        #else
-        switch family {
-        case .chromium: return try ChromiumHistoryReader().read(file, limit: limit)
-        case .firefox: return try FirefoxPlacesReader().readHistory(file, limit: limit)
-        case .safari: return try SafariHistoryReader().read(file, limit: limit)
-        case .webkit, .other: return ImportRead()
-        }
-        #endif
+        guard let job = ProfileParseJob.history(family, file: file, limit: limit) else { return ImportRead() }
+        guard case .history(let read) = try job.spec.parse(at: job.file) else { throw ProfileParseMismatch(format: job.spec.format) }
+        return read
     }
 
     /// One profile's bookmarks, read with the reader its registry row names
     /// (engine family, not browser). Sources the reader cannot open throw;
     /// private stores return nothing (their HTML export is the path).
     public static func readBookmarks(_ profile: BrowserSourceProfile) throws -> ImportRead<ImportedBookmark> {
-        #if CMUX_NO_BROWSER_DATA_IMPORT || CMUX_NO_HISTORY_IMPORT
-        return ImportRead()
-        #else
-        let files = profile.browser.source?.files
-        func file(_ fallback: String) -> URL { profile.bookmarksFile ?? profile.path.appending(path: files?.bookmarks ?? fallback) }
-        switch profile.browser.bookmarksFormat {
-        case .chromiumJSON:
-            return try ChromiumBookmarksParser().parse(Data(contentsOf: file("Bookmarks")))
-        case .firefoxPlaces:
-            return try FirefoxPlacesReader().readBookmarks(file("places.sqlite"))
-        case .safariPlist:
-            return try SafariBookmarksParser().parse(Data(contentsOf: file("Bookmarks.plist")))
-        case .arcSidebar:
-            // No sidebar file: Arc's Chromium `Bookmarks` file is the fallback.
-            guard let sidebar = profile.bookmarksFile else {
-                return try ChromiumBookmarksParser().parse(Data(contentsOf: profile.path.appending(path: files?.bookmarks ?? "Bookmarks")))
-            }
-            return try ArcSidebarReader().parse(Data(contentsOf: sidebar), profileDirectory: profile.directoryName)
-        case .htmlExport, .noStore:
-            return ImportRead()
-        }
-        #endif
+        guard let job = ProfileParseJob.bookmarks(profile) else { return ImportRead() }
+        guard case .bookmarks(let read) = try job.spec.parse(at: job.file) else { throw ProfileParseMismatch(format: job.spec.format) }
+        return read
     }
 
     private static let placeholder = BrowserSourceProfile(browser: .chrome, directoryName: "", displayName: "",
