@@ -73,14 +73,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# is_selected NAME: true when no --crate was given or one equals NAME exactly.
+is_selected() {
+  local want
+  [[ ${#selected[@]} -eq 0 ]] && return 0
+  for want in "${selected[@]}"; do [[ "$want" == "$1" ]] && return 0; done
+  return 1
+}
 rows=()
 for row in "${CRATES[@]}"; do
   read -r name _ <<<"$row"
-  if [[ ${#selected[@]} -eq 0 || " ${selected[*]} " == *" $name "* ]]; then rows+=("$row"); fi
+  if is_selected "$name"; then rows+=("$row"); fi
 done
-for name in ${selected[@]+"${selected[@]}"}; do
-  [[ " ${CRATES[*]} " == *" $name "* ]] || die "unknown crate '$name' (see --list)"
+for want in ${selected[@]+"${selected[@]}"}; do
+  known=0
+  for row in "${CRATES[@]}"; do
+    read -r name _ <<<"$row"
+    [[ "$name" == "$want" ]] && known=1
+  done
+  [[ $known -eq 1 ]] || die "unknown crate '$want' (see --list)"
 done
+[[ ${#rows[@]} -gt 0 ]] || die "no crate selected (see --list)"
 
 toml_channel() {
   python3 -I - "$1" "$2" <<'PY'

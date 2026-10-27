@@ -54,16 +54,18 @@ impl Handle {
     }
 }
 
+// Compiled in, so the test opens no file (Miri isolation refuses `open`).
+const CORPUS: &str = include_str!("corpus/palette-corpus.json");
+
 fn corpus() -> Result<Value, String> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/palette-corpus.json");
-    let text = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
-    serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))
+    serde_json::from_str(CORPUS)
+        .map_err(|error| format!("tests/corpus/palette-corpus.json: {error}"))
 }
 
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "ranks the 2.3 MB TypeScript corpus: over 10 min under Miri; the other corpus and handle tests run the C ABI"
+    ignore = "ranks the 2.3 MB TypeScript corpus: over 40 min under Miri (measured 2026-10-27, nightly-2026-10-20), past the lane's 30 min limit; the other tests here and handles.rs run the C ABI"
 )]
 fn every_corpus_request_ranks_like_the_typescript_ranker() -> Result<(), String> {
     let corpus = corpus()?;

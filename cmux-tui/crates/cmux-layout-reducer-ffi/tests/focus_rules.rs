@@ -72,15 +72,17 @@ fn normalize_effects(effects: &Value) -> Vec<Value> {
     out
 }
 
+// Compiled in, so the tests open no file (Miri isolation refuses `open`).
+const CORPUS: &[u8] = include_bytes!("focus/corpus.json");
+
 fn corpus() -> Value {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/focus/corpus.json");
-    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
+    serde_json::from_slice(CORPUS).unwrap()
 }
 
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads and parses the 1.4 MB Swift corpus: over 25 min under Miri; focus_abi.rs runs the C ABI"
+    ignore = "replays the 1.4 MB Swift corpus: over 40 min under Miri (measured 2026-10-27, nightly-2026-10-20), past the lane's 30 min limit; focus_abi.rs runs the C ABI"
 )]
 fn the_rust_focus_rules_reproduce_every_recorded_swift_step() {
     let corpus = corpus();
@@ -137,7 +139,7 @@ fn the_rust_focus_rules_reproduce_every_recorded_swift_step() {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads and parses the 1.4 MB Swift corpus: over 25 min under Miri; focus_abi.rs runs the C ABI"
+    ignore = "replays the 1.4 MB Swift corpus: over 40 min under Miri (measured 2026-10-27, nightly-2026-10-20), past the lane's 30 min limit; focus_abi.rs runs the C ABI"
 )]
 fn view_changing_events_are_the_ones_the_swift_rule_named() {
     let corpus = corpus();
@@ -152,7 +154,7 @@ fn view_changing_events_are_the_ones_the_swift_rule_named() {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads and parses the 1.4 MB Swift corpus: over 25 min under Miri; focus_abi.rs runs the C ABI"
+    ignore = "replays the 1.4 MB Swift corpus: over 40 min under Miri (measured 2026-10-27, nightly-2026-10-20), past the lane's 30 min limit; focus_abi.rs runs the C ABI"
 )]
 fn keys_queued_for_a_loading_page_match_the_swift_queue() {
     let corpus = corpus();
@@ -186,7 +188,7 @@ fn keys_queued_for_a_loading_page_match_the_swift_queue() {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads and parses the 1.4 MB Swift corpus: over 25 min under Miri; focus_abi.rs runs the C ABI"
+    ignore = "decides every child-window case of the 1.4 MB Swift corpus: 36 min under Miri (measured 2026-10-27, nightly-2026-10-20), past the lane's 30 min limit; focus_abi.rs runs the C ABI"
 )]
 fn a_child_window_that_becomes_key_is_decided_as_the_swift_rule_did() {
     let corpus = corpus();
