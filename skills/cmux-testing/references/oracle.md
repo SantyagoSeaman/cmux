@@ -23,8 +23,15 @@ options with `--help`.
   runnerd job. You can use `--dry-run` anywhere. For other runs, use
   `scripts/cmux-next/oracle/linux_run.sh run REF [--suite S] [--arm A] [-- RUN_OPTIONS]`.
   The last line of its output is the run directory.
-- The outputs are outside the checkout: run directories go in `/tmp/oracle/runs/<run id>/`,
-  and fleet runs go in `/tmp/oracle/fleet/<run id>/`.
+- The outputs are outside the checkout:
+  - A queued VM run (each side of `diff --base/--head`, and `linux_run.sh run`)
+    goes in `/tmp/oracle-runnerd/jobs/<digest>/out/<seq>/run/` (the root is
+    `ORACLE_RUNNERD_ROOT` when you set it). The diff prints each side's run
+    directory (`base: REF run DIR`), and `linux_run.sh run` prints it on its last line.
+    Give these directories to `--base-run`, `--head-run` and `rebaseline --run`.
+  - Comparison directories (`diff --out`) and a local `run --out` default to
+    `/tmp/oracle/runs/<run id>/`.
+  - Fleet runs go in `/tmp/oracle/fleet/<run id>/`.
 - The fleet controller refuses `scripts/measure/oracle.sh` until hq lists it, or
   until the commit is on `main` or `feat-cmux-next`. Until then, `fleet.py` exits 3
   and `fleet.json` says `refused`.
@@ -94,7 +101,7 @@ Exit codes of `oracle.py diff`:
 | 0 | no unexplained divergence |
 | 1 | divergences (or, with `--order-parity`, a LeakedState on one side only) |
 | 2 | bad arguments or bad input |
-| 3 | refused: `host-mismatch`, a shard set with a gap or a mismatch, nothing compared, `arm-not-exercised` |
+| 3 | refused: `host-mismatch`, a shard set with a gap or a mismatch, nothing compared, `arm-not-exercised` (VM only, see [Register a switch](#register-a-refactor-switch)) |
 | 4 | an internal error in diff.py. This is not a divergence. |
 
 ## Read divergence.json
@@ -103,7 +110,9 @@ The diff writes two files in its `--out` directory (for `fleet.py`, in `OUT/comp
 
 - `comparison.json` (`cmux-oracle-comparison-v2`) gives the verdict:
   - `ok`: true only when nothing was refused and there is no divergence.
-  - `refused`: the reason when the diff did not compare the sides.
+  - `refused`: the reason when the diff did not compare the sides. An
+    `arm-not-exercised` refusal writes no `comparison.json`: the diff prints
+    the reason and exits 3 before it compares.
   - `compared`: the number of cases compared.
   - `divergent` and `explained`: the case ids.
   - `flaky_excluded`: the Flaky cases.
@@ -126,8 +135,10 @@ A finding in `divergences[]` holds only the **first** divergence of its case:
 - `step` and `checkpoint` (`before`, `turn` or `settled`): where the divergence is.
 - `pointer`: the first JSON pointer in sorted-key order where the snapshots differ.
 - `a` and `b`: the values at that pointer.
-- `count`: how many other checkpoints and pointers differ after it. Later differences
-  usually follow from the first one, so fix the first one, then run the diff again.
+- `count`: an object `{checkpoints, pointers}` with the total number of divergent
+  checkpoints and pointers in the case, the first divergence included. So
+  `{checkpoints: 1, pointers: 1}` means that the first divergence is the only one.
+  Later differences usually follow from the first one, so fix the first one, then run the diff again.
 - `evidence`: `checkpoints.jsonl#LINE` of each side.
 - `replay`: the `diff.py` command that compares this case again.
 - `confidence`: always `unconfirmed`. See [Confirm](#confirm-a-divergence).
@@ -148,19 +159,56 @@ It will run the divergent shards on the head again with the same config and
 seed, then run the cases alone on the base. Only "the head fails two times and
 the base passes" goes to an owner.
 
-Until it is on the branch, do the same steps with `diff`:
+Until it is on the branch, do the same two steps by hand. Take the values from
+the `config` of the divergent shard's `receipt.json` (the per-shard receipt, not
+a merged one, which has no seed): `shard_index`, `shard_total`, `seed` and
+`batch_limit`. These commands are for the cmux-tui products on the VM; the app
+form follows them.
 
-```bash
-python3 -I scripts/cmux-next/oracle/oracle.py diff --base BASE_SHA --head HEAD_SHA \
-  --filter 'daemon-ops/the-case' --seed SEED_FROM_THE_RECEIPT --repeat 3 --fresh
-```
+1. Run the divergent shard again, not only the case. A `--filter` run would
+   hide a divergence that comes from state that an earlier case of the shard left:
 
-- `--fresh` makes the runnerd queue run both sides again. Without it, the queue uses the receipt it has.
-- If the case is still in `divergent`, the divergence is confirmed. Fix it, or
-  explain it (see [Register a switch](#register-a-refactor-switch) and the expectations below).
-- If the case moves to `flaky_excluded`, it is a flake. Add
-  `--flaky-out /tmp/oracle/flaky.jsonl` to send it to the MQ-flakes queue. Do not report it as a divergence.
-- If the base also fails alone, the base is red. That is not the change's divergence.
+   ```bash
+   python3 -I scripts/cmux-next/oracle/oracle.py diff --base BASE_SHA --head HEAD_SHA \
+     --suite SUITE --shard SHARD_INDEX/SHARD_TOTAL --seed SEED --batch-limit BATCH_LIMIT \
+     --repeat 2 --fresh --flaky-out /tmp/oracle/flaky.jsonl
+   ```
+
+   `--fresh` makes the runnerd queue run both sides again. Without it, the queue
+   uses the receipt it has. Add `--product P` for a product other than `daemon`.
+
+2. Run the case alone on the base:
+
+   ```bash
+   scripts/cmux-next/oracle/linux_run.sh run BASE_SHA --suite SUITE --fresh -- \
+     --filter 'SUITE/the-case' --repeat 2
+   ```
+
+   A filtered run has a retry limit of 0 and, for the daemon, one case per
+   session. The base fails alone when the run's `receipt.json` lists the case
+   in `unexpected` (or `ok` is false).
+
+Classify each result. Each case gets exactly one of these:
+
+- The case is in `divergent` in step 1 and the base passes alone in step 2:
+  the divergence is confirmed. Fix it, or explain it (see
+  [Register a switch](#register-a-refactor-switch) and the expectations below).
+- The case is in `flaky_excluded` in step 1: it is a flake. `--flaky-out`
+  sends it to the MQ-flakes queue. Do not report it as a divergence.
+- The case compares equal in step 1: it is a flake, or a case that depends on
+  the order of the shard. Do not drop it. `--flaky-out` writes only cases that
+  were Flaky in the run, so send this one to MQ-flakes yourself: append a line
+  in the same shape (`case`, `run_id`, `product`, `arm`, `switches`, `reasons`)
+  to the flaky file, with the original diff's directory in `reasons`.
+- The base fails alone in step 2: the base is red. Report it as a base red,
+  not as the change's divergence.
+
+For the app, do the same steps with `fleet.py`. It has no `--shard i/N`, so
+step 1 runs all shards again with the same count:
+`fleet.py diff --base BASE_SHA --head HEAD_SHA --suite SUITE --shards SHARD_TOTAL --seed SEED --batch-limit BATCH_LIMIT --repeat 2`.
+Step 2 is `fleet.py run --ref BASE_SHA --filter 'SUITE/the-case' --repeat 2`.
+Give each a new `--out` (an existing one attaches to its old steps).
+`fleet.py` has no `--flaky-out`; append each flaky case to the flaky file yourself, in the same shape.
 
 `oracle.py route` (task p15-oracle-118) is not on the branch yet. Until it is,
 the owner is the most specific row of
@@ -188,10 +236,24 @@ new arm in one build). Otherwise, use `diff --base --head`.
    python3 -I scripts/cmux-next/oracle/oracle.py diff --product app --switch NAME --ref SHA --suite SUITES_OF_THE_SWITCH_FILE
    ```
 
-   Give `--suite` the switch file's `suites`. A side with 0 hits on its arm is
-   refused with `arm-not-exercised` (exit 3): no guarded site ran, so the run
-   proves nothing. `oracle.py switches --hits FILE --switch NAME --arm old|new`
-   reads one `debug.oracle.switch_hits` reply.
+   Give `--suite` the switch file's `suites`. A side with 0 hits on its arm
+   proves nothing, because no guarded site ran. Today the two platforms treat
+   this differently:
+
+   - VM (`oracle.py diff --switch`): a side whose receipt has
+     `arm_exercised: false` is refused with `arm-not-exercised` (exit 3), and no
+     `comparison.json` is written. No driver reports switch hits yet (the
+     daemon has no hit source), so every VM switch diff that runs cases stops
+     with exit 3 until a hit source lands.
+   - App (`--product app`, through `fleet.py diff`): the diff does **not**
+     check hits. It compares the merged sides, and it can exit 0 when no guarded
+     site ran. Before you trust exit 0, check that `fleet.json` has `ok: true`
+     and each `sides.<arm>.ok` is true (a receipt with `arm_exercised: false`
+     has `ok: false`), or read `arm_exercised` in each merged `receipt.json`.
+     A refusal in `fleet.py diff` is not on the branch yet.
+
+   `oracle.py switches --hits FILE --switch NAME --arm old|new` reads one
+   `debug.oracle.switch_hits` reply and prints its verdict.
 4. Fix each divergence, or add it to `expected_differences` with a `pointer`
    and a `reason`. The diff labels an expected difference `explained` and does not count it.
 5. Set `default` to the planned arm, then run every switch at its planned arm against all defaults:
