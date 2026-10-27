@@ -2,7 +2,7 @@
  "schema": 1,
  "task": "p01-process-208",
  "checker": "scripts/cmux-next/vt-state-access.py --check",
- "scope": "cmux-tui/crates/cmux-tui-core/src, *.rs, no tests/ directory, no *_tests.rs: every `ghostty_vt::` (the Q15 query) and every parser lock (`.term.lock(`, `.term.try_lock(`, `with_terminal(`, `try_with_terminal(`)",
+ "scope": "cmux-tui/crates/cmux-tui-core/src, *.rs, no tests/ directory, no *_tests.rs: every `ghostty_vt::` (the Q15 query) and every parser lock: `.term.lock(`, `.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`, and each call of a parser accessor (a function whose signature hands a closure the Terminal, found in the scanned code, or the item of an `accessor` row): `with_terminal(`, `try_with_terminal(`, `try_with_hot_terminal(`, `with_terminal_stream_update(`, `discard_unreplayable_replay_with(`",
  "classes": {
   "page": "reads a value the VT worker publishes in its seqlock screen page; no hop, safe on the key path (tasks 133, 209)",
   "async": "reads parser state too large or too rare for the page (replays, snapshots, history, Kitty images); with process workers an asynchronous request to the shard owner, never on a key path (task 135)",
@@ -23,7 +23,8 @@
   "modes.keyboard": "Kitty keyboard flag stack, DECCKM, DECKPAM and modifyOtherKeys: what KeyEncoder::sync_from_terminal reads",
   "modes.mouse": "mouse tracking and format and the pointer semantic snapshot: what MouseEncoders::sync_from_terminal reads",
   "modes.bracketed_paste": "DECSET 2004",
-  "modes.focus_reporting": "DECSET 1004"
+  "modes.focus_reporting": "DECSET 1004",
+  "metadata.osc_progress": "OSC 9;4 progress state the parser callbacks set; published in the same seqlock generation as screen.cells, so a reader gets text and progress from one parse cut"
  },
  "sites": [
   {
@@ -31,11 +32,12 @@
    "item": "fn terminal_replay_blob_with_recovery",
    "symbols": [
     "try_with_terminal()",
-    "Error::OutOfSpace"
+    "Error::OutOfSpace",
+    "discard_unreplayable_replay_with()"
    ],
    "class": "async",
    "path": "background",
-   "reason": "journal checkpoint: a bounded VT replay of a live terminal (retried smaller on OutOfSpace); a replay request to the shard owner, off key paths"
+   "reason": "journal checkpoint: a bounded VT replay of a live terminal (retried smaller on OutOfSpace, and after CAN ends an unreplayable sequence in the parser); a replay request to the shard owner, off key paths"
   },
   {
    "file": "journal_ingress.rs",
@@ -326,8 +328,8 @@
     "try_with_terminal()"
    ],
    "class": "async",
-   "path": "background",
-   "reason": "archive of a closing terminal: VT replay or visible text; a request to the shard owner, off key paths"
+   "path": "request",
+   "reason": "archive of a closing terminal: VT replay or visible text. A resource close waits for it: batch_close.rs runs store_terminal_archives(capture_terminal_archives(..)) before it returns, and finish_resource_close runs archive_unplaced_terminals; the terminal reap path (background) shares it"
   },
   {
    "file": "mux/terminal_archive.rs",
@@ -337,8 +339,8 @@
     "Screen::Primary"
    ],
    "class": "async",
-   "path": "background",
-   "reason": "the replay or viewport text the archive request reads"
+   "path": "request",
+   "reason": "the replay or viewport text capture_terminal_archive reads for a resource close"
   },
   {
    "file": "mux/terminal_exit_snapshot.rs",
@@ -438,6 +440,16 @@
    "class": "async",
    "path": "background",
    "reason": "persistence snapshot digest of viewport text, size, screen and history epoch; off key paths"
+  },
+  {
+   "file": "output_store/snapshot.rs",
+   "item": "fn write_pass_at",
+   "symbols": [
+    "try_with_hot_terminal()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "persistence write pass: content digest, cols, rows and a bounded VT replay of each hot dirty terminal; a replay request to the shard owner, off key paths"
   },
   {
    "file": "resource_router/auxiliary.rs",
@@ -1024,6 +1036,15 @@
    "reason": "cfg(test)"
   },
   {
+   "file": "surface/kitty_pixels.rs",
+   "item": "impl Surface > fn release_kitty_pixel_caches",
+   "symbols": [
+    "try_with_hot_terminal()"
+   ],
+   "class": "in-worker",
+   "reason": "critical memory pressure: clears the parser's Kitty replay pixel cache; the daemon sends the worker a command"
+  },
+  {
    "file": "surface/kitty_replay_cache.rs",
    "item": "use",
    "symbols": [
@@ -1527,9 +1548,11 @@
    "field": [
     "screen.cells",
     "screen.cursor",
-    "screen.generation"
+    "screen.size",
+    "screen.generation",
+    "metadata.osc_progress"
    ],
-   "reason": "viewport text, cursor and revision at one cut"
+   "reason": "terminal.read_screen (resource_router/content.rs): viewport text, cursor, cols and rows, revision and OSC progress at one cut; one seqlock read of the page"
   },
   {
    "file": "surface/terminal_stream.rs",
@@ -1621,10 +1644,11 @@
    "file": "surface/hosted_reader/resize.rs",
    "item": "impl HostedReader > fn apply_resized_with_colors",
    "symbols": [
-    "KittyImageAlias"
+    "KittyImageAlias",
+    "with_terminal_stream_update()"
    ],
    "class": "in-worker",
-   "reason": "rebuilds the mirror parser from a host resize replay"
+   "reason": "rebuilds the mirror parser from a host resize replay and swaps it in under the parser lock"
   },
   {
    "file": "surface/terminal_runtime/cold_terminal.rs",
@@ -1634,6 +1658,35 @@
    ],
    "class": "in-worker",
    "reason": "freezes and thaws the parser state (cold scrollback, p07-memory-040)"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "impl Surface > fn freeze_cold_terminal",
+   "symbols": [
+    "term.slot.try_lock()"
+   ],
+   "class": "in-worker",
+   "reason": "compresses the parser state into cold pages (p07-memory-040); the worker owns the parser, so the freeze is a worker command"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "impl Surface > fn try_with_hot_terminal",
+   "symbols": [
+    "term.slot.lock()"
+   ],
+   "class": "async",
+   "path": "accessor",
+   "reason": "the parser accessor that skips a cold terminal; each caller is its own row, and with workers it is the request entry to the shard owner"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "impl Surface > fn scrollback_memory",
+   "symbols": [
+    "term.slot.lock()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "memory pass (output_store/memory_budget.rs): resident bytes of a hot parser or held bytes of a cold one; a request to the shard owner, off key paths"
   },
   {
    "file": "terminal_host_runtime/colors_wire.rs",

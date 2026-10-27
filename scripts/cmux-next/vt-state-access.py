@@ -16,8 +16,13 @@ The scope is the Q15 query
     rg -n 'ghostty_vt::' cmux-tui/crates/cmux-tui-core/src \\
         --glob '!**/tests/**' --glob '!*_tests.rs'
 
-plus every parser lock in the same files (`.term.lock(`, `.term.try_lock(`,
-`with_terminal(`, `try_with_terminal(`): a reader such as
+plus every parser lock in the same files: the lock itself (`.term.lock(`,
+`.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`) and every
+call of a parser accessor. The accessors are `with_terminal`,
+`try_with_terminal` and `try_with_hot_terminal`, every function in the
+scanned files whose signature hands a closure the parser (`Fn(&Terminal)`,
+`FnMut(&mut Terminal)`, `FnOnce(&mut Terminal)`), and the item of every
+table row whose path is `accessor`. A reader such as
 `surface.try_with_terminal(|t| t.viewport_text())` names no `ghostty_vt::`
 path, and the lock is where its read starts.
 
@@ -28,7 +33,7 @@ Each match is an access site, keyed by (file, item, symbol):
           import, "(file)" for a match outside any item);
   symbol  the path after `ghostty_vt::` (for example "Error::InvalidValue"),
           "{A,B}" for an import group, or the lock ("term.lock()",
-          "try_with_terminal()"), with "comment:" or "string:" in front of
+          "term.slot.lock()", "try_with_terminal()"), with "comment:" or "string:" in front of
           a match in a comment or a literal.
 Line numbers are only printed; the key survives edits that move lines.
 
@@ -81,16 +86,24 @@ from dataclasses import dataclass, field
 
 CORE = "cmux-tui/crates/cmux-tui-core/src"
 TABLE = "plans/cmux-next/vt-worker-state-access.json"
-# The Q15 needle, then the ways the daemon takes the parser lock.
-SITE = re.compile(
-    r"(?P<vt>ghostty_vt::)"
-    r"|(?P<lock>\.term\.(?:lock|try_lock)\(|\b(?:try_)?with_terminal\()"
-)
+# The Q15 needle and the parser lock; accessor calls are added per scan.
+VT_NEEDLE = r"(?P<vt>ghostty_vt::)"
+TERM_LOCK = r"\.term\.(?:slot\.)?(?:lock|try_lock)\("
+# The daemon's parser accessors; scan() adds every other function that hands
+# a closure the parser and the item of every `accessor` row.
+ACCESSORS = frozenset({"with_terminal", "try_with_terminal", "try_with_hot_terminal"})
+# A function that hands a closure the parser: `fn name<..>(.. impl
+# FnOnce(&mut Terminal) ..)` or the same bound in a where clause.
+ACCESSOR_FN = re.compile(r"\bfn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b(?P<sig>[^{;]*)")
+TERMINAL_CLOSURE = re.compile(r"\bFn(?:Once|Mut)?\s*\(\s*&\s*(?:'\w+\s+)?(?:mut\s+)?(?:ghostty_vt::)?Terminal\b")
 CLASSES = ("page", "async", "in-worker", "dead")
 # Where an async read is asked for: a socket, CLI, resource or attach request
 # (p01-process risk 8 counts these), background daemon work, or a generic
 # accessor whose callers are rows of their own.
 ASYNC_PATHS = ("request", "background", "accessor")
+# p01-process risk 8: above this many request-path async rows, phase B stays
+# off in DEV and only phase A ships.
+RISK8_REQUEST_ROWS = 20
 
 ITEM_KEYWORDS = {
     "fn",
@@ -316,13 +329,32 @@ def symbol_at(masked: str, raw: str, start: int, in_code: bool) -> str:
     return "?"
 
 
-def scan_file(rel: str, text: str) -> list[Site]:
-    masked, kinds = mask_rust(text)
+def accessor_names(masked: str) -> set[str]:
+    """Functions in masked code whose signature hands a closure the parser."""
+    return {
+        m.group("name")
+        for m in ACCESSOR_FN.finditer(masked)
+        if TERMINAL_CLOSURE.search(m.group("sig"))
+    }
+
+
+def site_pattern(accessors: set[str]) -> re.Pattern[str]:
+    lock = TERM_LOCK
+    if accessors:
+        names = "|".join(sorted(map(re.escape, accessors), key=lambda n: (-len(n), n)))
+        lock += rf"|(?<![A-Za-z0-9_])(?:{names})\("
+    return re.compile(f"{VT_NEEDLE}|(?P<lock>{lock})")
+
+
+def scan_file(rel: str, text: str, lexed: tuple[str, list[str]], pattern: re.Pattern[str]) -> list[Site]:
+    masked, kinds = lexed
     spans = item_spans(masked)
     line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
     sites: dict[tuple[str, str], Site] = {}
-    for m in SITE.finditer(text):
+    for m in pattern.finditer(text):
         pos = m.start()
+        if not m.group("vt") and re.search(r"\bfn\s+$", text[max(0, pos - 8):pos]):
+            continue  # the accessor's own definition, not a call
         kind = kinds[pos]
         enclosing = sorted((s for s in spans if s[0] <= pos < s[1]), key=lambda s: (s[0], -s[1]))
         item = " > ".join(s[2] for s in enclosing) or "(file)"
@@ -357,11 +389,24 @@ def in_scope(rel: str) -> bool:
     return rel.endswith(".rs") and "tests" not in parts[:-1] and not parts[-1].endswith("_tests.rs")
 
 
-def scan(repo: str) -> list[Site]:
+def table_accessors(table: dict) -> set[str]:
+    """The function names of the table's `accessor` rows."""
+    names = set()
+    for row in table.get("sites") or []:
+        if row.get("path") == "accessor" and isinstance(row.get("item"), str):
+            last = row["item"].split(" > ")[-1]
+            if last.startswith("fn "):
+                names.add(last[3:])
+    return names
+
+
+def scan(repo: str, table: dict) -> tuple[list[Site], set[str]]:
+    """The sites of the tree and the accessor names whose calls are sites."""
     root = os.path.join(repo, CORE)
     if not os.path.isdir(root):
         raise TableError(f"{CORE} not found under {repo}")
-    sites: list[Site] = []
+    files: list[tuple[str, str, tuple[str, list[str]]]] = []
+    accessors = set(ACCESSORS) | table_accessors(table)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
         for name in sorted(filenames):
@@ -371,9 +416,15 @@ def scan(repo: str) -> list[Site]:
                 continue
             with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
-            if SITE.search(text):
-                sites.extend(scan_file(rel, text))
-    return sites
+            lexed = mask_rust(text)
+            files.append((rel, text, lexed))
+            accessors |= accessor_names(lexed[0])
+    pattern = site_pattern(accessors)
+    sites: list[Site] = []
+    for rel, text, lexed in files:
+        if pattern.search(text):
+            sites.extend(scan_file(rel, text, lexed, pattern))
+    return sites, accessors
 
 
 # --- Table -----------------------------------------------------------------
@@ -465,8 +516,8 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     table_path = args.table or os.path.join(args.repo, TABLE)
     try:
-        sites = scan(args.repo)
         table = load_table(table_path)
+        sites, accessors = scan(args.repo, table)
     except TableError as error:
         print(f"vt-state-access: {error}", file=sys.stderr)
         return 2
@@ -503,8 +554,10 @@ def main(argv: list[str]) -> int:
     print(
         f"vt-state-access: {len(sites)} sites ({matches} matches on {lines} lines in {files} files; "
         f"Q15 `ghostty_vt::` {sum(s.matches for s in q15)} matches in {len({s.file for s in q15})} files); "
-        f"sites/rows: {summary}; async rows on request paths {requests}; "
-        f"unclassified {len(unclassified)}; stale rows {len(stale)}",
+        f"sites/rows: {summary}; async rows on request paths {requests} "
+        f"({'over' if requests > RISK8_REQUEST_ROWS else 'within'} the risk 8 limit {RISK8_REQUEST_ROWS}); "
+        f"unclassified {len(unclassified)}; stale rows {len(stale)}; "
+        f"accessors {', '.join(sorted(accessors)) or 'none'}",
         file=sys.stderr,
     )
     for s in unclassified:

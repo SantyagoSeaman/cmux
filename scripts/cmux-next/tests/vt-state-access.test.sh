@@ -125,7 +125,91 @@ write_table ',
 if check; then fail "a duplicate row must fail --check"; fi
 grep -q 'classified twice' "$tmp/err" || { cat "$tmp/err" >&2; fail "the duplicate is named"; }
 
-# 7. The repo's table classifies every site of the tree.
+# 7. The cold-slot lock and every call of an accessor found in the code (its
+#    signature hands a closure the Terminal) are sites; its definition is not.
+reset_fixture
+cat >"$CORE/surface/cold.rs" <<'RS'
+impl Surface {
+    pub(crate) fn try_with_hot_terminal<R>(
+        &self,
+        f: impl FnOnce(&mut Terminal) -> R,
+    ) -> Option<R> {
+        let mut slot = self.term.slot.lock().unwrap();
+        Some(f(&mut slot))
+    }
+
+    pub(crate) fn freeze(&self) -> bool {
+        self.term.slot.try_lock().is_ok()
+    }
+
+    fn with_parser_update<R>(&self, update: impl FnOnce(&mut Terminal) -> R) -> R
+    where
+        R: Send,
+    {
+        update(&mut self.term.lock().unwrap())
+    }
+}
+RS
+cat >>"$CORE/server/read.rs" <<'RS'
+
+fn write_pass(surface: &Surface) -> Option<u16> {
+    surface.try_with_hot_terminal(|t| t.cols())
+}
+
+fn resize(surface: &Surface) {
+    surface.with_parser_update(|t| t.resize(80, 24));
+}
+RS
+write_table
+if check; then fail "a cold-slot lock and an accessor call must be sites"; fi
+grep -q "unclassified: surface/cold.rs:.*item='impl Surface > fn try_with_hot_terminal'.*symbol='term.slot.lock()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the .term.slot.lock() site is named"; }
+grep -q "unclassified: surface/cold.rs:.*item='impl Surface > fn freeze'.*symbol='term.slot.try_lock()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the .term.slot.try_lock() site is named"; }
+grep -q "unclassified: server/read.rs:.*item='fn write_pass'.*symbol='try_with_hot_terminal()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the try_with_hot_terminal( call is named"; }
+grep -q "unclassified: server/read.rs:.*item='fn resize'.*symbol='with_parser_update()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "a call of an accessor found from its signature is named"; }
+grep -q 'accessors try_with_hot_terminal, try_with_terminal, with_parser_update, with_terminal' "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the accessors are listed"; }
+write_table ',
+  {"file": "surface/cold.rs", "item": "impl Surface > fn try_with_hot_terminal", "symbols": ["term.slot.lock()"], "class": "async", "path": "accessor", "reason": "r"},
+  {"file": "surface/cold.rs", "item": "impl Surface > fn freeze", "symbols": ["term.slot.try_lock()"], "class": "in-worker", "reason": "r"},
+  {"file": "surface/cold.rs", "item": "impl Surface > fn with_parser_update", "symbols": ["term.lock()"], "class": "in-worker", "reason": "r"},
+  {"file": "server/read.rs", "item": "fn write_pass", "symbols": ["try_with_hot_terminal()"], "class": "async", "path": "background", "reason": "r"},
+  {"file": "server/read.rs", "item": "fn resize", "symbols": ["with_parser_update()"], "class": "in-worker", "reason": "r"}'
+check || { cat "$tmp/err" >&2; fail "classified cold-slot and accessor sites must pass (the definition is no site)"; }
+
+# 8. The item of an `accessor` row names an accessor even when its signature
+#    hands out no closure; its calls are sites.
+reset_fixture
+cat >"$CORE/surface/guard.rs" <<'RS'
+impl Surface {
+    pub(crate) fn parser_guard(&self) -> Guard<'_> {
+        self.term.lock().unwrap()
+    }
+}
+RS
+cat >>"$CORE/server/read.rs" <<'RS'
+
+fn cursor(surface: &Surface) -> (u16, u16) {
+    surface.parser_guard().cursor_position()
+}
+RS
+write_table ',
+  {"file": "surface/guard.rs", "item": "impl Surface > fn parser_guard", "symbols": ["term.lock()"], "class": "async", "path": "accessor", "reason": "r"}'
+if check; then fail "a call of a table accessor must be a site"; fi
+grep -q "unclassified: server/read.rs:.*item='fn cursor'.*symbol='parser_guard()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the table accessor call is named"; }
+
+# 9. Request-path async rows are compared with the risk 8 limit.
+reset_fixture
+write_table
+check || { cat "$tmp/err" >&2; fail "a complete table must pass"; }
+grep -q 'async rows on request paths 1 (within the risk 8 limit 20)' "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the risk 8 limit is reported"; }
+
+# 10. The repo's table classifies every site of the tree.
 python3 -I "$CHECK" --repo "$ROOT_DIR" --check >/dev/null 2>"$tmp/err" \
   || { cat "$tmp/err" >&2; fail "plans/cmux-next/vt-worker-state-access.json must classify every site"; }
 
