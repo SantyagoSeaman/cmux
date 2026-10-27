@@ -103,7 +103,11 @@ fuzz_target!(|data: &[u8]| {
         },
     };
     let Some(outcome) = resource_request(&message) else {
-        assert!(data.first() == Some(&0), "a built line is not routed as v2: {message}");
+        // A line `Value` cannot hold (a number out of range, a member named
+        // serde_json's raw-value token) gets the legacy reply, as the
+        // line-dispatch golden records for r-9.
+        let holds = serde_json::from_str::<Value>(&message).is_ok();
+        assert!(data.first() == Some(&0) || !holds, "a built line is not routed as v2: {message}");
         return;
     };
     let accepted = match outcome {
