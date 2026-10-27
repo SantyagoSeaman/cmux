@@ -20,7 +20,7 @@ use crate::server::OutboundStream;
 use crate::server::RenderClientState;
 use crate::server::WatchKind;
 use crate::server::attach_lifecycle::attach_pump::{
-    AttachPump, PumpTimer, Step, ViewDrain, ViewOut, ViewSource,
+    ArmedWake, AttachPump, PumpTimer, Step, ViewDrain, ViewOut, ViewSource,
 };
 use crate::server::attach_lifecycle::{AttachCommit, commit_client_attach_and_start_pump};
 use crate::server::browser_state_message;
@@ -84,7 +84,7 @@ impl StreamView<'_> {
             |source: &BytesSource, hook| {
                 source.attach.stream.on_ready(hook);
             },
-            BytesSource { attach, shape },
+            BytesSource { attach, shape, wake: ArmedWake::default() },
         )
     }
 
@@ -119,19 +119,26 @@ impl StreamView<'_> {
 struct BytesSource {
     attach: AttachStream,
     shape: AttachWireShape,
+    /// The turn armed for a hidden view's held output.
+    wake: ArmedWake,
 }
 
 impl ViewSource for BytesSource {
     const WATCH: WatchKind = WatchKind::AttachOut;
 
-    fn next(&mut self, out: &mut ViewOut, _timer: &PumpTimer<'_>) -> Step {
+    fn next(&mut self, out: &mut ViewOut, timer: &PumpTimer<'_>) -> Step {
         match self.attach.stream.try_recv() {
             Ok(frame) => {
                 let sent =
                     out.writer.send_attach_frame(out.surface, &frame, self.shape, &out.stream);
                 if out.sent(sent) { Step::Sent } else { Step::End }
             }
-            Err(TryRecvError::Empty) => Step::Empty,
+            Err(TryRecvError::Empty) => {
+                if let Some(due) = self.attach.stream.held_until() {
+                    self.wake.arm(timer, due);
+                }
+                Step::Empty
+            }
             Err(TryRecvError::Disconnected) => {
                 self.attach.lifecycle.cancel();
                 out.send_detached();

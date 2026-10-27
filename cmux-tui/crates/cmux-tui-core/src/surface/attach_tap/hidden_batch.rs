@@ -98,6 +98,16 @@ impl AttachTapQueue {
         }
     }
 
+    /// When the open batch's interval ends, whatever the time now: a
+    /// poller that found the queue held arms its turn for it.
+    fn held_due(&self) -> Option<Instant> {
+        let batch = self.hidden.as_ref()?;
+        if self.frames.is_empty() || batch.flushing {
+            return None;
+        }
+        batch.opened.map(|opened| opened + batch.interval())
+    }
+
     /// End the batch: a bell, notification or title is in the held output.
     pub(super) fn flush_held(&mut self) -> bool {
         match self.hidden.as_mut() {
@@ -159,6 +169,14 @@ impl AttachFrameReceiver {
     /// The handle that hides and shows this viewer's output.
     pub(crate) fn hidden_output(&self) -> HiddenOutput {
         HiddenOutput::new(&self.state)
+    }
+
+    /// When this hidden viewer's held output becomes due, or `None` when
+    /// nothing is held; a past time when it is due already. A drain that
+    /// polls (`try_recv`, `try_viewer_event`) arms a turn for it: the batch
+    /// becoming due wakes nobody.
+    pub(crate) fn held_until(&self) -> Option<Instant> {
+        self.state.queue.lock().recover_poison().held_due()
     }
 
     /// The next frame as of `at`, the batch clock, waiting up to `wait` of

@@ -31,7 +31,7 @@ use cmux_threads::sync::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::json;
@@ -53,6 +53,7 @@ use crate::server::attach_streams::StreamEndReason;
 use crate::server::sequenced_pool::{PostError, Sequence, SequencePriority, SequencedPool};
 use crate::stream_interrupt::StreamInterrupt;
 use crate::surface::AttachLifecycle;
+use crate::wake::{Policy, Ticks};
 
 /// Items one drain task sends before it yields its worker to the other
 /// sequences of its priority.
@@ -168,6 +169,36 @@ impl PumpTimer<'_> {
     pub(crate) fn room_waker(&self) -> RoomWaker {
         let inner = self.0.clone();
         Box::new(move || wake(&inner))
+    }
+}
+
+/// The delayed turn a source arms for a deadline of its own (an idle
+/// digest, a hidden view's held output), so the turn runs with no wake
+/// from the source.
+#[derive(Default)]
+pub(crate) struct ArmedWake {
+    /// The deadline the pending turn was armed for, and when it runs.
+    armed: Option<(Instant, Instant)>,
+}
+
+impl ArmedWake {
+    /// A turn at `due` (no sooner, coalesced like the daemon's other
+    /// timers), unless a pending one is armed for `due` or earlier: that
+    /// turn arms the next.
+    pub(crate) fn arm(&mut self, timer: &PumpTimer<'_>, due: Instant) {
+        let now = Instant::now();
+        if self.armed.is_some_and(|(armed_for, runs_at)| runs_at > now && armed_for <= due) {
+            return;
+        }
+        let ticks = Ticks::now();
+        let delay = crate::wake::deadline(
+            ticks,
+            due.saturating_duration_since(now),
+            Policy::FlexibleNoSooner,
+        )
+        .wait_from(ticks);
+        timer.wake_after(delay);
+        self.armed = Some((due, now + delay));
     }
 }
 

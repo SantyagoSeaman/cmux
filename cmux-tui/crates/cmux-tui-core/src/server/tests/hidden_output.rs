@@ -2,6 +2,9 @@
 //! (p14-energy-119, `terminalHiddenOutputBatch`).
 
 use super::*;
+use crate::Surface;
+use crate::server::attach_lifecycle::attach_pump::tests::{decoded, next_item};
+use crate::server::attach_streams::ATTACH_STREAMS_CAPABILITY;
 
 struct Leased {
     mux: Arc<Mux>,
@@ -86,4 +89,122 @@ fn terminal_stream_a_detached_view_leaves_no_hidden_output_entry() {
         assert!(Instant::now() < deadline, "the detach kept the entry");
         std::thread::yield_now();
     }
+}
+
+/// The batch interval outside Energy Saver (attach_tap/hidden_batch.rs).
+const INTERVAL: Duration = Duration::from_secs(1);
+
+/// A leased view on an attach stream (attach-streams-v1), whose drain runs
+/// on the sequenced pool and is woken only by its sources' ready hooks: a
+/// byte view, or a snapshot view when `snapshot`.
+struct PooledView {
+    mux: Arc<Mux>,
+    surface: Arc<Surface>,
+    client: u64,
+    writer: MessageWriter,
+    outbound: Arc<BoundedOutbound>,
+    lease: String,
+}
+
+impl PooledView {
+    fn new(name: &str, snapshot: bool) -> Self {
+        let mux = Mux::new_for_test(name, SurfaceOptions::default());
+        mux.control_clients.hidden_output.set_for_test(true);
+        let surface = mux.new_workspace(None, Some((80, 24))).unwrap();
+        let (writer, outbound) = captured_writer();
+        let client = mux.control_clients.register(ClientTransport::Unix, writer.clone());
+        let info = json!({"cmd": "set-client-info", "kind": "frontend",
+                          "capabilities": [VIEW_ATTACHMENT_LEASE_CAPABILITY,
+                                           SHARED_SIZING_CAPABILITY, ATTACH_STREAMS_CAPABILITY]});
+        handle_command(&mux, client, json_command(info), &writer).unwrap();
+        let mut attach = json!({"cmd": "attach-surface", "surface": surface.id, "stream": 7,
+                                "cols": 80, "rows": 24});
+        if snapshot {
+            attach["snapshot"] = json!("ghostsnp");
+            attach["snapshot_version"] = json!(ghostty_vt::snapshot_version());
+        }
+        let reply = handle_command(&mux, client, json_command(attach), &writer).unwrap();
+        let lease = reply["lease"].as_str().expect("a leased attach").to_owned();
+        let view = Self { mux, surface, client, writer, outbound, lease };
+        // The READY and whatever the attach queued go out before the view
+        // hides: only output written while hidden is held.
+        while view.next_item(Duration::from_millis(300)).is_some() {}
+        view
+    }
+
+    fn next_item(&self, timeout: Duration) -> Option<Value> {
+        next_item(&self.outbound, timeout)
+    }
+
+    fn hide(&self) {
+        let request = json!({"cmd": "set-size-counts", "surface": self.surface.id,
+                             "lease": self.lease, "counts": false});
+        let reply =
+            handle_command(&self.mux, self.client, json_command(request), &self.writer).unwrap();
+        assert_eq!(reply["outcome"], "applied", "{reply}");
+    }
+
+    /// The next output, and when it arrived. The hide's own `size-state`
+    /// is the only other item.
+    fn next_output(&self, timeout: Duration) -> (Vec<u8>, Instant) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let item = self.next_item(left).expect("the held output is sent");
+            if item["event"] != "size-state" {
+                assert_eq!(item["event"], "output", "nothing else was queued: {item}");
+                return (decoded(&item), Instant::now());
+            }
+        }
+    }
+}
+
+impl Drop for PooledView {
+    fn drop(&mut self) {
+        disconnect_client(&self.mux, self.client, false);
+        self.mux.shutdown();
+    }
+}
+
+/// A hidden view that prints once and goes quiet gets its output when the
+/// batch is due, from its drain's own timer: no later output, show or
+/// exit wakes it.
+fn quiet_hidden_view_gets_its_output_when_due(name: &str, snapshot: bool) {
+    let view = PooledView::new(name, snapshot);
+    view.hide();
+    let written = Instant::now();
+    view.surface.inject_output_for_test(b"build finished\r\n");
+    let (output, arrived) = view.next_output(INTERVAL + Duration::from_secs(3));
+    assert_eq!(output, b"build finished\r\n");
+    assert!(arrived >= written + INTERVAL, "sent before the batch was due");
+}
+
+#[test]
+fn terminal_stream_quiet_hidden_byte_view_on_the_pool_gets_its_output_when_due() {
+    quiet_hidden_view_gets_its_output_when_due("hidden-pool-bytes", false);
+}
+
+#[test]
+fn terminal_stream_quiet_hidden_snapshot_view_on_the_pool_gets_its_output_when_due() {
+    quiet_hidden_view_gets_its_output_when_due("hidden-pool-snapshot", true);
+}
+
+#[test]
+fn terminal_stream_hidden_view_on_the_pool_gets_fifty_writes_in_one_second_as_one_frame() {
+    let view = PooledView::new("hidden-pool-fifty", false);
+    view.hide();
+    let written = Instant::now();
+    let mut sent = Vec::new();
+    for index in 0..50 {
+        let line = format!("line-{index}\r\n");
+        view.surface.inject_output_for_test(line.as_bytes());
+        sent.extend_from_slice(line.as_bytes());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(written.elapsed() < INTERVAL, "the writes spanned one batch");
+    let (output, arrived) = view.next_output(INTERVAL + Duration::from_secs(3));
+    assert_eq!(output, sent, "one frame");
+    assert!(arrived >= written + INTERVAL, "sent before the batch was due");
+    let after = view.next_item(Duration::from_millis(300));
+    assert!(after.is_none(), "one frame only: {after:?}");
 }

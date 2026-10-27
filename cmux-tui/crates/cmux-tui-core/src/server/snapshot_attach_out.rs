@@ -21,7 +21,7 @@ use super::{
 };
 use crate::server::WatchKind;
 use crate::server::attach_lifecycle::attach_pump::{
-    AttachPump, PumpTimer, Step, ViewDrain, ViewOut, ViewSource,
+    ArmedWake, AttachPump, PumpTimer, Step, ViewDrain, ViewOut, ViewSource,
 };
 use crate::server::attach_lifecycle::{
     AttachCommit, AttachWorkerCommit, commit_client_attach_and_start_pump,
@@ -38,7 +38,6 @@ use crate::surface::snapshot_attach::{
     LocalReadySnapshot, SNAPSHOT_DIGEST_IDLE, SnapshotRequestGate,
 };
 use crate::surface::{AttachFrameReceiver, AttachLifecycle, ViewerEvent};
-use crate::wake::{Policy, Ticks};
 use crate::{Mux, Surface, SurfaceId};
 
 /// Everything the attach worker needs.
@@ -277,7 +276,7 @@ pub(super) fn start(worker: SnapshotWorker, commit: AttachCommit) -> anyhow::Res
             true,
         );
         worker.receiver.on_ready(pump.hook());
-        let source = SnapshotSource { worker, wake_at: None };
+        let source = SnapshotSource { worker, wake: ArmedWake::default() };
         pump.install(Box::new(ViewDrain::new(out, source)));
         return commit_client_attach_and_start_pump(&mux, client, surface, stream.id, commit, pump);
     }
@@ -314,31 +313,21 @@ pub(super) fn start(worker: SnapshotWorker, commit: AttachCommit) -> anyhow::Res
 /// A snapshot viewer of an attach stream.
 struct SnapshotSource {
     worker: SnapshotWorker,
-    /// When the delayed turn armed for the digest runs.
-    wake_at: Option<Instant>,
+    /// The turn armed for the idle digest or the held output.
+    wake: ArmedWake,
 }
 
 impl SnapshotSource {
-    /// A turn when the idle digest is due, unless one is armed already: the
-    /// digest deadline only moves later, and an early turn arms the next.
-    fn arm_digest(&mut self, timer: &PumpTimer<'_>) {
-        let Some(due) = self.worker.digest_at else { return };
-        let now = Instant::now();
-        if self.wake_at.is_some_and(|wake| wake <= now) {
-            self.wake_at = None;
+    /// A turn when the idle digest or a hidden view's held output is due,
+    /// whichever is first.
+    fn arm_deadline(&mut self, timer: &PumpTimer<'_>) {
+        let due = match (self.worker.digest_at, self.worker.receiver.held_until()) {
+            (Some(digest), Some(held)) => Some(digest.min(held)),
+            (digest, held) => digest.or(held),
+        };
+        if let Some(due) = due {
+            self.wake.arm(timer, due);
         }
-        if self.wake_at.is_some() {
-            return;
-        }
-        let ticks = Ticks::now();
-        let delay = crate::wake::deadline(
-            ticks,
-            due.saturating_duration_since(now),
-            Policy::FlexibleNoSooner,
-        )
-        .wait_from(ticks);
-        timer.wake_after(delay);
-        self.wake_at = Some(now + delay);
     }
 }
 
@@ -355,7 +344,7 @@ impl ViewSource for SnapshotSource {
                 Polled::Nothing
             }
             Err(TryRecvError::Empty) => {
-                self.arm_digest(timer);
+                self.arm_deadline(timer);
                 return Step::Empty;
             }
             Err(TryRecvError::Disconnected) => Polled::Disconnected,

@@ -233,3 +233,60 @@ fn terminal_stream_hidden_view_gets_a_bell_title_and_exit_at_once() {
     let tail = flushed_before_due(&attach, start).expect("exit sends the held output");
     assert!(tail.starts_with(b"tail"), "{tail:?}");
 }
+
+/// A hosted terminal (the app's terminal-host path) on a host the test
+/// plays: it writes the host's frames to `host`.
+fn hosted_surface(name: &str, id: SurfaceId) -> (Arc<Mux>, Arc<Surface>, UnixStream) {
+    let mux = Mux::new_for_test(name, SurfaceOptions::default());
+    let workspace = mux.create_empty_workspace(None, None, None).unwrap();
+    let (mut attachment, host) = crate::terminal_host_runtime::input_ack_surface_fixture();
+    let terminal_id = attachment.record.terminal_id.clone();
+    attachment.record.workspace_key = workspace.key.clone();
+    mux.seed_launching_terminal_for_test(&terminal_id, &workspace.key).unwrap();
+    let surface = Surface::spawn_hosted(
+        id,
+        SurfaceOptions::default(),
+        Arc::downgrade(&mux),
+        HostedSurfaceLaunch {
+            adopted: false,
+            attachment,
+            kitty_reservation: None,
+            terminate_on_error: false,
+            defer_launch_activation: false,
+            lifetime: PtyLifetime::SessionOwned,
+            terminal_public_id: None,
+            resource_identity: None,
+        },
+    )
+    .unwrap();
+    (mux, surface, host)
+}
+
+/// The host's Exit closes every byte tap (`finish_hosted_exit`): the queue's
+/// sender ends, so what a hidden view held goes out at once.
+#[test]
+fn terminal_stream_hidden_view_of_a_hosted_terminal_gets_its_held_output_at_exit() {
+    let (_mux, surface, mut host) = hosted_surface("hidden-batch-hosted-exit", 4252);
+    let attach = surface.attach_stream().unwrap();
+    attach.stream.hidden_output().hide(&EnergyMode::new(false));
+    let start = Instant::now();
+
+    let revision = surface.terminal_stream_revision().unwrap();
+    let mut output = Frame::new(MessageKind::Output, b"last-words".to_vec());
+    output.sequence = 1;
+    crate::terminal_host_protocol::write_frame(&mut host, &output).unwrap();
+    wait_for_revision(&surface, revision + 1);
+    assert!(matches!(attach.stream.try_recv_at(start), Err(TryRecvError::Empty)), "held");
+
+    let exit = TerminalExit {
+        outcome: crate::terminal_host_protocol::TerminalExitOutcome::Exit { code: 0 },
+        exited_at_ms: 1,
+    };
+    let mut exit_frame =
+        Frame::new(MessageKind::Exit, crate::terminal_host_protocol::encode_terminal_exit(&exit));
+    exit_frame.sequence = 2;
+    crate::terminal_host_protocol::write_frame(&mut host, &exit_frame).unwrap();
+    let held = flushed_before_due(&attach, start).expect("the exit sends the held output");
+    // With the exit's mode reset.
+    assert!(held.starts_with(b"last-words"), "{held:?}");
+}

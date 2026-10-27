@@ -573,7 +573,8 @@ impl AttachFrameReceiver {
     /// Runs `hook` whenever this receiver has something to act on, for a
     /// viewer whose drain polls (`try_recv`, `try_viewer_event`) on a
     /// sequence instead of blocking. False when a hook is set already.
-    /// A hidden viewer's batch becoming due runs no hook.
+    /// A hidden viewer's batch becoming due runs no hook: the drain arms
+    /// its own turn at [`Self::held_until`].
     pub(crate) fn on_ready(&self, hook: impl Fn() + Send + Sync + 'static) -> bool {
         self.state.ready_hook.set(hook)
     }
