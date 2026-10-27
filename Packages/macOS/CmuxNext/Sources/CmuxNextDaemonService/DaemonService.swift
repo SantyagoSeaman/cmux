@@ -361,8 +361,7 @@ public final class DaemonService {
         }
         monitor.start(queue: DispatchQueue(label: "com.cmuxterm.next.daemon.path.\(machineID)", qos: .utility))
         pathMonitor = monitor
-        let configuration = DaemonConnection.Configuration.remote(retryWake: wake, echoesPlacementShift: echoesPlacementShift,
-                                                                  hangWatch: hangWatch, terminalStreams: terminalStreams)
+        let configuration = remoteConfiguration
         // task-owner: the remote machine's connection lifecycle (`runTask`); shutdownConnection cancels it. Off main:
         // it awaits each connect, the store's run and the backoff; its step on main per connection is
         // `admitConnection` (recipe R-hop).
