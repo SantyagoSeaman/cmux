@@ -1,9 +1,11 @@
 //! Registry commits through the journal writer batch.
 //!
 //! Lock order: workspace registry -> registry connection -> state. The
-//! caller holds the registry across the receipt wait (topology writers stay
-//! serialized, so a projected tree cannot go stale before its revision) but
-//! never the connection: the journal writer needs the connection to commit.
+//! caller holds the registry from prepare to admission (topology writers
+//! stay serialized, so a projected tree cannot go stale before its
+//! revision) but never the connection: the journal writer needs the
+//! connection to commit, and with `admitThenReply` off the caller waits for
+//! the writer's receipt.
 //! The writer takes neither the registry nor state
 //! (`write_path.writer_registry_locks` in `server-stats` stays 0). The wait
 //! is bounded (see `journal_ingress::effect_intents`): a writer error, a
@@ -48,16 +50,32 @@ impl Mux {
         self.registry_connection.install_intent_sink(Arc::new(MuxIntentSink(Arc::downgrade(self))));
     }
 
-    /// Commit a prepared effect intent and finish it under `registry`.
+    /// Admit a prepared effect intent and finish it under `registry` with
+    /// the receipt decided at prepare (admit then reply, F10, p05-ipc-125):
+    /// the journal writer applies it later, in admit order. With
+    /// `admitThenReply` off, or when it cannot admit, it commits and waits
+    /// for the writer's receipt (`WorkspaceRegistry::admit_registry_intent`).
+    /// A replayed receipt (the store already holds this outcome) admits
+    /// nothing and is not finished again.
     #[track_caller]
-    pub(crate) fn commit_effect_intent(
+    pub(crate) fn admit_effect_intent(
         &self,
         registry: &mut WorkspaceRegistry,
         intent: EffectCommitIntent,
         finish: EffectCommitFinish,
     ) -> anyhow::Result<EffectCommitReceipt> {
-        let receipt = match registry.commit_registry_intent(RegistryIntent::Effect(intent)) {
-            Ok(receipt) => receipt.into_effect()?,
+        let prepared = registry.prepared_effect_receipt(&intent)?;
+        if prepared.replayed() {
+            return Ok(prepared);
+        }
+        let admitted = registry.admit_registry_intent(
+            RegistryIntent::Effect(intent),
+            RegistryReceipt::Effect(prepared),
+            || {},
+            None,
+        );
+        let receipt = match admitted {
+            Ok(admission) => admission.into_receipt().into_effect()?,
             Err(error) => {
                 // An indeterminate receipt: the writer can still commit after
                 // this request gives up. Wake journal subscribers, who read

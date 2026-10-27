@@ -18,6 +18,10 @@
 //!
 //! Prepare and executing transitions stay request-side: they must be durable
 //! before the effect runs.
+//!
+//! Admit then reply (F10, p05-ipc-125): `prepared_effect_receipt` decides
+//! the receipt before the writer applies the intent, so the request can
+//! reply without waiting (`Mux::admit_effect_intent`).
 
 use std::sync::Arc;
 
@@ -69,8 +73,15 @@ enum EffectCommitKind {
 /// The writer's (or a local transaction's) answer for one intent.
 #[derive(Debug)]
 pub(crate) enum EffectCommitReceipt {
-    Outcome { revision: u64 },
-    Patch { commit: ResourcePatchCommit, spans: CommitSpans },
+    /// `replayed`: the store already held this outcome; nothing was written.
+    Outcome {
+        revision: u64,
+        replayed: bool,
+    },
+    Patch {
+        commit: ResourcePatchCommit,
+        spans: CommitSpans,
+    },
 }
 
 /// What the request thread keeps to finish a commit after its receipt.
@@ -113,6 +124,26 @@ impl EffectCommitIntent {
         self
     }
 
+    /// The receipt of this intent at resource `revision`.
+    fn receipt_at(&self, revision: u64, replayed: bool) -> EffectCommitReceipt {
+        match &self.kind {
+            EffectCommitKind::Outcome { .. } => EffectCommitReceipt::Outcome { revision, replayed },
+            EffectCommitKind::Patch { result, .. } => EffectCommitReceipt::Patch {
+                commit: ResourcePatchCommit { revision, result: result.clone(), replayed },
+                spans: CommitSpans::default(),
+            },
+        }
+    }
+
+    /// Whether applying it advances the resource revision: a patch, or an
+    /// outcome with public deltas (`commit_effect_outcome_in_transaction`).
+    fn advances_resource_revision(&self) -> bool {
+        match &self.kind {
+            EffectCommitKind::Outcome { deltas, .. } => deltas.is_some(),
+            EffectCommitKind::Patch { .. } => true,
+        }
+    }
+
     /// Apply inside `transaction` (the writer's savepoint, or a request-side
     /// transaction), then the extra rows.
     #[track_caller]
@@ -142,7 +173,7 @@ impl EffectCommitIntent {
                     &self.outcome_json,
                     deltas.as_ref(),
                 )?;
-                Ok(EffectCommitReceipt::Outcome { revision })
+                Ok(EffectCommitReceipt::Outcome { revision, replayed: false })
             }
             EffectCommitKind::Patch { patch, result, outcome, deltas, placement } => {
                 let (started, mut spans) = (std::time::Instant::now(), CommitSpans::default());
@@ -261,6 +292,51 @@ impl WorkspaceRegistry {
         Ok((intent, EffectCommitFinish::Patch { deltas, restates_all }))
     }
 
+    /// The receipt `intent` commits with, decided before the journal writer
+    /// applies it (admit then reply). It runs the checks of the writer's
+    /// apply against the store the writer applies it on: the connection's
+    /// read barrier lets this read only after every intent admitted before,
+    /// and the caller's registry hold keeps the next one out until this one
+    /// is admitted. The writer applies admitted intents in admit order.
+    ///
+    /// An effect the store already committed with the same outcome is a
+    /// replay: its stored receipt, `replayed`, with nothing left to write.
+    #[track_caller]
+    pub(crate) fn prepared_effect_receipt(
+        &self,
+        intent: &EffectCommitIntent,
+    ) -> anyhow::Result<EffectCommitReceipt> {
+        let key = intent.idempotency_key.as_str();
+        let db = self.connection.get();
+        let stored = read_stored_effect(&db, key)?;
+        require_effect_identity(
+            key,
+            &intent.operation,
+            &intent.fingerprint,
+            &stored.operation,
+            &stored.fingerprint,
+        )?;
+        match (stored.state.as_str(), stored.committed) {
+            ("executing", _) => {}
+            ("committed", Some((outcome_json, revision)))
+                if outcome_json == intent.outcome_json =>
+            {
+                return Ok(intent.receipt_at(revision, true));
+            }
+            (state, _) => {
+                anyhow::bail!("resource effect {key:?} cannot commit from state {state:?}")
+            }
+        }
+        require_correlated_creation_executing(&db, key)?;
+        let current = current_resource_revision(&db)?;
+        let revision = if intent.advances_resource_revision() {
+            current.checked_add(1).ok_or_else(|| anyhow::anyhow!("resource revision exhausted"))?
+        } else {
+            current
+        };
+        Ok(intent.receipt_at(revision, false))
+    }
+
     /// Commit an intent in its own request-side transaction and fsync. The
     /// journal writer path is preferred (`Mux::commit_effect_intent`); this
     /// runs when the writer is disabled, stopped, or not running.
@@ -305,8 +381,16 @@ impl WorkspaceRegistry {
 impl EffectCommitReceipt {
     pub(crate) fn revision(&self) -> u64 {
         match self {
-            Self::Outcome { revision } => *revision,
+            Self::Outcome { revision, .. } => *revision,
             Self::Patch { commit, .. } => commit.revision,
+        }
+    }
+
+    /// The store already held this effect committed with the same outcome.
+    pub(crate) fn replayed(&self) -> bool {
+        match self {
+            Self::Outcome { replayed, .. } => *replayed,
+            Self::Patch { commit, .. } => commit.replayed,
         }
     }
 
@@ -316,6 +400,68 @@ impl EffectCommitReceipt {
             Self::Outcome { .. } => anyhow::bail!("effect commit receipt is not a patch commit"),
         }
     }
+}
+
+/// An effect receipt row as a commit finds it.
+struct StoredEffect {
+    operation: String,
+    fingerprint: String,
+    state: String,
+    /// The outcome and revision of a committed row.
+    committed: Option<(String, u64)>,
+}
+
+fn read_stored_effect(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> anyhow::Result<StoredEffect> {
+    let row = connection
+        .query_row(
+            "SELECT operation, fingerprint, state, outcome_json, committed_revision
+             FROM resource_effect_receipts
+             WHERE idempotency_key = ?1",
+            [idempotency_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("resource effect intent {idempotency_key:?} is missing"))?;
+    let (operation, fingerprint, state, outcome_json, committed_revision) = row;
+    let committed = match (outcome_json, committed_revision) {
+        (Some(outcome_json), Some(revision)) => Some((
+            outcome_json,
+            u64::try_from(revision).context("committed resource revision is negative")?,
+        )),
+        _ => None,
+    };
+    Ok(StoredEffect { operation, fingerprint, state, committed })
+}
+
+/// The writer's apply moves a correlated creation receipt from `executing`
+/// with the effect; it refuses an effect whose creation is not there.
+fn require_correlated_creation_executing(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> anyhow::Result<()> {
+    let (creations, executing): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(execution_kind = 'effect' AND state = 'executing'), 0)
+         FROM resource_creation_receipts WHERE idempotency_key = ?1",
+        [idempotency_key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    anyhow::ensure!(
+        creations == 0 || executing == 1,
+        "correlated resource effect {idempotency_key:?} could not commit its outcome"
+    );
+    Ok(())
 }
 
 /// The body of `commit_resource_effect` inside a caller's transaction.

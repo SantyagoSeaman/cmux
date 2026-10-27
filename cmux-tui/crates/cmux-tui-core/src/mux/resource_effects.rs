@@ -161,11 +161,14 @@ impl Mux {
             outcome,
             deltas,
         )?;
-        // The registry stays held across the writer receipt (see
-        // effect_commit.rs); the connection and state are not held.
-        let revision = self.commit_effect_intent(&mut registry, intent, finish)?.revision();
+        // Admitted with its prepare-time receipt (effect_commit.rs); the
+        // registry is held until then, the connection and state are not.
+        let revision = self.admit_effect_intent(&mut registry, intent, finish)?.revision();
         if deltas.is_some() {
-            self.state.lock().unwrap().resource_revision = revision;
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            // A replayed receipt can be older than the head.
+            state.resource_revision = state.resource_revision.max(revision);
+            drop(state);
             drop(registry);
             self.publish_resource_event();
         } else {
@@ -178,11 +181,11 @@ impl Mux {
     /// Capture a post-effect live projection and commit its topology, public
     /// deltas, and effect receipt under one registry hold. The registry
     /// keeps every other topology writer out between the captured tree and
-    /// its durable revision. State and the connection pin are released
-    /// before the journal writer receipt wait (lock order: registry ->
-    /// connection -> state; the writer needs the connection), and state is
-    /// locked again to install the committed revision. Readers in between see
-    /// the pre-commit state and revision, as before publication.
+    /// its revision. State and the connection pin are released before the
+    /// admission (lock order: registry -> connection -> state; a thread that
+    /// holds the connection cannot admit), and state is locked again to
+    /// install the admitted revision. Readers in between see the pre-commit
+    /// state and revision, as before publication.
     #[track_caller]
     pub(crate) fn commit_resource_effect_projection(
         &self,
@@ -214,10 +217,11 @@ impl Mux {
         drop(state);
         crate::debug_spans::mark("projection.intent_prepared");
         let commit =
-            self.commit_effect_intent(&mut registry, intent, finish)?.into_patch_commit()?;
-        crate::debug_spans::mark("projection.writer_committed");
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).resource_revision =
-            commit.revision;
+            self.admit_effect_intent(&mut registry, intent, finish)?.into_patch_commit()?;
+        crate::debug_spans::mark("projection.admitted");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.resource_revision = state.resource_revision.max(commit.revision);
+        drop(state);
         drop(registry);
         self.publish_resource_event();
         self.publish_pending_terminal_directories();
