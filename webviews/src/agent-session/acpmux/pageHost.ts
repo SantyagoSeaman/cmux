@@ -13,6 +13,7 @@ import { setDeviceChats } from "./newtab/deviceChats";
 import { setToolCards } from "./toolCards/toolCardStore";
 import { setRecentlyClosed } from "./newtab/recentlyClosed";
 import { setNowPlaying } from "./newtab/nowPlaying";
+import { setAttentionTabs } from "./needsYou/attentionTabs";
 import { setHeaderState } from "./header/headerState";
 import { setTabRow } from "./header/tabRow";
 import { setFloatingState } from "./floatingState";

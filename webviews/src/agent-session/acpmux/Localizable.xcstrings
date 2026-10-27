@@ -62,6 +62,138 @@
     "workflow.upNext": {"comment":"Agent pane: the workflow phases no agent has started yet","extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Up next: {phases}"}},"ja":{"stringUnit":{"state":"translated","value":"次: {phases}"}},"de":{"stringUnit":{"state":"translated","value":"Als Nächstes: {phases}"}},"fr":{"stringUnit":{"state":"translated","value":"Ensuite : {phases}"}},"es":{"stringUnit":{"state":"translated","value":"A continuación: {phases}"}},"it":{"stringUnit":{"state":"translated","value":"Prossimo: {phases}"}},"da":{"stringUnit":{"state":"translated","value":"Næste: {phases}"}},"pl":{"stringUnit":{"state":"translated","value":"Następnie: {phases}"}},"ru":{"stringUnit":{"state":"translated","value":"Далее: {phases}"}},"bs":{"stringUnit":{"state":"translated","value":"Sljedeće: {phases}"}},"ar":{"stringUnit":{"state":"translated","value":"التالي: {phases}"}},"pt-BR":{"stringUnit":{"state":"translated","value":"A seguir: {phases}"}},"th":{"stringUnit":{"state":"translated","value":"ถัดไป: {phases}"}},"tr":{"stringUnit":{"state":"translated","value":"Sıradaki: {phases}"}},"km":{"stringUnit":{"state":"translated","value":"បន្ទាប់៖ {phases}"}},"uk":{"stringUnit":{"state":"translated","value":"Далі: {phases}"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"接下来：{phases}"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"接下來：{phases}"}},"nb":{"stringUnit":{"state":"translated","value":"Neste: {phases}"}},"vi":{"stringUnit":{"state":"translated","value":"Tiếp theo: {phases}"}},"ko":{"stringUnit":{"state":"translated","value":"다음: {phases}"}}}},
     "workflow.model": {"comment":"Agent pane: the model a workflow phase's agents run on","extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Model: {model}"}},"ja":{"stringUnit":{"state":"translated","value":"モデル: {model}"}},"de":{"stringUnit":{"state":"translated","value":"Modell: {model}"}},"fr":{"stringUnit":{"state":"translated","value":"Modèle : {model}"}},"es":{"stringUnit":{"state":"translated","value":"Modelo: {model}"}},"it":{"stringUnit":{"state":"translated","value":"Modello: {model}"}},"da":{"stringUnit":{"state":"translated","value":"Model: {model}"}},"pl":{"stringUnit":{"state":"translated","value":"Model: {model}"}},"ru":{"stringUnit":{"state":"translated","value":"Модель: {model}"}},"bs":{"stringUnit":{"state":"translated","value":"Model: {model}"}},"ar":{"stringUnit":{"state":"translated","value":"النموذج: {model}"}},"pt-BR":{"stringUnit":{"state":"translated","value":"Modelo: {model}"}},"th":{"stringUnit":{"state":"translated","value":"โมเดล: {model}"}},"tr":{"stringUnit":{"state":"translated","value":"Model: {model}"}},"km":{"stringUnit":{"state":"translated","value":"ម៉ូដែល៖ {model}"}},"uk":{"stringUnit":{"state":"translated","value":"Модель: {model}"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"模型：{model}"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"模型：{model}"}},"nb":{"stringUnit":{"state":"translated","value":"Modell: {model}"}},"vi":{"stringUnit":{"state":"translated","value":"Mô hình: {model}"}},"ko":{"stringUnit":{"state":"translated","value":"모델: {model}"}}}},
     "workflow.kind": {"comment":"Agent pane: what a finished workflow task is, before how it ended","extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Workflow"}},"ja":{"stringUnit":{"state":"translated","value":"ワークフロー"}},"de":{"stringUnit":{"state":"translated","value":"Workflow"}},"fr":{"stringUnit":{"state":"translated","value":"Workflow"}},"es":{"stringUnit":{"state":"translated","value":"Flujo de trabajo"}},"it":{"stringUnit":{"state":"translated","value":"Workflow"}},"da":{"stringUnit":{"state":"translated","value":"Arbejdsgang"}},"pl":{"stringUnit":{"state":"translated","value":"Przepływ pracy"}},"ru":{"stringUnit":{"state":"translated","value":"Рабочий процесс"}},"bs":{"stringUnit":{"state":"translated","value":"Tok rada"}},"ar":{"stringUnit":{"state":"translated","value":"سير عمل"}},"pt-BR":{"stringUnit":{"state":"translated","value":"Fluxo de trabalho"}},"th":{"stringUnit":{"state":"translated","value":"เวิร์กโฟลว์"}},"tr":{"stringUnit":{"state":"translated","value":"İş akışı"}},"km":{"stringUnit":{"state":"translated","value":"លំហូរការងារ"}},"uk":{"stringUnit":{"state":"translated","value":"Робочий процес"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"工作流"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"工作流程"}},"nb":{"stringUnit":{"state":"translated","value":"Arbeidsflyt"}},"vi":{"stringUnit":{"state":"translated","value":"Quy trình"}},"ko":{"stringUnit":{"state":"translated","value":"워크플로"}}}},
+    "needsYou.kind.tab": {
+      "comment": "Agent pane: tag on a Needs you item for a tab an agent marked for the person to act in (log in, confirm, approve)",
+      "extractionState": "manual",
+      "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "في علامة تبويب"
+          }
+        },
+        "bs": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "U kartici"
+          }
+        },
+        "da": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "I en fane"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "In einem Tab"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In a tab"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "En una pestaña"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Dans un onglet"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "In una scheda"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "タブ内"
+          }
+        },
+        "km": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ក្នុងផ្ទាំង"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "탭에서"
+          }
+        },
+        "nb": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "I en fane"
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "W karcie"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Em uma aba"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Во вкладке"
+          }
+        },
+        "th": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ในแท็บ"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Bir sekmede"
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "У вкладці"
+          }
+        },
+        "vi": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Trong một thẻ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "在标签页中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "在分頁中"
+          }
+        }
+      }
+    },
     "composer.speedLabel": {
       "comment": "Agent pane: the composer's speed toggle (lightning bolt left of the mic); {tier} is Standard, Fast or Ultrafast",
       "extractionState": "manual",
