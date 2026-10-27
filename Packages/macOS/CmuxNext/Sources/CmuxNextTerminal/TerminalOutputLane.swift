@@ -44,6 +44,14 @@ nonisolated final class TerminalOutputLane: Sendable {
     }
 
     private let backlog = Mutex(Backlog())
+    /// Ring chunks cut with a lower resync count are dropped: the READY that answers a lap replaces them.
+    /// Written on `queue`.
+    private let ringResync = Atomic<UInt64>(0)
+    private let ringChunks = Atomic<UInt64>(0)
+    private let ringCopies = Atomic<UInt64>(0)
+    private let ringBytesCopied = Atomic<UInt64>(0)
+    private let ringLaps = Atomic<UInt64>(0)
+    private let ringDropped = Atomic<UInt64>(0)
     /// The surface's key-to-echo stage: each parsed output chunk may be a waiting key's echo. Nil
     /// while the app tracks no input latency.
     let echoStage: TerminalEchoStage?
@@ -94,6 +102,12 @@ nonisolated final class TerminalOutputLane: Sendable {
             await waitForCapacity()
             processOutput(data)
             return true
+        case .ringOutput(let chunk):
+            outputReceived()
+            ExpectedActivity.shared.note(.terminalOutput)
+            await waitForCapacity()
+            processRing(chunk)
+            return true
         case .inputEcho(let flow):
             echoReceived(flow)
             return true
@@ -138,6 +152,69 @@ nonisolated final class TerminalOutputLane: Sendable {
             if NewTerminalTrace.shared.isArmed { NewTerminalTrace.shared.parsed(lane: ObjectIdentifier(self), data) }
             #endif
         }
+    }
+
+    /// Queues output that sits in the daemon's ring (``TerminalIOEvent/ringOutput(_:)``). On the lane, right
+    /// before the parse, its bytes are copied out of the ring once and checked after the copy
+    /// (``TerminalRingChunk/read()``); a chunk the writer lapped is never parsed: the stream asks for a READY
+    /// and the lane drops the chunks cut before it.
+    func processRing(_ chunk: TerminalRingChunk) {
+        let count = chunk.byteCount
+        guard count > 0 else { return }
+        let armedBefore = echoStage?.armedCount ?? 0
+        backlog.withLock { $0.bytes += count }
+        queue.async { [self] in
+            defer { parsed(count) }
+            guard let surface = liveSurface, let data = readRing(chunk) else { return }
+            // SAFETY: ``liveSurface`` on the lane: alive until close() fences the lane.
+            unsafe feed(surface, data)
+            echoStage?.outputParsed(armedBefore: armedBefore)
+            if let keyFlows { probe.mark(.outputParsed, surface: keyFlows) }
+            #if DEBUG || CMUX_BENCH_HOOKS
+            if NewTerminalTrace.shared.isArmed { NewTerminalTrace.shared.parsed(lane: ObjectIdentifier(self), data) }
+            #endif
+        }
+    }
+
+    /// On the lane: `chunk`'s bytes, or nil when they may not be parsed (cut before the READY that answers
+    /// a lap, or lapped now: then the stream is told once).
+    private func readRing(_ chunk: TerminalRingChunk) -> Data? {
+        ringChunks.add(1, ordering: .relaxed)
+        guard chunk.resync >= ringResync.load(ordering: .relaxed) else {
+            ringDropped.add(1, ordering: .relaxed)
+            return nil
+        }
+        switch chunk.read() {
+        case .copied(let data):
+            ringCopies.add(1, ordering: .relaxed)
+            ringBytesCopied.add(UInt64(data.count), ordering: .relaxed)
+            return data
+        case .lapped:
+            ringLaps.add(1, ordering: .relaxed)
+            ringResync.store(chunk.resync + 1, ordering: .relaxed)
+            chunk.ring.lapped(chunk)
+            return nil
+        }
+    }
+
+    /// How the lane read ring output (`debug.terminal`): one copy per chunk it parsed, none for a chunk
+    /// that lapped or was dropped.
+    nonisolated struct RingReads: Sendable, Equatable {
+        /// Ring chunks the lane took off its queue (closed lanes skip theirs uncounted).
+        var chunks: UInt64
+        /// Chunks copied out of the ring and parsed.
+        var copies: UInt64
+        var bytesCopied: UInt64
+        /// Chunks the writer overwrote before or during the copy: each told its stream once.
+        var laps: UInt64
+        /// Chunks cut before the READY that answers a lap, dropped unread.
+        var dropped: UInt64
+    }
+
+    var ringReads: RingReads {
+        RingReads(chunks: ringChunks.load(ordering: .relaxed), copies: ringCopies.load(ordering: .relaxed),
+                  bytesCopied: ringBytesCopied.load(ordering: .relaxed), laps: ringLaps.load(ordering: .relaxed),
+                  dropped: ringDropped.load(ordering: .relaxed))
     }
 
     /// Parses one chunk on the lane, inside a ``feedHangDeadline`` hang scope when there is a watcher.

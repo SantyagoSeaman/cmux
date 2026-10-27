@@ -343,16 +343,8 @@ public final class TerminalSession {
             surfaceHasContent = true
             frameHold.contentQueued()
             TerminalTimings.contentApplied()
-        case .output(let data):
-            ExpectedActivity.shared.note(.terminalOutput)
-            guard let lane = surfaceView.lane else { return }
-            lane.outputReceived()
-            await lane.waitForCapacity()
-            // The surface may have been swapped while waiting (a replay).
-            surfaceView.lane?.processOutput(data)
-            surfaceHasContent = true
-            frameHold.contentQueued()
-            TerminalTimings.contentApplied()
+        case .output(let data): await queueLiveOutput { $0.processOutput(data) }
+        case .ringOutput(let chunk): await queueLiveOutput { $0.processRing(chunk) }
         case .inputEcho(let flow): surfaceView.lane?.echoReceived(flow)
         case .resize(let columns, let rows):
             guard columns > 0, rows > 0 else { return }
@@ -369,6 +361,20 @@ public final class TerminalSession {
         case .sizedFor(let sizedFor):
             view.showSizedFor(model.connection == .connected ? sizedFor : nil)
         }
+    }
+
+    /// Live output for the surface's lane (`.output`, `.ringOutput`): queued by `enqueue` once the lane's
+    /// backlog has room.
+    private func queueLiveOutput(_ enqueue: (TerminalOutputLane) -> Void) async {
+        ExpectedActivity.shared.note(.terminalOutput)
+        guard let lane = surfaceView.lane else { return }
+        lane.outputReceived()
+        await lane.waitForCapacity()
+        // The surface may have been swapped while waiting (a replay).
+        if let lane = surfaceView.lane { enqueue(lane) }
+        surfaceHasContent = true
+        frameHold.contentQueued()
+        TerminalTimings.contentApplied()
     }
 
     /// Take over ("Sized for" chip): this view sets the grid, always with a new claim; under a

@@ -105,6 +105,9 @@ public nonisolated enum TerminalIOEvent: Sendable, Equatable {
     case snapshot(Data, phase: TerminalSnapshotPhase)
     /// Live PTY output, fed to `ghostty_surface_process_output`.
     case output(Data)
+    /// Live PTY output that sits in the daemon's output ring of this stream: the output lane copies it
+    /// out once right before the parse and checks it after the copy (``TerminalRingChunk/read()``).
+    case ringOutput(TerminalRingChunk)
     /// The `output` before this one carries the echo of key press `flow`
     /// (``TypingLatencyProbe``): only while the probe records.
     case inputEcho(flow: UInt64)

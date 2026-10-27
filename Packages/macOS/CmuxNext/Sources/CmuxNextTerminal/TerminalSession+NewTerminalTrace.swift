@@ -51,7 +51,7 @@ extension TerminalSession {
     func traceEvent(_ event: TerminalIOEvent) {
         switch event {
         case .replay(let data) where data.isEmpty: return
-        case .replay, .kittyReplay, .snapshot, .output: NewTerminalTrace.shared.contentOnMain(session: ObjectIdentifier(self))
+        case .replay, .kittyReplay, .snapshot, .output, .ringOutput: NewTerminalTrace.shared.contentOnMain(session: ObjectIdentifier(self))
         default: return
         }
     }
