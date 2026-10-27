@@ -1,5 +1,5 @@
 {
-  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there. p05-ipc-128 recorded the Q9 run: `runtime.Q9` (items {file, line, key}, read by ipc-census.py for Q9 and Q18) and `runtime.Q9_run` (sha, host, command, runs); `triage.Q9` gives every (kind, site) of that run a `task` (`tasks.Q9` defines the p05-ipc-3NN ones; others are existing tasks), a `reason`, or both; `why` holds the backtrace that ties a site to its task.",
+  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there. p05-ipc-128 recorded the Q9 run: `runtime.Q9` (items {file, line, key}, read by ipc-census.py for Q9 and Q18) and `runtime.Q9_run` (sha, host, command, runs); `triage.Q9` gives every (kind, site) of that run a `task` (`tasks.Q9` defines the p05-ipc-3NN ones; others are existing tasks), a `reason`, or both; `why` holds the backtrace that ties a site to its task. p05-ipc-136 recorded Q18: request_path record lines carry `op=` (the request watchdog names each request), `runtime.Q18` holds every (sqlite site, op) pair of that run and `runtime.Q18_run` how it ran; ipc-census.py reads Q18 from `runtime.Q18`. `triage.Q18` gives each pair of an IPC-5 op the registry read under it (`read`) and a child task, `tasks.Q18` defines them (p05-ipc-401..407); op-less detector-test pairs are allowlisted.",
   "allowlist": [
     {
       "queue": "Q4",
@@ -68,6 +68,37 @@
       "file": "Packages/macOS/CmuxNext/Sources/CmuxNextDaemon/Connection/ResourceOperationClient.swift",
       "key": "resourceRequest",
       "reason": "The typed funnel itself: it sends a generated ResourceRequestLine through DaemonConnection's one resource request path (p05-ipc-045)."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+      "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+    },
+    {
+      "queue": "Q18",
+      "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+      "key": "kind=sqlite",
+      "reason": "server_stats_tests.rs request_path_a_registry_handler_records_its_own_line runs list_terminals in its own unnamed RequestPathScope; the daemon's op=list-terminals pair is the same read (p05-ipc-402)."
     }
   ],
   "ipc5_ops": [
@@ -472,10 +503,10 @@
       },
       "Q18": {
         "title": "request-path SQLite reads",
-        "count": 89,
-        "found": 89,
-        "source": "plans/cmux-next/ipc-targets.json runtime.Q9",
-        "recorded_sha": "31f1fd5480211e614fcad92ac25cb22951b3bc10"
+        "count": 22,
+        "found": 41,
+        "source": "plans/cmux-next/ipc-targets.json runtime.Q18",
+        "recorded_sha": "345d2073f3747aaafcd680a90f93ebb973845459"
       }
     }
   },
@@ -1332,6 +1363,642 @@
       ],
       "sites": 165,
       "notes": "Linux run: proc_scan sites read /proc here, sysctl or proc_pidinfo on macOS, at the same call sites. lock_hold_over_1ms depends on timing, so a fleet run can show a different subset of the sqlite sites. Backtraces for the non-sqlite sites come from CMUX_TUI_REQUEST_PATH_IO=panic:<kind> runs with RUST_BACKTRACE=1."
+    },
+    "Q18": [
+      {
+        "file": "crates/cmux-tui-core/src/journal_hooks.rs",
+        "line": 311,
+        "key": "kind=sqlite op=session.journal.hook.put"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/conversations.rs",
+        "line": 223,
+        "key": "kind=sqlite op=chief.profile.adopt"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/resource_topology/unpublished_creation.rs",
+        "line": 41,
+        "key": "kind=sqlite op=workspace.create"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 69,
+        "key": "kind=sqlite op=close-pane"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 69,
+        "key": "kind=sqlite op=close-surface"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 201,
+        "key": "kind=sqlite op=close-pane"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 201,
+        "key": "kind=sqlite op=close-surface"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 31,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 46,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 56,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 72,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 85,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 109,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 135,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 147,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 119,
+        "key": "kind=sqlite op=machine.get"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 119,
+        "key": "kind=sqlite op=machine.list"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=sqlite op=frame"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=sqlite op=session.events"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=sqlite op=session.ping"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=sqlite op=session.snapshot"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=sqlite op=workspace.list"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router.rs",
+        "line": 261,
+        "key": "kind=sqlite op=workspace.agent_folder.set"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/auxiliary.rs",
+        "line": 228,
+        "key": "kind=sqlite op=pairing_request.resolve"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/content.rs",
+        "line": 388,
+        "key": "kind=sqlite op=terminal.close"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "key": "kind=sqlite op=session.shutdown"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "key": "kind=sqlite op=sidebar_view.ensure"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "key": "kind=sqlite op=terminal.close"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "key": "kind=sqlite op=terminal.input.write"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "key": "kind=sqlite op=session.shutdown"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "key": "kind=sqlite op=sidebar_view.ensure"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "key": "kind=sqlite op=terminal.close"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "key": "kind=sqlite op=terminal.input.write"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "key": "kind=sqlite op=session.shutdown"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "key": "kind=sqlite op=sidebar_view.ensure"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "key": "kind=sqlite op=terminal.input.write"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 299,
+        "key": "kind=sqlite op=workspace.create"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "key": "kind=sqlite op=pane.split"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "key": "kind=sqlite op=workspace.close"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "key": "kind=sqlite op=workspace.create"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology/workspace_order.rs",
+        "line": 35,
+        "key": "kind=sqlite op=workspace.list"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server.rs",
+        "line": 2641,
+        "key": "kind=sqlite op=list-workspaces"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 94,
+        "key": "kind=sqlite op=frame:agent-cli-intents"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 97,
+        "key": "kind=sqlite op=frame:agent-cli-intents"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 108,
+        "key": "kind=sqlite op=frame:agent-cli-intents"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_job.rs",
+        "line": 143,
+        "key": "kind=sqlite op=frame:agent-cli-job"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/bookmarks.rs",
+        "line": 194,
+        "key": "kind=sqlite op=create-bookmark"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 71,
+        "key": "kind=sqlite op=create-browser-profile"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 130,
+        "key": "kind=sqlite op=delete-browser-profile"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 131,
+        "key": "kind=sqlite op=delete-browser-profile"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 132,
+        "key": "kind=sqlite op=delete-browser-profile"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.adopt"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.avatar.set"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.create"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.delete"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.get"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.list"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.undo"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite op=chief.profile.update"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 786,
+        "key": "kind=sqlite op=chief.profile.update"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 955,
+        "key": "kind=sqlite op=chief.profile.adopt"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 43,
+        "key": "kind=sqlite op=get-frontend-projection"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 70,
+        "key": "kind=sqlite op=put-frontend-projection"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 130,
+        "key": "kind=sqlite op=notify"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 160,
+        "key": "kind=sqlite op=report-agent"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 115,
+        "key": "kind=sqlite op=set-ratio"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 128,
+        "key": "kind=sqlite op=set-split-ratio"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 182,
+        "key": "kind=sqlite op=set-column-dock"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 202,
+        "key": "kind=sqlite op=undo-layout"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 295,
+        "key": "kind=sqlite op=close-pane"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 308,
+        "key": "kind=sqlite op=rename-pane"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_screens.rs",
+        "line": 240,
+        "key": "kind=sqlite op=rename-screen"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_server.rs",
+        "line": 107,
+        "key": "kind=sqlite op=identify"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 56,
+        "key": "kind=sqlite op=new-tab"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 98,
+        "key": "kind=sqlite op=new-browser-tab"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 193,
+        "key": "kind=sqlite op=move-tab"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 223,
+        "key": "kind=sqlite op=create-tab-group"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 372,
+        "key": "kind=sqlite op=ungroup-tab-group"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 402,
+        "key": "kind=sqlite op=save-tab-group"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 419,
+        "key": "kind=sqlite op=delete-saved-tab-group"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 473,
+        "key": "kind=sqlite op=close-surface"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 516,
+        "key": "kind=sqlite op=rename-surface"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 529,
+        "key": "kind=sqlite op=select-tab"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "key": "kind=sqlite op=list-terminals"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 340,
+        "key": "kind=sqlite op=create-terminal"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 33,
+        "key": "kind=sqlite op=new-workspace"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 50,
+        "key": "kind=sqlite op=create-workspace"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 78,
+        "key": "kind=sqlite op=move-workspace"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 285,
+        "key": "kind=sqlite op=close-workspace"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 385,
+        "key": "kind=sqlite op=rename-workspace"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 95,
+        "key": "kind=sqlite op=session.journal.producer.put"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 176,
+        "key": "kind=sqlite op=session.journal.append"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 204,
+        "key": "kind=sqlite op=session.journal.hook.list"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 227,
+        "key": "kind=sqlite op=session.journal.hook.put"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 284,
+        "key": "kind=sqlite op=session.journal.restore.preview"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 397,
+        "key": "kind=sqlite op=session.journal.subscribe"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/new_screen.rs",
+        "line": 64,
+        "key": "kind=sqlite op=new-screen"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/personal.rs",
+        "line": 64,
+        "key": "kind=sqlite op=list-personal"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+        "line": 109,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 125,
+        "key": "kind=sqlite op=session.events"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 489,
+        "key": "kind=sqlite op=session.events"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/split_kind.rs",
+        "line": 200,
+        "key": "kind=sqlite op=split"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/split_respawn.rs",
+        "line": 35,
+        "key": "kind=sqlite op=move-tab-to-split"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 69,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 88,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 91,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 47,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 49,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite op=create-terminal"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite op=new-tab"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite op=new-workspace"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite op=pane.split"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite op=split"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite op=workspace.create"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 74,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 86,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 98,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 135,
+        "key": "kind=sqlite"
+      }
+    ],
+    "Q18_run": {
+      "task": "p05-ipc-136",
+      "sha": "345d2073f3747aaafcd680a90f93ebb973845459",
+      "host": "cmux-orchestrator-1 (Linux 7.0.0-1014-gcp x86_64, 360 cores), debug test build",
+      "rustc": "1.95.0 (59807616e 2026-04-14)",
+      "command": "cd cmux-tui && CMUX_TUI_REQUEST_PATH_IO=record cargo test -p cmux-tui-core 2>&1 | grep \"REQUEST_PATH_IO kind=sqlite\" | sort | uniq -c",
+      "runs": [
+        {
+          "what": "each test binary on its own (lib minus server::capabilities::ipc_grant_tests, and the 20 tests/*.rs targets), as p05-ipc-128 ran Q9",
+          "env": {
+            "CMUX_TUI_REQUEST_PATH_IO": "record",
+            "CMUX_DAEMON_BLOCKING": "record"
+          },
+          "result": "lib 3392 passed, 121 failed, 14 ignored; all 20 integration targets pass. 117 (sqlite site, op) pairs over 98 sites; the site set equals runtime.Q9's sqlite sites except two lines that moved by one (server.rs:2640 -> 2641, session_event_stream.rs:485 -> 489)."
+        },
+        {
+          "what": "the same run on a copy whose request_path printed one backtrace per first (sqlite site, op); never committed",
+          "result": "lib 3393 passed, 120 failed, 14 ignored. 138 traces: the registry read (or store lock, or pin) under every pair, in triage.Q18[].read. Its record lines add two pairs the first run missed (terminal_archive.rs:69 and :201 under close-surface); runtime.Q18 is the union of both runs."
+        }
+      ],
+      "pairs": 119,
+      "ipc5_ops_without_sqlite": [],
+      "ipc5_ops_not_reached": [
+        "ping",
+        "send",
+        "close-tabs",
+        "select-workspace",
+        "new-frontend-browser-tab",
+        "update-tab-group",
+        "add-tabs-to-tab-group",
+        "remove-tabs-from-tab-group",
+        "move-tab-group",
+        "close-tab-group",
+        "tab.create_terminal",
+        "pane.create",
+        "workspace.ensure_home"
+      ],
+      "notes": "Q18 keeps the pairs whose op is an IPC-5 op (ipc5_ops) and the op-less pairs (detector tests, which open their own unnamed scope; allowlisted). ipc5_ops_not_reached are ops no cmux-tui-core test drove through a named request scope here; the B3 bench (bench-daemon-latency.py --ops all --stress) is their record. triage.Q18 gives each kept pair the registry read under it and a child task (tasks.Q18, one per workspace_registry file) or a reason; also_serves on a task lists the non-IPC-5 ops that hit the same read."
     }
   },
   "triage": {
@@ -2460,6 +3127,298 @@
         "line": 31,
         "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
       }
+    ],
+    "Q18": [
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/resource_topology/unpublished_creation.rs",
+        "line": 41,
+        "op": "workspace.create",
+        "read": "workspace_registry/resource_store.rs:1436 WorkspaceRegistry::resource_topology_snapshot",
+        "task": "p05-ipc-401"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 69,
+        "op": "close-surface",
+        "read": "workspace_registry/terminal_archive_store.rs:321 WorkspaceRegistry::closed_history_mentions_terminal",
+        "task": "p05-ipc-405"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 201,
+        "op": "close-surface",
+        "read": "workspace_registry/relaunch_store.rs:376 WorkspaceRegistry::terminal_relaunch_record",
+        "task": "p05-ipc-404"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 31,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 46,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 56,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 72,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 85,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 109,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 135,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 147,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 299,
+        "op": "workspace.create",
+        "read": "pin (RegistryConnection::pin, the registry -> state fence) under mux/resource_topology/topology_operation.rs:74 resource_create_empty_workspace_selected",
+        "task": "p05-ipc-407"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "op": "pane.split",
+        "read": "workspace_registry/effect_store.rs:522 WorkspaceRegistry::resource_creation_recovery",
+        "task": "p05-ipc-403"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "op": "workspace.create",
+        "read": "workspace_registry/effect_store.rs:522 WorkspaceRegistry::resource_creation_recovery",
+        "task": "p05-ipc-403"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server.rs",
+        "line": 2641,
+        "op": "list-workspaces",
+        "read": "workspace_registry.rs:3105 WorkspaceRegistry::terminal_revision",
+        "task": "p05-ipc-402"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_server.rs",
+        "line": 107,
+        "op": "identify",
+        "read": "workspace_registry.rs:3105 WorkspaceRegistry::terminal_revision",
+        "task": "p05-ipc-402"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 56,
+        "op": "new-tab",
+        "read": "workspace_registry/effect_store.rs:522 WorkspaceRegistry::resource_creation_recovery",
+        "task": "p05-ipc-403"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 193,
+        "op": "move-tab",
+        "read": "workspace_registry/resource_store.rs:924 WorkspaceRegistry::replay_resource_patch",
+        "task": "p05-ipc-401"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 223,
+        "op": "create-tab-group",
+        "read": "workspace_registry/resource_store.rs:924 WorkspaceRegistry::replay_resource_patch",
+        "task": "p05-ipc-401"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 372,
+        "op": "ungroup-tab-group",
+        "read": "workspace_registry/resource_store.rs:924 WorkspaceRegistry::replay_resource_patch",
+        "task": "p05-ipc-401"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 473,
+        "op": "close-surface",
+        "read": "workspace_registry/effect_store.rs:255 WorkspaceRegistry::lookup_resource_effect",
+        "task": "p05-ipc-403"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 529,
+        "op": "select-tab",
+        "read": "workspace_registry/resource_store.rs:924 WorkspaceRegistry::replay_resource_patch",
+        "task": "p05-ipc-401"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "reason": "server_stats_tests.rs request_path_a_registry_handler_records_its_own_line calls list_terminals inside its own unnamed RequestPathScope; the daemon path is the op=list-terminals site (not an IPC-5 op; p05-ipc-402 serves the same read)."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 340,
+        "op": "create-terminal",
+        "read": "workspace_registry/effect_store.rs:522 WorkspaceRegistry::resource_creation_recovery",
+        "task": "p05-ipc-403"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 385,
+        "op": "rename-workspace",
+        "read": "workspace_registry.rs:3284 WorkspaceRegistry::replay",
+        "task": "p05-ipc-402"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+        "line": 109,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/split_kind.rs",
+        "line": 200,
+        "op": "split",
+        "read": "workspace_registry/effect_store.rs:522 WorkspaceRegistry::resource_creation_recovery",
+        "task": "p05-ipc-403"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 69,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 88,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 91,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 47,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 49,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "op": "create-terminal",
+        "read": "pin (RegistryConnection::pin, the registry -> state fence) under mux/terminal_directory.rs:16 publish_terminal_directory",
+        "task": "p05-ipc-406"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "op": "new-tab",
+        "read": "pin (RegistryConnection::pin, the registry -> state fence) under mux/terminal_directory.rs:16 publish_terminal_directory",
+        "task": "p05-ipc-406"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "op": "pane.split",
+        "read": "pin (RegistryConnection::pin, the registry -> state fence) under mux/terminal_directory.rs:16 publish_terminal_directory",
+        "task": "p05-ipc-406"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "op": "split",
+        "read": "pin (RegistryConnection::pin, the registry -> state fence) under mux/terminal_directory.rs:16 publish_terminal_directory",
+        "task": "p05-ipc-406"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "op": "workspace.create",
+        "read": "pin (RegistryConnection::pin, the registry -> state fence) under mux/terminal_directory.rs:16 publish_terminal_directory",
+        "task": "p05-ipc-406"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 74,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 86,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 98,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 135,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!, so the scope is never named; no daemon request reaches this line."
+      }
     ]
   },
   "tasks": {
@@ -2530,6 +3489,185 @@
         "depends_on": [
           "p05-ipc-003",
           "p05-ipc-130"
+        ]
+      }
+    ],
+    "Q18": [
+      {
+        "id": "p05-ipc-401",
+        "title": "Q18 resource_store.rs: resource-patch replay and the topology snapshot from memory",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/mutation_ledger_cache.rs",
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/admitted_overlay.rs"
+        ],
+        "change": "Reads WorkspaceRegistry::replay_resource_patch (resource_store.rs:924, `resource_mutations`) and resource_topology_snapshot (resource_store.rs:1436, the full topology). Every resource-patch commit (select-tab, move-tab, create-tab-group, ungroup-tab-group via commit_resource_mutation_plan; the tab-strip, rename, dock and ratio ops too) first looks its mutation up in SQLite. Add `resource_mutations` to p05-ipc-132's mutation-ledger cache (a third KeyedLedger: newest rows seeded at open, admitted entries kept until answered) and answer the replay from it; a key older than the cache replays in the writer's in-transaction check, as 132 does for the workspace and terminal ledgers. Serve resource_topology_snapshot (the interrupted-creation rollback at unpublished_creation.rs:41, machine.get/list) from p05-ipc-133's admitted overlay's newest view and, with nothing admitted, from a registry-owned topology projection seeded at open and replaced at each admit. Chromium answers the same way: IndexedDB's transaction coordinator decides conflicts in memory (content/browser/indexed_db/indexed_db_transaction_coordinator.cc), LevelDB reads the memtable before the tables (third_party/leveldatabase/src/db/db_impl.cc, DBImpl::Get).",
+        "acceptance": "Golden test: after N seeded random resource mutations (commits, replays, rollbacks, a reopen), the cached replay answer and the projection equal what SQLite returns for every key and for the topology. A Q18 record run has no sqlite site for these two reads under the IPC-5 ops; request_path_io.sqlite == 0 for select-tab, move-tab, create-tab-group, ungroup-tab-group.",
+        "test_phase": "RUST(resource_store); RUST(mutation_ledger); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "L",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-132",
+          "p05-ipc-133",
+          "p05-ipc-136"
+        ],
+        "also_serves": [
+          "close-pane",
+          "machine.get",
+          "machine.list",
+          "move-tab-to-split",
+          "pairing_request.resolve",
+          "rename-pane",
+          "rename-screen",
+          "rename-surface",
+          "report-agent",
+          "save-tab-group",
+          "set-column-dock",
+          "set-ratio",
+          "set-split-ratio"
+        ]
+      },
+      {
+        "id": "p05-ipc-402",
+        "title": "Q18 workspace_registry.rs: workspace replay and the terminal revision from the ledger cache",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs",
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_snapshot_read.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/frontend_projection.rs"
+        ],
+        "change": "Reads WorkspaceRegistry::replay (workspace_registry.rs:3284, `mutations`: rename-workspace, create-workspace, move-workspace, close-workspace) and terminal_revision (workspace_registry.rs:3105, `meta.terminal_revision`: identify at cmd_server.rs:107 and list-workspaces at server.rs:2641, on every call). Answer replay from p05-ipc-132's LedgerCache::replay (KeyedLedger::Workspace) and the terminal revision from its in-memory head of KeyedLedger::Terminal, which already holds every admitted revision (read-your-writes). terminal_snapshot (terminal_snapshot_read.rs:10, list-terminals) moves to the same terminal projection: rows kept per terminal id, seeded at open, updated at each terminal intent's admit.",
+        "acceptance": "Golden test: after N seeded random workspace and terminal mutations (including replays, a writer rollback and a reopen), replay(), terminal_revision() and terminal_snapshot() equal the SQLite answers. identify, list-workspaces and rename-workspace have request_path_io.sqlite == 0; request_watchdog_records_a_slow_command_on_the_connection_sequence no longer trips the thread blocking detector at server.rs:2641.",
+        "test_phase": "RUST(workspace_registry); RUST(registry_intent_ledger); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "M",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-132",
+          "p05-ipc-136"
+        ],
+        "also_serves": [
+          "close-workspace",
+          "create-workspace",
+          "get-frontend-projection",
+          "list-terminals",
+          "move-workspace",
+          "put-frontend-projection"
+        ]
+      },
+      {
+        "id": "p05-ipc-403",
+        "title": "Q18 effect_store.rs: creation recovery and effect receipts from an in-memory receipt index",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store/creation_lookup.rs",
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store/creation_record.rs"
+        ],
+        "change": "Reads resource_creation_recovery (effect_store.rs:522, `resource_creation_receipts`) on every creation (new-tab, create-terminal, split, workspace.create, pane.split; new-workspace, new-screen, new-browser-tab) through reconcile_interrupted_resource_creation, and lookup_resource_effect (effect_store.rs:255, `resource_effect_receipts`) on every effectful topology op (close-surface; workspace.close, undo-layout, notify, terminal.close, session.shutdown) and lookup_resource_creation (creation_lookup.rs:19). Keep a registry-owned receipt index: creation receipts in state executing with an effect (the only rows recovery acts on) keyed by correlation key, and the newest effect receipts keyed by idempotency key (bounded like 132's ledger cache; an older key replays in the writer's in-transaction check). Seed it at open, update it at the admit of each prepare, mark and settle.",
+        "acceptance": "Golden test: after N seeded random creation and effect sequences (prepare, mark executing, settle, interrupt with a generation change, replay, reopen), the index answers every correlation and idempotency key as SQLite does. new-tab, create-terminal, split, workspace.create, pane.split and close-surface have request_path_io.sqlite == 0 from these reads.",
+        "test_phase": "RUST(effect_store); RUST(creation_settlement); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "L",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-120",
+          "p05-ipc-132",
+          "p05-ipc-136"
+        ],
+        "also_serves": [
+          "frame:agent-cli-job",
+          "new-browser-tab",
+          "new-screen",
+          "new-workspace",
+          "notify",
+          "session.shutdown",
+          "sidebar_view.ensure",
+          "terminal.close",
+          "terminal.input.write",
+          "undo-layout",
+          "workspace.close"
+        ]
+      },
+      {
+        "id": "p05-ipc-404",
+        "title": "Q18 relaunch_store.rs: a terminal's relaunch record from memory at close",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/relaunch_store.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/terminal_archive.rs"
+        ],
+        "change": "Read terminal_relaunch_record (relaunch_store.rs:376, `terminal_relaunch`) for every terminal a close-surface or close-pane archives (terminal_archive.rs:201). Keep the relaunch records in a registry-owned map by terminal id, seeded at open and updated at the admit of every relaunch write (record_terminal_relaunch_cwd and the launch/adopt writes).",
+        "acceptance": "Golden test: after N seeded random launches, cwd updates, respawns and closes, the map equals `terminal_relaunch`. close-surface has request_path_io.sqlite == 0 from this read; archive tests pass.",
+        "test_phase": "RUST(relaunch_store); RUST(terminal_archive); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "M",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-136"
+        ],
+        "also_serves": [
+          "close-pane"
+        ]
+      },
+      {
+        "id": "p05-ipc-405",
+        "title": "Q18 terminal_archive_store.rs: closed-history membership from memory at close",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_archive_store.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/terminal_archive.rs"
+        ],
+        "change": "Read closed_history_mentions_terminal (terminal_archive_store.rs:321, `closed_group_terminals`) for every terminal a close-surface or close-pane closes (terminal_archive.rs:69). Keep the set of terminal ids that closed-history groups name, seeded at open, updated at the admit of each group write and prune.",
+        "acceptance": "Golden test: after N seeded random closes, reopens and prunes, the set equals `SELECT terminal_id FROM closed_group_terminals`. close-surface has request_path_io.sqlite == 0 from this read.",
+        "test_phase": "RUST(terminal_archive_store); RUST(terminal_archive); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "S",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-136"
+        ],
+        "also_serves": [
+          "close-pane"
+        ]
+      },
+      {
+        "id": "p05-ipc-406",
+        "title": "Q18 creation ops publish no pending terminal directory on the request thread",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/mux/terminal_directory.rs",
+          "cmux-tui/crates/cmux-tui-core/src/surface/directory.rs"
+        ],
+        "change": "Site surface/directory.rs:222 under new-tab, create-terminal, split, workspace.create and pane.split: publish_pending_terminal_directories (terminal_directory.rs:95) walks every terminal of the session after a creation's resource event and, for each with a pending cwd, pins the registry, reads live_terminal_host_id, terminal_record and resource_tabs_of_content and commits a terminal.cwd resource patch: O(session) SQLite on the request thread. Retry a pending directory on its own terminal's sequence when that terminal's resource row is admitted (only the terminals the commit touched), and read the three inputs from the terminal and topology projections (402, 401).",
+        "acceptance": "A Q18 record run has no surface/directory.rs site; the five creation ops have request_path_io.sqlite == 0 from it; a first prompt that precedes the resource row still publishes its cwd (directory tests pass).",
+        "test_phase": "RUST(terminal_directory); RUST(directory); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "M",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-401",
+          "p05-ipc-402"
+        ],
+        "also_serves": [
+          "new-workspace"
+        ]
+      },
+      {
+        "id": "p05-ipc-407",
+        "title": "Q18 a registry pin notes sqlite where its flow runs a statement, not at the fence",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/workspace_registry/registry_connection.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/signaled_mutex.rs"
+        ],
+        "change": "Site resource_router/topology.rs:299 under workspace.create (topology_operation.rs:74 lock_state_pinned) and, off the IPC-5 ops, the commit_state, close-effect and with_resource_projection pins: RegistryConnection::pin notes sqlite when the registry -> state fence is taken, and every read under it is a re-entry that notes nothing. After p05-ipc-133 a pin with every admitted entry on the overlay waits for no writer, so the fence is not I/O and the reads under it are hidden. Note sqlite at the first statement a pinned flow runs, at that statement's caller (#[track_caller] through the pinned connection), as Chrome's ScopedBlockingCall marks the blocking call, not the lock (base/threading/scoped_blocking_call.h). Then re-record and append the reads this uncovers to Q18 with a task each.",
+        "acceptance": "request_path_tests: a pin whose flow runs no statement notes nothing; one that does notes once at the statement's caller; lock_hold_over_1ms still times the pin. Q18 lists the uncovered reads with tasks; no pin site remains.",
+        "test_phase": "RUST(request_path); RUST(registry_connection); Q18 record run (p05-ipc-136 test_phase)",
+        "size": "M",
+        "machine_queue": "Q18",
+        "depends_on": [
+          "p05-ipc-133",
+          "p05-ipc-136"
+        ],
+        "also_serves": [
+          "delete-saved-tab-group",
+          "frame",
+          "session.events",
+          "session.ping",
+          "session.snapshot",
+          "terminal.close",
+          "workspace.agent_folder.set",
+          "workspace.list"
         ]
       }
     ]
