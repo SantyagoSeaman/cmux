@@ -75,8 +75,8 @@ Run directory (`run --out DIR`; the format diff.py (014) reads, with the extra f
 receipt.json also holds "nondeterminism": {"checkpoints", "nondeterministic", "rate"} (spec 4.6:
 <= 1 %). `run --repeat 3 --flaky-out FILE` appends one cmux-oracle-flake-v1 line per flaky (case,
 step, pointer) to FILE (MQ-flakes): "kind" (value, status, missing, declared), "target" in
-Expectations syntax, "samples" [{"value", "runs"}] and "proposal" (normalize.flake_proposal: a rule
-with its reason, or fix-at-source).
+Expectations syntax, "samples" [{"value", "runs"}], "proposal" (normalize.flake_proposal: a rule
+with its reason, or fix-at-source) and "truncated" (more pointers of that checkpoint differ than listed).
 `oracle.py rebaseline --run DIR [baselines.py options]` writes the golden cases of DIR in the
 run format baselines.py (016) reads (a `cases` list, the case name without its suite) and runs
 `baselines.py rebaseline` on it.
@@ -1009,15 +1009,18 @@ def first_attempt(attempts: Sequence[Attempt]) -> Optional[Attempt]:
 
 
 def nondeterministic_checkpoints(attempts: Sequence[Attempt]) -> List[CheckpointKey]:
-    """Checkpoints of the first run whose hash differs in another repeat or retry that reached them."""
+    """Checkpoints of the first run that another repeat or retry reached with another hash, or did not reach
+    with the same result (the `missing` flake line: the step sequence depends on timing)."""
     first = first_attempt(attempts)
     if first is None:
         return []
     others = [(a, checkpoint_keys(a.checkpoints)) for a in attempts if a is not first]
     out = []
+    outcome = (first.status, first.step)
     for key, index in checkpoint_keys(first.checkpoints).items():
         sha = first.checkpoints[index][2]
-        if any(key in theirs and a.checkpoints[theirs[key]][2] != sha for a, theirs in others):
+        if any(a.checkpoints[theirs[key]][2] != sha if key in theirs else (a.status, a.step) == outcome
+               for a, theirs in others):
             out.append(key)
     return out
 
@@ -1051,19 +1054,20 @@ def flake_lines(case_id: str, attempts: Sequence[Attempt], expected: Expected, r
 
     Kinds: `value` (a pointer inside one checkpoint, with the rule proposal of normalize.flake_pointers),
     `status` (the result changed), `missing` (a checkpoint some runs did not reach with the same result),
-    `declared` (Expectations list several results; nothing differed here)."""
+    `declared` (Expectations list several results; nothing differed here). `truncated: true` on the last value
+    line of a checkpoint means more pointers differ there than normalize.flake_pointers lists."""
     runs = sorted(attempts, key=lambda a: (a.iteration, a.attempt))
     lines: List[Dict[str, Any]] = []
 
     def add(kind: str, key: Optional[CheckpointKey], pointer: Optional[str], samples: List[Dict[str, Any]],
-            proposal: Mapping[str, Any], expected_by: Optional[str] = None) -> None:
+            proposal: Mapping[str, Any], expected_by: Optional[str] = None, truncated: bool = False) -> None:
         step, checkpoint, occurrence = key if key else (None, None, None)
         target = case_id if step is None else f"{case_id}/{step}"
         if pointer:
             target += f"#{pointer}"
         lines.append({"case": case_id, "kind": kind, "step": step, "checkpoint": checkpoint, "occurrence": occurrence,
                       "pointer": pointer, "target": target, "samples": samples, "proposal": dict(proposal),
-                      "expected_by": expected_by})
+                      "expected_by": expected_by, "truncated": truncated})
 
     def fix(reason: str) -> Dict[str, Any]:
         return {"rule": None, "action": "fix-at-source", "reason": reason}
@@ -1104,7 +1108,7 @@ def flake_lines(case_id: str, attempts: Sequence[Attempt], expected: Expected, r
         for entry in normalize.flake_pointers([a.rows[i]["snapshot"] for a, i in kept]):
             add("value", key, entry["pointer"],
                 [{"value": sample_value(v), "runs": g} for v, g in zip(entry["values"], groups)],
-                entry["proposal"], covering_rule(rules, case_id, key[0], entry["pointer"]))
+                entry["proposal"], covering_rule(rules, case_id, key[0], entry["pointer"]), entry.get("truncated", False))
     if not lines and declared:
         add("declared", None, None, [{"value": {"status": runs[0].status} if runs else None,
                                       "runs": [run_label(a) for a in runs]}],

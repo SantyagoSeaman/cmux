@@ -842,7 +842,17 @@ class FlakeTests(unittest.TestCase):
         short = oracle.Attempt("alpha/a", 1, 0, "run", "Pass", None, both[:1], "", 0, {}, ())
         lines = oracle.flake_lines("alpha/a", [first, short], oracle.PASS_ONLY, [], oracle.load_sibling("normalize"))
         self.assertEqual([(l["kind"], l["step"]) for l in lines], [("missing", "s2")])
-        self.assertEqual(oracle.nondeterministic_checkpoints([first, short]), [])
+        self.assertEqual(oracle.nondeterministic_checkpoints([first, short]), [("s2", "settled", 0)])
+        failed = oracle.Attempt("alpha/a", 2, 0, "run", "Failure", "s2", both[:1], "", 0, {}, ())
+        self.assertEqual(oracle.nondeterministic_checkpoints([first, failed]), [],
+                         "a run that stopped with another result is the status line, not a missing checkpoint")
+
+    def test_more_differing_pointers_than_listed_mark_the_last_value_line(self):
+        driver = FakeDriver(value_of=lambda cid, n: {f"k{i:03d}": n for i in range(100)} if cid == "alpha/case-000" else cid)
+        _, _, lines = self.flake_run(driver, per_suite=1)
+        values = [l for l in lines if l["kind"] == "value"]
+        self.assertEqual(len(values), 64)
+        self.assertEqual([l["truncated"] for l in values], [False] * 63 + [True])
 
 
 class CheckTests(unittest.TestCase):

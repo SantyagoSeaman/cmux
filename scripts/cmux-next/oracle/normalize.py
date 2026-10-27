@@ -1849,10 +1849,20 @@ RULE_ANNOTATIONS: Dict[str, str] = {
 }
 FIX_AT_SOURCE = ("no known source of nondeterminism matches these samples: fix the producer, or mark the field "
                  "x-oracle-volatile with a {reason, task} that names the source (no rule without a reason)")
-_UUID_RE = re.compile(r"^(?:[a-z][a-z0-9_-]*[_:-])?(?:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"
-                      r"|[0-9a-f]{24,64})$")
+# The shapes the id generators produce: a UUID, and a kind-prefixed `<kind>_<32 hex>` token (the
+# x-oracle-id-patterns of schemas/oracle/snapshot-v1.schema.json). A bare hex digest or a `sha256:` value is
+# a content hash, never a random id: when it differs the hashed content differed, which only the producer fixes.
+_ID_TOKEN_RE = re.compile(r"^(?P<kind>(?:[a-z][a-z0-9_-]*[_:-])?)[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$"
+                          r"|^(?P<prefix>[a-z][a-z0-9]*(?:_[a-z0-9]+)*_)[0-9a-f]{32}$")
+_HASH_PREFIX_RE = re.compile(r"^(?:sha\d*|md5|blake\d*|hash|digest|checksum)[_:-]$")
 _ISO_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$")
-_RUN_PATH_RE = re.compile(r"(?:^|[\s\"'=:])(?:file://)?/(?:tmp|private/var|var/folders|var/tmp|run/user)/")
+# A per-run root: the hermetic case state root `/tmp/o/<run>/<case>` (hermetic_env.py; driver_app.py's
+# `/tmp/o/a<random>`), or one mkdtemp segment under a temporary directory (macOS $TMPDIR is
+# /var/folders/<xx>/<yyy>/T). Only the root is per run; what follows it must be the same in every sample.
+_SEGMENT = r"[^/\s\"']+"
+_RUN_ROOT_RE = re.compile(rf"(?<![^\s\"'=:])(?:file://)?(?:/private)?(?:/tmp/o/{_SEGMENT}(?:/{_SEGMENT})?"
+                          rf"|/(?:tmp|var/tmp|run/user/\d+|var/folders/{_SEGMENT}/{_SEGMENT}/T)/{_SEGMENT})")
+RUN_ROOT_PLACEHOLDER = "<run-root>"
 _LOOPBACK_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*://)?(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)(.*)$")
 # 2001-09-09 in epoch seconds and milliseconds: a smaller integer is not read as a wall-clock time.
 _EPOCH_S_MIN, _EPOCH_MS_MIN = 1_000_000_000, 1_000_000_000_000
@@ -1869,11 +1879,28 @@ def _loopback_without_port(value: Any) -> Optional[str]:
     return match.group(2) if match else None
 
 
-def nondeterminism_source(values: Sequence[Any]) -> Optional[Tuple[str, str]]:
+def _id_kind_prefix(value: str) -> Optional[str]:
+    """The kind prefix of a generated id ("" for a bare UUID), or None when the value is no generated id."""
+    match = _ID_TOKEN_RE.match(value)
+    if not match:
+        return None
+    prefix = match.group("kind") if match.group("kind") is not None else match.group("prefix")
+    return None if _HASH_PREFIX_RE.match(prefix) else prefix
+
+
+def _without_run_root(value: str) -> Optional[str]:
+    """The value with every per-run root replaced by one placeholder, or None when it holds no per-run root."""
+    replaced, count = _RUN_ROOT_RE.subn(RUN_ROOT_PLACEHOLDER, value)
+    return replaced if count else None
+
+
+def nondeterminism_source(values: Sequence[Any], precision: float = DEFAULT_PRECISION) -> Optional[Tuple[str, str]]:
     """(rule, source) when every differing sample matches one known source of nondeterminism, else None.
 
     `values` are the distinct canonical values at one pointer; ABSENT marks a run where the member was missing,
-    which no rule explains (a rule never adds or drops a member that is not schema-marked volatile)."""
+    which no rule explains (a rule never adds or drops a member that is not schema-marked volatile). A rule is
+    proposed only when applying it makes the samples equal: the same id kind, the same text around a per-run
+    root or a loopback port, numbers one canonical rounding step (`precision`) apart."""
     if len(values) < 2 or any(v == ABSENT for v in values):
         return None
     if all(isinstance(v, list) for v in values):
@@ -1884,9 +1911,11 @@ def nondeterminism_source(values: Sequence[Any]) -> Optional[Tuple[str, str]]:
     if all(isinstance(v, str) for v in values):
         if all(_ISO_TIME_RE.match(v) for v in values):
             return "time", "wall-clock timestamp (ISO 8601)"
-        if all(_UUID_RE.match(v) for v in values):
+        kinds = {_id_kind_prefix(v) for v in values}
+        if None not in kinds and len(kinds) == 1:
             return "id", "random or per-process id (UUID(), Uuid::new_v4, counter) not labeled by kind"
-        if all(_RUN_PATH_RE.search(v) for v in values):
+        rooted = {_without_run_root(v) for v in values}
+        if None not in rooted and len(rooted) == 1:
             return "rewrite", "per-run temporary path (hermetic state root or HOME)"
         rests = {_loopback_without_port(v) for v in values}
         if None not in rests and len(rests) == 1:
@@ -1896,14 +1925,15 @@ def nondeterminism_source(values: Sequence[Any]) -> Optional[Tuple[str, str]]:
         low, high = min(values), max(values)
         if all(_epoch_like(v) for v in values):
             return "time", "wall-clock time as an epoch number"
-        if any(isinstance(v, float) for v in values) and high - low <= 0.01 * max(1.0, abs(high)):
+        # Canonical numbers are rounded to `precision`, so a last-digit difference is one rounding step at most.
+        if any(isinstance(v, float) for v in values) and high - low <= precision * (1 + 1e-9):
             return "number", "floating-point arithmetic differs in the last digits"
     return None
 
 
-def flake_proposal(values: Sequence[Any]) -> Dict[str, Any]:
+def flake_proposal(values: Sequence[Any], precision: float = DEFAULT_PRECISION) -> Dict[str, Any]:
     """The MQ-flakes action for one pointer: a rule with its RULES reason, or fix at source."""
-    found = nondeterminism_source(values)
+    found = nondeterminism_source(values, precision)
     if found is None:
         return {"rule": None, "action": "fix-at-source", "reason": FIX_AT_SOURCE}
     rule, source = found
@@ -2908,8 +2938,11 @@ def selftest(seed: int, out: Any) -> int:
             "time": [["2026-10-26T10:00:00Z", "2026-10-26T10:00:01.5Z"], [1_761_000_000_000, 1_761_000_000_250]],
             "id": [["pane_" + "a" * 32, "pane_" + "b" * 32], ["0f8fad5b-d9cb-469f-a165-70867728950e",
                                                                 "7c9e6679-7425-40de-944b-e07fc1f90ae7"]],
-            "rewrite": [["http://127.0.0.1:4321/x", "http://127.0.0.1:51000/x"]],
-            "number": [[0.5004, 0.5017]],
+            "rewrite": [["http://127.0.0.1:4321/x", "http://127.0.0.1:51000/x"],
+                        ["error: cannot open /tmp/o/r1/c1/a", "error: cannot open /tmp/o/r2/c2/a"],
+                        ["file:///tmp/tmpab12/ws/x", "file:///tmp/tmpcd34/ws/x"],
+                        ["/var/folders/zz/yy/T/r1/a", "/private/var/folders/zz/yy/T/r2/a"]],
+            "number": [[0.5, 0.501], [100.0, 100.001]],
             "set": [[[1, 2, 3], [3, 1, 2]]],
         }
         assert set(RULE_ANNOTATIONS) <= set(RULES), "a proposed rule without a RULES reason"
@@ -2919,8 +2952,17 @@ def selftest(seed: int, out: Any) -> int:
                 assert proposal["rule"] == rule, (values, proposal)
                 assert proposal["reason"].endswith(RULES[rule]) and proposal["annotation"] == RULE_ANNOTATIONS[rule]
         for values in ([1, 2], ["open", "closed"], [[1, 2], [1, 2, 3]], [ABSENT, 1], [0.1, 0.9], ["/a/b", "/a/c"],
-                       ["http://127.0.0.1:1/x", "http://127.0.0.1:2/y"]):
+                       ["http://127.0.0.1:1/x", "http://127.0.0.1:2/y"],
+                       # A per-run root explains only itself: other text or another file under it still differs.
+                       ["error: cannot open /tmp/x/a", "ok: wrote /tmp/x/a"], ["/tmp/run7/ws/file-1", "/tmp/run7/ws/file-2"],
+                       ["/tmp/o/r1/c1/a", "/tmp/o/r1/c1/b"],
+                       # A content hash that differs means the content differed; it is never a random id.
+                       ["sha256:" + "a" * 64, "sha256:" + "b" * 64], ["a" * 64, "b" * 64], ["a" * 40, "b" * 40],
+                       ["sha256_" + "a" * 32, "sha256_" + "b" * 32], ["pane_" + "a" * 32, "tab_" + "b" * 32],
+                       # More than one canonical rounding step is a real difference (layout, timing).
+                       [800.0, 806.0], [100.0, 100.9], [0.5004, 0.5017], [0.5, 0.502]):
             assert flake_proposal(values)["rule"] is None, values
+        assert flake_proposal([0.5, 0.51], precision=0.01)["rule"] == "number", "the field's x-oracle-precision step"
 
     @case
     def flake_pointers_mark_absent_members_and_cap_output() -> None:
