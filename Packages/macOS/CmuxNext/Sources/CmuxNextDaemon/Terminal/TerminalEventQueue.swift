@@ -196,7 +196,7 @@ final class TerminalEventQueue: Sendable {
     }
 
     /// Reader thread. Live output still in the stream's output ring; it reaches the consumer as `Data` that
-    /// points into the mapping. Never blocks: the ring bounds it.
+    /// points into the mapping. It adds nothing toward `highWater`: the ring bounds it.
     func push(_ span: TerminalRingSpan) {
         enqueue(.ring(span))
     }
@@ -214,7 +214,7 @@ final class TerminalEventQueue: Sendable {
             state.outputBytes += item.outputSize
             return (nil, state.parkReader(above: highWater))
         }
-        handoff?.waiter.resume(returning: handoff?.event)
+        if let handoff { handoff.waiter.resume(returning: handoff.event) }
         guard blocked else { return }
         onReaderBlocked?()
         var parked = blocked

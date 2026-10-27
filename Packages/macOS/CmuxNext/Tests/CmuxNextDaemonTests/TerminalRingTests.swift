@@ -403,7 +403,7 @@ private final class InProcessRing: TerminalOutputRing {
         reserve.store(start + count, ordering: .sequentiallyConsistent)
         let position = Int(start % capacity)
         let first = min(bytes.count, Int(capacity) - position)
-        bytes.withUnsafeBytes { source in
+        unsafe bytes.withUnsafeBytes { source in
             // SAFETY: `first` bytes from `position` and the rest from 0 lie inside the data area.
             unsafe UnsafeMutableRawPointer(bitPattern: address + UInt(position))?
                 .copyMemory(from: source.baseAddress!, byteCount: first)

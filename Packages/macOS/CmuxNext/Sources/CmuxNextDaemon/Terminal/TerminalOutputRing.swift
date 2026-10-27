@@ -15,6 +15,8 @@ protocol TerminalOutputRing: AnyObject, Sendable {
     /// `count` bytes from PTY offset `start`, in one run of the data area
     /// (`start % capacity + count <= capacity`), as `Data` that points into the mapping. The mapping stays
     /// until the ring and every such `Data` are gone; `released` runs once, when this `Data`'s storage goes.
+    /// Foundation keeps a `Data` of a few bytes inline: it copies them at once and releases the mapping's
+    /// bytes then, so `released` checks that copy, which is the same seqlock read.
     func bytesNoCopy(from start: UInt64, count: Int, released: @escaping @Sendable () -> Void) -> Data
 }
 
