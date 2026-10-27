@@ -338,16 +338,18 @@ impl RegistryConnection {
                     let stored = records
                         .pop()
                         .context("frontend journal event index points to an absent record")?;
-                    anyhow::ensure!(
-                        stored.kind == kind
-                            && stored.class == JournalClass::Observation
-                            && stored.replay == JournalReplayPolicy::Advisory
-                            && stored.producer == producer
-                            && stored.authority.as_ref() == Some(&authority)
-                            && stored.sensitivity == JournalSensitivity::Metadata
-                            && stored.payload == payload,
-                        "frontend journal event id was reused with different content"
-                    );
+                    // Typed: the writer drops an admitted event for it at
+                    // once instead of retrying (journal_ingress::admitted_events).
+                    if !(stored.kind == kind
+                        && stored.class == JournalClass::Observation
+                        && stored.replay == JournalReplayPolicy::Advisory
+                        && stored.producer == producer
+                        && stored.authority.as_ref() == Some(&authority)
+                        && stored.sensitivity == JournalSensitivity::Metadata
+                        && stored.payload == payload)
+                    {
+                        return Err(crate::journal_ingress::FrontendEventIdReused.into());
+                    }
                     commits.push(crate::journal_ingress::JournalBatchReceipt::None);
                     continue;
                 }

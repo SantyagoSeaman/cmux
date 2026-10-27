@@ -110,13 +110,6 @@ impl Mux {
         self.journal_ingress.set_admit_then_reply_for_test(enabled);
     }
 
-    #[cfg(test)]
-    pub(crate) fn admitted_journal_event_stats(
-        &self,
-    ) -> crate::journal_ingress::AdmittedEventStats {
-        self.journal_ingress.admitted_event_stats()
-    }
-
     pub(crate) fn terminal_journal_enabled(&self) -> bool {
         self.journal_ingress.enabled()
     }
@@ -463,9 +456,21 @@ impl Mux {
             .map(|reader| reader.map(|reader| (reader, generation)))
     }
 
+    /// A cold journal read's read-your-writes: it waits, bounded and
+    /// counted, for the events admitted before it
+    /// (`JournalIngressSender::admitted_read_barrier`). Not while this
+    /// thread holds the registry connection, which the writer needs.
+    #[track_caller]
+    fn admitted_journal_read_barrier(&self) {
+        if !self.registry_connection.is_held_by_current_thread() {
+            self.journal_ingress.admitted_read_barrier();
+        }
+    }
+
     /// The journal head without decoding any record or sealed segment.
     #[track_caller]
     pub(crate) fn session_journal_head(&self) -> anyhow::Result<u64> {
+        self.admitted_journal_read_barrier();
         self.workspace_registry.lock().recover_poison().session_journal_head()
     }
 
@@ -475,6 +480,7 @@ impl Mux {
         sequence: u64,
         limit: usize,
     ) -> anyhow::Result<crate::workspace_registry::SessionJournalPage> {
+        self.admitted_journal_read_barrier();
         self.workspace_registry.lock().recover_poison().session_journal_after(sequence, limit)
     }
 
@@ -488,15 +494,18 @@ impl Mux {
         through: u64,
         limit: usize,
     ) -> anyhow::Result<(Vec<crate::workspace_registry::SessionJournalRecord>, u64)> {
+        self.admitted_journal_read_barrier();
         self.workspace_registry
             .lock()
             .recover_poison()
             .session_journal_without_output_after(sequence, through, limit)
     }
 
+    #[track_caller]
     pub(crate) fn session_journal_reader(
         &self,
     ) -> anyhow::Result<Option<crate::workspace_registry::SessionJournalReader>> {
+        self.admitted_journal_read_barrier();
         let database_path =
             self.workspace_registry.lock().recover_poison().session_journal_database_path();
         database_path
@@ -522,11 +531,13 @@ impl Mux {
         self.journal_kernel.wait(epoch, timeout)
     }
 
+    #[track_caller]
     pub(crate) fn shared_journal_after(
         &self,
         sequence: u64,
         limit: usize,
     ) -> crate::journal_kernel::SharedJournalRead {
+        self.admitted_journal_read_barrier();
         self.journal_kernel.read_after(sequence, limit)
     }
 

@@ -2152,6 +2152,10 @@ class ServerStatsJournalWriter:
     receipt_wait_us: ServerStatsHistogram
     terminal_events: int
     terminal_queued: int
+    admitted_events: Union[int, MissingType] = field(default=MISSING)
+    journal_degraded: Union[int, MissingType] = field(default=MISSING)
+    read_barrier_timeouts: Union[int, MissingType] = field(default=MISSING)
+    read_barrier_waits: Union[int, MissingType] = field(default=MISSING)
 
 
 @dataclass(frozen=True)

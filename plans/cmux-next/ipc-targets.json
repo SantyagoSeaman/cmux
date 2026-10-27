@@ -92,6 +92,18 @@
       "file": "cmux-tui/crates/cmux-tui-core/src/server/cmd_frontend.rs",
       "key": "journal_frontend_event -> journal_frontend_event (wraps send_durable)",
       "reason": "Waits only when the reply must follow the commit: a client without frontend-journal-v2 reads protocol 10's committed:true as durable, and the in-process frontend waits while the admitThenReply setting is off. A frontend-journal-v2 client's event is admitted (journal_ingress/admitted_events.rs, p05-ipc-126)."
+    },
+    {
+      "queue": "Q3",
+      "file": "cmux-tui/crates/cmux-tui-core/src/journal_ingress.rs",
+      "key": "flush_terminal -> send_durable",
+      "reason": "A durability barrier by contract, not a reply wait: its callers (journal checkpoint capture, a terminal's exit, shutdown's final barrier) need every earlier terminal-lane event on disk before they go on, so admitting it would remove the guarantee they call it for. No request handler replies through it (p05-ipc-126)."
+    },
+    {
+      "queue": "Q3",
+      "file": "cmux-tui/crates/cmux-tui-core/src/mux/journal.rs",
+      "key": "append_journal_ingress -> send_producer",
+      "reason": "The reply is the writer's receipt: journal-ingress returns the journal sequence and replayed flag that SQLite assigns at the write (an idempotent retry gets the first write's), and the agent-presence and hook projections apply at that sequence. An admitted form needs a journal sequence decided at admit, which no p05-ipc task (120..134) adds; until one does, the wait stays (p05-ipc-126)."
     }
   ],
   "ipc5_ops": [

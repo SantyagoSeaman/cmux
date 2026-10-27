@@ -6167,6 +6167,46 @@
      "presence": "required",
      "nullable": false
     },
+    "admitted_events": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "optional",
+     "nullable": false,
+     "default": 0,
+     "description": "Events whose reply went before their journal commit (admit then reply, daemon setting admitThenReply)."
+    },
+    "journal_degraded": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "optional",
+     "nullable": false,
+     "default": 0,
+     "description": "Admitted events the journal writer did not commit: the journal lacks what their reply said."
+    },
+    "read_barrier_waits": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "optional",
+     "nullable": false,
+     "default": 0,
+     "description": "Journal reads that waited for events admitted before them."
+    },
+    "read_barrier_timeouts": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "optional",
+     "nullable": false,
+     "default": 0,
+     "description": "Of read_barrier_waits, reads that went ahead at the wait's bound without those events."
+    },
     "terminal_queued": {
      "type": {
       "kind": "scalar",

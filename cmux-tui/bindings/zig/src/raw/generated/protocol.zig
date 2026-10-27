@@ -7,7 +7,7 @@ const client_runtime = @import("../client.zig");
 
 pub const schema_version: u16 = 2;
 pub const mux_protocol: u16 = 12;
-pub const ir_sha256 = "ec1cd73ba6f26df85e8f152bd7098d4c903b6fd1efadeb475c599ea3338d086e";
+pub const ir_sha256 = "12d821e58a143215b2b9e84b180ce2412fecb3b365830c3605d2b449010886ad";
 
 pub const AccessRequestKind = enum {
     file,
@@ -2841,6 +2841,8 @@ pub const ServerStatsIpcWrites = struct {
 };
 
 pub const ServerStatsJournalWriter = struct {
+    /// Events whose reply went before their journal commit (admit then reply, daemon setting admitThenReply).
+    admitted_events: ?u64 = null,
     batch_size: ServerStatsHistogram,
     batches: u64,
     commit_failures: u64,
@@ -2849,11 +2851,24 @@ pub const ServerStatsJournalWriter = struct {
     deadline_expiries: u64,
     durable_events: u64,
     durable_queued: u64,
+    /// Admitted events the journal writer did not commit: the journal lacks what their reply said.
+    journal_degraded: ?u64 = null,
     phase: ServerStatsWriterPhase,
     phase_for_us: u64,
+    /// Of read_barrier_waits, reads that went ahead at the wait's bound without those events.
+    read_barrier_timeouts: ?u64 = null,
+    /// Journal reads that waited for events admitted before them.
+    read_barrier_waits: ?u64 = null,
     receipt_wait_us: ServerStatsHistogram,
     terminal_events: u64,
     terminal_queued: u64,
+
+    pub const cmux_wire_optional_nonnull_fields = [_][]const u8{
+        "admitted_events",
+        "journal_degraded",
+        "read_barrier_timeouts",
+        "read_barrier_waits",
+    };
 };
 
 pub const ServerStatsLockClass = struct {

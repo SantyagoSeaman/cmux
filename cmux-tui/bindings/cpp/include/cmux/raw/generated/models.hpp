@@ -14,7 +14,7 @@
 namespace cmux::raw {
 
 inline constexpr std::uint32_t kMuxProtocolVersion = 12U;
-inline constexpr std::string_view kProtocolIrSha256 = "ec1cd73ba6f26df85e8f152bd7098d4c903b6fd1efadeb475c599ea3338d086e";
+inline constexpr std::string_view kProtocolIrSha256 = "12d821e58a143215b2b9e84b180ce2412fecb3b365830c3605d2b449010886ad";
 
 enum class AccessRequestKind;
 struct AccessRequestPending;
@@ -6450,6 +6450,7 @@ enum class ServerStatsWriterPhase {
 };
 
 struct ServerStatsJournalWriter {
+    std::optional<std::uint64_t> admitted_events{};
     ServerStatsHistogram batch_size{};
     std::uint64_t batches{};
     std::uint64_t commit_failures{};
@@ -6458,8 +6459,11 @@ struct ServerStatsJournalWriter {
     std::uint64_t deadline_expiries{};
     std::uint64_t durable_events{};
     std::uint64_t durable_queued{};
+    std::optional<std::uint64_t> journal_degraded{};
     ServerStatsWriterPhase phase{};
     std::uint64_t phase_for_us{};
+    std::optional<std::uint64_t> read_barrier_timeouts{};
+    std::optional<std::uint64_t> read_barrier_waits{};
     ServerStatsHistogram receipt_wait_us{};
     std::uint64_t terminal_events{};
     std::uint64_t terminal_queued{};

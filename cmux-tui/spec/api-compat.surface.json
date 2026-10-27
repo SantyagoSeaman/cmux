@@ -23067,6 +23067,9 @@
         "required": true,
         "nullable": true
       },
+      "/data/journal_writer/admitted_events": {
+        "ty": "uint64"
+      },
       "/data/journal_writer/batch_size": {
         "ty": "object",
         "required": true
@@ -23171,6 +23174,9 @@
         "ty": "uint64",
         "required": true
       },
+      "/data/journal_writer/journal_degraded": {
+        "ty": "uint64"
+      },
       "/data/journal_writer/phase": {
         "ty": "enum",
         "required": true,
@@ -23183,6 +23189,12 @@
       "/data/journal_writer/phase_for_us": {
         "ty": "uint64",
         "required": true
+      },
+      "/data/journal_writer/read_barrier_timeouts": {
+        "ty": "uint64"
+      },
+      "/data/journal_writer/read_barrier_waits": {
+        "ty": "uint64"
       },
       "/data/journal_writer/receipt_wait_us": {
         "ty": "object",

@@ -1,5 +1,5 @@
 // This file is generated. Do not edit by hand.
-// cmux-tui mux protocol 12, IR ec1cd73ba6f26df85e8f152bd7098d4c903b6fd1efadeb475c599ea3338d086e.
+// cmux-tui mux protocol 12, IR 12d821e58a143215b2b9e84b180ce2412fecb3b365830c3605d2b449010886ad.
 // The emitter owns this layout so generation is independent of the installed rustfmt.
 
 use crate::{Nullable, Optional};
@@ -2492,6 +2492,9 @@ pub struct ServerStatsIpcWrites {
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerStatsJournalWriter {
+    /// Events whose reply went before their journal commit (admit then reply, daemon setting admitThenReply).
+    #[serde(default, deserialize_with = "crate::presence::deserialize_optional_non_null", skip_serializing_if = "Option::is_none")]
+    pub admitted_events: Option<u64>,
     pub batch_size: ServerStatsHistogram,
     pub batches: u64,
     pub commit_failures: u64,
@@ -2500,8 +2503,17 @@ pub struct ServerStatsJournalWriter {
     pub deadline_expiries: u64,
     pub durable_events: u64,
     pub durable_queued: u64,
+    /// Admitted events the journal writer did not commit: the journal lacks what their reply said.
+    #[serde(default, deserialize_with = "crate::presence::deserialize_optional_non_null", skip_serializing_if = "Option::is_none")]
+    pub journal_degraded: Option<u64>,
     pub phase: ServerStatsWriterPhase,
     pub phase_for_us: u64,
+    /// Of read_barrier_waits, reads that went ahead at the wait's bound without those events.
+    #[serde(default, deserialize_with = "crate::presence::deserialize_optional_non_null", skip_serializing_if = "Option::is_none")]
+    pub read_barrier_timeouts: Option<u64>,
+    /// Journal reads that waited for events admitted before them.
+    #[serde(default, deserialize_with = "crate::presence::deserialize_optional_non_null", skip_serializing_if = "Option::is_none")]
+    pub read_barrier_waits: Option<u64>,
     pub receipt_wait_us: ServerStatsHistogram,
     pub terminal_events: u64,
     pub terminal_queued: u64,

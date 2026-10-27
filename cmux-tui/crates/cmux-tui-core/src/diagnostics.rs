@@ -573,6 +573,10 @@ pub struct JournalWriterStats {
     receipt_wait_us: LogLinearHistogram,
     commit_failures: AtomicU64,
     deadline_expiries: AtomicU64,
+    admitted_events: AtomicU64,
+    journal_degraded: AtomicU64,
+    read_barrier_waits: AtomicU64,
+    read_barrier_timeouts: AtomicU64,
     terminal_queued: AtomicUsize,
     durable_queued: AtomicUsize,
     phase: Mutex<WriterPhaseState>,
@@ -590,6 +594,10 @@ impl Default for JournalWriterStats {
             receipt_wait_us: LogLinearHistogram::new(),
             commit_failures: AtomicU64::new(0),
             deadline_expiries: AtomicU64::new(0),
+            admitted_events: AtomicU64::new(0),
+            journal_degraded: AtomicU64::new(0),
+            read_barrier_waits: AtomicU64::new(0),
+            read_barrier_timeouts: AtomicU64::new(0),
             terminal_queued: AtomicUsize::new(0),
             durable_queued: AtomicUsize::new(0),
             phase: Mutex::new(WriterPhaseState { code: WRITER_IDLE, since: Instant::now() }),
@@ -648,6 +656,26 @@ impl JournalWriterStats {
         self.receipt_wait_us.record_duration(waited);
     }
 
+    /// An event queued before its commit, its request replied (admit then
+    /// reply).
+    pub fn admitted(&self) {
+        self.admitted_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An admitted event the writer did not commit.
+    pub fn journal_degraded(&self) {
+        self.journal_degraded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A cold read waited for admitted events; `timed_out` when it read
+    /// without them at its bound.
+    pub fn read_barrier_waited(&self, timed_out: bool) {
+        self.read_barrier_waits.fetch_add(1, Ordering::Relaxed);
+        if timed_out {
+            self.read_barrier_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn set_phase(&self, phase: WriterPhase) {
         let code = match phase {
             WriterPhase::Idle => WRITER_IDLE,
@@ -678,6 +706,10 @@ impl JournalWriterStats {
             receipt_wait_us: self.receipt_wait_us.snapshot(),
             commit_failures: self.commit_failures.load(Ordering::Relaxed),
             deadline_expiries: self.deadline_expiries.load(Ordering::Relaxed),
+            admitted_events: self.admitted_events.load(Ordering::Relaxed),
+            journal_degraded: self.journal_degraded.load(Ordering::Relaxed),
+            read_barrier_waits: self.read_barrier_waits.load(Ordering::Relaxed),
+            read_barrier_timeouts: self.read_barrier_timeouts.load(Ordering::Relaxed),
             terminal_queued: self.terminal_queued.load(Ordering::Relaxed),
             durable_queued: self.durable_queued.load(Ordering::Relaxed),
             phase,
@@ -707,6 +739,15 @@ pub struct JournalWriterSnapshot {
     pub receipt_wait_us: HistogramSnapshot,
     pub commit_failures: u64,
     pub deadline_expiries: u64,
+    /// Events whose reply went before their commit (admit then reply).
+    pub admitted_events: u64,
+    /// Admitted events the writer did not commit: the journal lacks what
+    /// their reply said.
+    pub journal_degraded: u64,
+    /// Cold journal reads that waited for admitted events.
+    pub read_barrier_waits: u64,
+    /// Of those, reads that went ahead at the wait's bound without them.
+    pub read_barrier_timeouts: u64,
     pub terminal_queued: usize,
     pub durable_queued: usize,
     pub phase: WriterPhase,

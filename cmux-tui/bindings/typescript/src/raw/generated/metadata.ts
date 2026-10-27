@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR ec1cd73ba6f26df85e8f152bd7098d4c903b6fd1efadeb475c599ea3338d086e. */
+/* cmux-tui mux protocol 12, IR 12d821e58a143215b2b9e84b180ce2412fecb3b365830c3605d2b449010886ad. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "ec1cd73ba6f26df85e8f152bd7098d4c903b6fd1efadeb475c599ea3338d086e" as const;
+export const SDK_IR_SHA256 = "12d821e58a143215b2b9e84b180ce2412fecb3b365830c3605d2b449010886ad" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -14022,6 +14022,16 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
       "terminal_queued and durable_queued are live lane depths."
     ],
     "fields": {
+      "admitted_events": {
+        "default": 0,
+        "description": "Events whose reply went before their journal commit (admit then reply, daemon setting admitThenReply).",
+        "nullable": false,
+        "presence": "optional",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
+        }
+      },
       "batch_size": {
         "nullable": false,
         "presence": "required",
@@ -14086,6 +14096,16 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
           "name": "uint64"
         }
       },
+      "journal_degraded": {
+        "default": 0,
+        "description": "Admitted events the journal writer did not commit: the journal lacks what their reply said.",
+        "nullable": false,
+        "presence": "optional",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
+        }
+      },
       "phase": {
         "nullable": false,
         "presence": "required",
@@ -14097,6 +14117,26 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
       "phase_for_us": {
         "nullable": false,
         "presence": "required",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
+        }
+      },
+      "read_barrier_timeouts": {
+        "default": 0,
+        "description": "Of read_barrier_waits, reads that went ahead at the wait's bound without those events.",
+        "nullable": false,
+        "presence": "optional",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
+        }
+      },
+      "read_barrier_waits": {
+        "default": 0,
+        "description": "Journal reads that waited for events admitted before them.",
+        "nullable": false,
+        "presence": "optional",
         "type": {
           "kind": "scalar",
           "name": "uint64"

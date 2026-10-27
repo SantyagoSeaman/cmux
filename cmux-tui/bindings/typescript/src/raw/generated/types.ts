@@ -1,5 +1,5 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR ec1cd73ba6f26df85e8f152bd7098d4c903b6fd1efadeb475c599ea3338d086e. */
+/* cmux-tui mux protocol 12, IR 12d821e58a143215b2b9e84b180ce2412fecb3b365830c3605d2b449010886ad. */
 
 
 /** JSON accepted by the wire codec. bigint is serialized as an exact JSON integer. */
@@ -1495,6 +1495,8 @@ export type ServerStatsIpcWrites = {
 };
 
 export type ServerStatsJournalWriter = {
+  /** Events whose reply went before their journal commit (admit then reply, daemon setting admitThenReply). */
+  "admitted_events"?: bigint;
   "batch_size": ServerStatsHistogram;
   "batches": bigint;
   "commit_failures": bigint;
@@ -1503,8 +1505,14 @@ export type ServerStatsJournalWriter = {
   "deadline_expiries": bigint;
   "durable_events": bigint;
   "durable_queued": bigint;
+  /** Admitted events the journal writer did not commit: the journal lacks what their reply said. */
+  "journal_degraded"?: bigint;
   "phase": ServerStatsWriterPhase;
   "phase_for_us": bigint;
+  /** Of read_barrier_waits, reads that went ahead at the wait's bound without those events. */
+  "read_barrier_timeouts"?: bigint;
+  /** Journal reads that waited for events admitted before them. */
+  "read_barrier_waits"?: bigint;
   "receipt_wait_us": ServerStatsHistogram;
   "terminal_events": bigint;
   "terminal_queued": bigint;

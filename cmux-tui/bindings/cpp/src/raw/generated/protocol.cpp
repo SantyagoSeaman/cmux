@@ -12358,6 +12358,11 @@ Result<ServerStatsIpcWrites> Codec<ServerStatsIpcWrites>::decode(const Json& val
 Result<Json> Codec<ServerStatsJournalWriter>::encode(const ServerStatsJournalWriter& value) {
     (void)value;
     Json::Object object;
+    if (value.admitted_events) {
+        auto encoded = encode_value(*value.admitted_events);
+        if (!encoded) return std::move(encoded).error();
+        object.emplace("admitted_events", std::move(encoded).value());
+    }
     auto encoded_batch_size = encode_value(value.batch_size);
     if (!encoded_batch_size) return std::move(encoded_batch_size).error();
     object.emplace("batch_size", std::move(encoded_batch_size).value());
@@ -12382,12 +12387,27 @@ Result<Json> Codec<ServerStatsJournalWriter>::encode(const ServerStatsJournalWri
     auto encoded_durable_queued = encode_value(value.durable_queued);
     if (!encoded_durable_queued) return std::move(encoded_durable_queued).error();
     object.emplace("durable_queued", std::move(encoded_durable_queued).value());
+    if (value.journal_degraded) {
+        auto encoded = encode_value(*value.journal_degraded);
+        if (!encoded) return std::move(encoded).error();
+        object.emplace("journal_degraded", std::move(encoded).value());
+    }
     auto encoded_phase = encode_value(value.phase);
     if (!encoded_phase) return std::move(encoded_phase).error();
     object.emplace("phase", std::move(encoded_phase).value());
     auto encoded_phase_for_us = encode_value(value.phase_for_us);
     if (!encoded_phase_for_us) return std::move(encoded_phase_for_us).error();
     object.emplace("phase_for_us", std::move(encoded_phase_for_us).value());
+    if (value.read_barrier_timeouts) {
+        auto encoded = encode_value(*value.read_barrier_timeouts);
+        if (!encoded) return std::move(encoded).error();
+        object.emplace("read_barrier_timeouts", std::move(encoded).value());
+    }
+    if (value.read_barrier_waits) {
+        auto encoded = encode_value(*value.read_barrier_waits);
+        if (!encoded) return std::move(encoded).error();
+        object.emplace("read_barrier_waits", std::move(encoded).value());
+    }
     auto encoded_receipt_wait_us = encode_value(value.receipt_wait_us);
     if (!encoded_receipt_wait_us) return std::move(encoded_receipt_wait_us).error();
     object.emplace("receipt_wait_us", std::move(encoded_receipt_wait_us).value());
@@ -12404,6 +12424,12 @@ Result<ServerStatsJournalWriter> Codec<ServerStatsJournalWriter>::decode(const J
     auto source = value.as_object();
     if (!source) return std::move(source).error();
     ServerStatsJournalWriter result{};
+    const Json* field_admitted_events = value.find("admitted_events");
+    if (field_admitted_events) {
+        auto decoded = decode_value<std::uint64_t>(*field_admitted_events);
+        if (!decoded) return std::move(decoded).error();
+        result.admitted_events = std::move(decoded).value();
+    }
     const Json* field_batch_size = value.find("batch_size");
     if (!field_batch_size) {
         return make_error(ErrorCode::decode, "missing required field 'batch_size'");
@@ -12476,6 +12502,12 @@ Result<ServerStatsJournalWriter> Codec<ServerStatsJournalWriter>::decode(const J
         if (!decoded) return std::move(decoded).error();
         result.durable_queued = std::move(decoded).value();
     }
+    const Json* field_journal_degraded = value.find("journal_degraded");
+    if (field_journal_degraded) {
+        auto decoded = decode_value<std::uint64_t>(*field_journal_degraded);
+        if (!decoded) return std::move(decoded).error();
+        result.journal_degraded = std::move(decoded).value();
+    }
     const Json* field_phase = value.find("phase");
     if (!field_phase) {
         return make_error(ErrorCode::decode, "missing required field 'phase'");
@@ -12493,6 +12525,18 @@ Result<ServerStatsJournalWriter> Codec<ServerStatsJournalWriter>::decode(const J
         auto decoded = decode_value<std::uint64_t>(*field_phase_for_us);
         if (!decoded) return std::move(decoded).error();
         result.phase_for_us = std::move(decoded).value();
+    }
+    const Json* field_read_barrier_timeouts = value.find("read_barrier_timeouts");
+    if (field_read_barrier_timeouts) {
+        auto decoded = decode_value<std::uint64_t>(*field_read_barrier_timeouts);
+        if (!decoded) return std::move(decoded).error();
+        result.read_barrier_timeouts = std::move(decoded).value();
+    }
+    const Json* field_read_barrier_waits = value.find("read_barrier_waits");
+    if (field_read_barrier_waits) {
+        auto decoded = decode_value<std::uint64_t>(*field_read_barrier_waits);
+        if (!decoded) return std::move(decoded).error();
+        result.read_barrier_waits = std::move(decoded).value();
     }
     const Json* field_receipt_wait_us = value.find("receipt_wait_us");
     if (!field_receipt_wait_us) {

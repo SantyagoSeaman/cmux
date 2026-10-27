@@ -26,8 +26,7 @@ mod completion;
 pub(crate) mod contention;
 mod effect_intents;
 mod writer_qos;
-#[cfg(test)]
-pub(crate) use admitted_events::AdmittedEventStats;
+pub(crate) use admitted_events::FrontendEventIdReused;
 pub(crate) use completion::JournalBatchReceipt;
 use completion::{JournalIngressCompletion, complete_batch_error, complete_batch_success};
 pub(crate) use effect_intents::{EffectSend, PendingRegistryReceipt};
@@ -340,6 +339,14 @@ impl QueuedJournalEvent {
         self.completion.as_ref().map(JournalIngressCompletion::deadline)
     }
 
+    /// True when no request waits on this commit to reply: background
+    /// events, and admitted events whose request already replied. The
+    /// writer only applies these: it retries them past a deadline instead of
+    /// answering with the timeout (p05-ipc.md 3.6).
+    fn apply_only(&self) -> bool {
+        self.completion.as_ref().is_none_or(JournalIngressCompletion::replied_before_commit)
+    }
+
     #[cfg(test)]
     fn merge_output(&mut self, next: Self) -> Option<Self> {
         if self.completion.is_some() || next.completion.is_some() {
@@ -472,7 +479,7 @@ struct JournalIngressState {
     queue_space_epoch: Mutex<u64>,
     queue_space_changed: Condvar,
     request_waits: writer_qos::RequestWaits,
-    /// Durable events queued without a receipt (`admitted_events`).
+    /// The admit gate and read barrier of admitted events (`admitted_events`).
     admitted: admitted_events::AdmittedEvents,
     #[cfg(test)]
     failure_notifier: Mutex<Option<SyncSender<String>>>,
@@ -996,7 +1003,7 @@ impl JournalIngressSender {
                 // Count before the event is visible to the writer, which may
                 // drain it before `try_send` returns.
                 self.state.stats.enqueued(lane);
-                sender.try_send(pending)
+                self.state.try_send_in_lane_order(sender, pending)
             };
             match result {
                 Ok(()) => {
@@ -1177,9 +1184,8 @@ fn run(mux: Weak<Mux>, receivers: JournalIngressReceivers) {
                         // drops the last other owner after its receipt must not
                         // leave the final drop (and its session lease) to this
                         // thread.
-                        // A batch no request waits for (background events)
-                        // asks for its own flush; a request's reply does.
-                        if batch.iter().all(|queued| queued.completion.is_none()) {
+                        // A batch no reply follows asks for its own flush.
+                        if completion::no_reply_flushes(&batch) {
                             mux.request_registry_flush();
                         }
                         drop((writer, mux));
@@ -1196,7 +1202,10 @@ fn run(mux: Weak<Mux>, receivers: JournalIngressReceivers) {
                         let transient = contention::is_transient(&error, retry_deadline);
                         if Instant::now() >= retry_deadline {
                             let detail = format!("journal commit: {summary}");
-                            if !transient {
+                            // An admitted event's own failure never stops the
+                            // writer: expire answers the waiting events and
+                            // keeps it for the split, retry or degrade below.
+                            if !transient && !batch.iter().any(QueuedJournalEvent::is_admitted) {
                                 stop_writer_after_retry_deadline(
                                     &receivers, &batch, pending, &detail,
                                 );
@@ -1222,13 +1231,14 @@ fn run(mux: Weak<Mux>, receivers: JournalIngressReceivers) {
                             let later = batch.split_off(batch.len() / 2);
                             pending.push_front(later);
                             pending.push_front(batch);
-                        } else if batch.first().is_some_and(QueuedJournalEvent::is_admitted) {
-                            // Its request already replied: the writer only
-                            // applies, so the event's own failure drops it
-                            // (journal-degraded), never the writer.
-                            receivers.state.admitted.degraded(&summary);
+                        } else if batch.first().is_some_and(QueuedJournalEvent::is_admitted)
+                            && admitted_events::is_content_error(&error)
+                        {
+                            // No retry can commit it: drop it as
+                            // journal-degraded, never the writer.
                             drop((writer, mux));
-                        } else if batch.first().is_some_and(|event| event.completion.is_none())
+                            complete_batch_error(&batch, summary);
+                        } else if batch.first().is_some_and(QueuedJournalEvent::apply_only)
                             && uncompleted_nonretryable_failures
                                 < JOURNAL_TERMINAL_FAILURE_RETRY_ATTEMPTS
                         {
@@ -1241,6 +1251,17 @@ fn run(mux: Weak<Mux>, receivers: JournalIngressReceivers) {
                             wait_for_journal_retry(mux, nonretryable_delay.min(remaining));
                             nonretryable_delay = next_nonretryable_retry_delay(nonretryable_delay);
                             continue;
+                        } else if batch.first().is_some_and(QueuedJournalEvent::is_admitted) {
+                            // Its request already replied: after the retries
+                            // the writer drops it (journal-degraded) and goes
+                            // on. A terminal-lane event fails the writer here.
+                            drop((writer, mux));
+                            complete_batch_error(
+                                &batch,
+                                format!(
+                                    "{summary} (after {uncompleted_nonretryable_failures} retries)"
+                                ),
+                            );
                         } else if batch.first().is_some_and(|event| event.completion.is_none()) {
                             let _admit = receivers.state.enqueue_admission.lock().recover_poison();
                             let failure = receivers.state.fail(format!(

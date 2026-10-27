@@ -615,6 +615,8 @@ object{
     batches:uint64, terminal_events:uint64, durable_events:uint64,
     batch_size:histogram, commit_us:histogram, commit_lock_wait_us:histogram,
     receipt_wait_us:histogram, commit_failures:uint64, deadline_expiries:uint64,
+    admitted_events?:uint64, journal_degraded?:uint64,
+    read_barrier_waits?:uint64, read_barrier_timeouts?:uint64,
     terminal_queued:uint64, durable_queued:uint64,
     phase:"idle"|"waiting_lock"|"committing", phase_for_us:uint64
   }|null,
@@ -698,6 +700,13 @@ the whole topology) or scoped (it restates only the workspaces it changed);
 scope and ran full. `crosschecks` counts scoped projections compared with the
 full projection (debug builds, or `CMUX_TUI_PROJECTION_CROSSCHECK=1` in the
 daemon environment) and `crosscheck_mismatches` the comparisons that differed.
+
+`journal_writer.admitted_events` counts events whose reply went before their
+journal commit (`journal-frontend-event`'s `admitted:true`, daemon setting
+`admitThenReply`). `journal_degraded` counts admitted events the writer did not
+commit: the journal lacks what their reply said. A journal read waits, at most
+2 s, for the events admitted before it; `read_barrier_waits` counts reads that
+waited and `read_barrier_timeouts` those that went ahead without them.
 
 `write_path` says which thread commits registry writes. `effect_intents`
 counts registry commits the journal writer applied inside its batch
@@ -1939,11 +1948,14 @@ object{committed:true,admitted?:boolean}
 `set-client-info`. `admitted:true` means the reply went before the journal
 commit: the event passed every check the journal writer makes without reading
 the journal and is queued in journal order, and the writer commits it after
-the reply (admit then reply, daemon setting `admitThenReply`). An admitted
-event that the writer still refuses (an `event_id` reused with different
-content) is dropped and counted; it does not fail later journal writes. Every
-other reply, including every reply to a client without `frontend-journal-v2`,
-is sent after the journal commit.
+the reply (admit then reply, daemon setting `admitThenReply`). A later
+journal read on this session first waits, at most 2 s, until the writer is
+done with it. The writer
+retries an admitted event that fails to write; one it still cannot commit (an
+`event_id` reused with different content, or a write that fails every retry)
+is dropped and counted in `server-stats` `journal_writer.journal_degraded`. It
+does not fail later journal writes. Every other reply, including every reply
+to a client without `frontend-journal-v2`, is sent after the journal commit.
 
 ### export-layout
 
