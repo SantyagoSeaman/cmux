@@ -33,7 +33,9 @@
 #   <out>/<package>/repeat-<i>/{files.jsonl,logs/,junit/}.
 # Exit 0 when no test failed in every repeat (flaky tests do not fail the run; they go
 # to --flaky-out), 1 when a test or file failed in every repeat, 2 on a usage error, 75
-# when the install, the bun version or a reporter file is wrong.
+# when the install, the bun version or a reporter file is wrong, 130 or 143 on SIGINT
+# or SIGTERM: no new file starts, every running file's process group is killed (TERM,
+# then KILL) and no receipt is written.
 #
 # Linux only: never test on a person's Mac (CLAUDE.md). Needs bun at the version that
 # webviews/package.json pins (devEngines). Runs at nice 10: the VM also runs agents.
@@ -59,6 +61,8 @@ PACKAGES = ("webviews", "web")
 RED = {"FAIL", "TIMEOUT", "CRASH", "NOTRUN"}
 GREEN = {"PASS", "SKIP", "TODO"}
 FILE_KEY = "(file)"
+# bun prints this for an error no test owns; its JUnit file does not show it.
+OUTSIDE_ERROR = b"# Unhandled error between tests"
 
 
 def say(text):
@@ -71,6 +75,18 @@ class UsageError(Exception):
 
 class SetupError(Exception):
     pass
+
+
+class Interrupted(Exception):
+    """SIGINT or SIGTERM reached the runner."""
+
+    def __init__(self, signum):
+        super().__init__(signal.Signals(signum).name)
+        self.signum = signum
+
+
+class Stopped(Exception):
+    """A file did not start, or its result is void, because the run is stopping."""
 
 
 # ---------------------------------------------------------------- test files
@@ -138,9 +154,59 @@ def kill_group(pgid, sig):
         pass
 
 
-def run_file(bun, package_dir, rel, rdir, env, test_timeout_ms, limit, cache=None, seed=None):
+class Children:
+    """The process groups of the test files running now. stop() lets no new file start
+    and kills every live group: TERM, up to `grace` seconds for its leader to exit, then
+    KILL, as a file's timeout does (test_launcher.cc kills a child's whole job object)."""
+
+    def __init__(self, grace=10):
+        self.lock, self.live, self.killed = threading.Lock(), {}, set()
+        self.stopped, self.grace = False, grace
+
+    def spawn(self, command, **kwargs):
+        if self.stopped:
+            raise Stopped()
+        child = subprocess.Popen(command, start_new_session=True, **kwargs)
+        with self.lock:
+            if not self.stopped:
+                self.live[child.pid] = child
+                return child
+        kill_group(child.pid, signal.SIGKILL)
+        child.wait()
+        raise Stopped()
+
+    def release(self, child):
+        kill_group(child.pid, signal.SIGKILL)
+        with self.lock:
+            self.live.pop(child.pid, None)
+
+    def stop(self):
+        with self.lock:
+            self.stopped = True
+            live = list(self.live.values())
+        self.killed.update(child.pid for child in live)
+        for child in live:
+            kill_group(child.pid, signal.SIGTERM)
+        deadline = time.monotonic() + self.grace
+        for child in live:
+            try:
+                child.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+        for child in live:
+            kill_group(child.pid, signal.SIGKILL)
+
+
+def outside_errors(log):
+    with open(log, "rb") as handle:
+        return sum(1 for line in handle if line.rstrip() == OUTSIDE_ERROR)
+
+
+def run_file(children, bun, package_dir, rel, rdir, env, test_timeout_ms, limit, cache=None, seed=None):
     """Run one test file in its own process group; return its record. The group is
     killed after the file ends, so a dev server or browser it leaves behind dies with it."""
+    if children.stopped:
+        raise Stopped()
     flat = rel.replace("/", "_")
     log = os.path.join(rdir, "logs", flat + ".log")
     junit = os.path.join(rdir, "junit", flat + ".xml")
@@ -157,8 +223,8 @@ def run_file(bun, package_dir, rel, rdir, env, test_timeout_ms, limit, cache=Non
     started = time.monotonic()
     timed_out = False
     with open(log, "wb") as output:
-        child = subprocess.Popen(command, cwd=package_dir, env=child_env, stdin=subprocess.DEVNULL,
-                                 stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        child = children.spawn(command, cwd=package_dir, env=child_env, stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=subprocess.STDOUT)
         try:
             code = child.wait(timeout=limit)
         except subprocess.TimeoutExpired:
@@ -169,7 +235,10 @@ def run_file(bun, package_dir, rel, rdir, env, test_timeout_ms, limit, cache=Non
             except subprocess.TimeoutExpired:
                 kill_group(child.pid, signal.SIGKILL)
                 code = child.wait()
-        kill_group(child.pid, signal.SIGKILL)
+        finally:
+            children.release(child)
+    if children.stopped:
+        raise Stopped()
     if timed_out:
         verdict = "TIMEOUT"
     elif code < 0 or code >= 128:
@@ -178,7 +247,7 @@ def run_file(bun, package_dir, rel, rdir, env, test_timeout_ms, limit, cache=Non
         verdict = "PASS" if code == 0 else "FAIL"
     return {"file": rel, "verdict": verdict, "exit": code, "seconds": round(time.monotonic() - started, 3),
             "limit": limit, "log": log, "junit": junit if os.path.exists(junit) else None,
-            "vite_cache": "warm" if seed else ("own" if cache else None)}
+            "outside_errors": outside_errors(log), "vite_cache": "warm" if seed else ("own" if cache else None)}
 
 
 class Progress:
@@ -195,35 +264,49 @@ class Progress:
                 say(f"{self.label}: {self.done}/{self.total} files")
 
 
-def pool(jobs, tasks, progress):
-    """Run the (args, kwargs) tasks through run_file, at most `jobs` at once."""
+def pool(children, jobs, run, tasks, progress):
+    """Run the (args, kwargs) tasks through `run`, at most `jobs` at once, on worker
+    threads, so no file starts on the main thread, where the signal handler raises. On
+    any exception the running groups are killed and the pending tasks are dropped."""
     records = []
     if not tasks:
         return records
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-        futures = [executor.submit(run_file, *args, **kwargs) for args, kwargs in tasks]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    try:
+        futures = [executor.submit(run, *args, **kwargs) for args, kwargs in tasks]
         for future in concurrent.futures.as_completed(futures):
             record = future.result()
             progress.tick(record)
             records.append(record)
+    except BaseException:
+        children.stop()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
     return records
 
 
-def run_repeat(bun, package, package_dir, files, rdir, env, args):
+def run_and_drop(*args, **kwargs):
+    record = run_file(*args, **kwargs)
+    shutil.rmtree(kwargs["cache"], ignore_errors=True)
+    return record
+
+
+def run_repeat(children, bun, package, package_dir, files, rdir, env, args):
     """One full run of a package's files. webviews dev-server files run after the rest:
     one file per Vite config warms that config's cache alone, then the rest run a quarter
     of the jobs at once on copies of it (scripts/ci/run-webviews-tests.sh says why)."""
     for sub in ("logs", "junit"):
         os.makedirs(os.path.join(rdir, sub), exist_ok=True)
     progress = Progress(f"{package} {os.path.basename(rdir)}", len(files))
-    base = (bun, package_dir)
+    base = (children, bun, package_dir)
     rest = (env, args.test_timeout_ms)
     limit = lambda rel: file_limit(os.path.join(package_dir, rel), args.file_timeout)
     dev = [f for f in files if package == "webviews"
            and DEV_SERVER.search(open(os.path.join(package_dir, f), encoding="utf-8", errors="replace").read())]
     dev_set = set(dev)
     plain = [f for f in files if f not in dev_set]
-    records = pool(args.jobs, [((*base, f, rdir, *rest, limit(f)), {}) for f in plain], progress)
+    records = pool(children, args.jobs, run_file, [((*base, f, rdir, *rest, limit(f)), {}) for f in plain], progress)
     if not dev:
         return records
     vite = tempfile.mkdtemp(prefix="vite-", dir=rdir)
@@ -236,8 +319,8 @@ def run_repeat(bun, package, package_dir, files, rdir, env, args):
                 continue
             tries[config] = tries.get(config, 0) + 1
             seed = os.path.join(vite, f"seed-{config}-{tries[config]}")
-            record = run_file(*base, rel, rdir, *rest, limit(rel), cache=seed)
-            progress.tick(record)
+            [record] = pool(children, 1, run_file, [((*base, rel, rdir, *rest, limit(rel)), {"cache": seed})],
+                            progress)
             records.append(record)
             if record["verdict"] == "PASS":
                 warmed[config] = seed
@@ -248,22 +331,8 @@ def run_repeat(bun, package, package_dir, files, rdir, env, args):
             cache = os.path.join(vite, str(index))
             task = ((*base, rel, rdir, *rest, limit(rel)), {"cache": cache, "seed": warmed.get(config)})
             (warm if config in warmed else cold).append(task)
-        dev_jobs = max(1, args.jobs // 4)
-
-        def run_and_drop(*a, **kw):
-            record = run_file(*a, **kw)
-            shutil.rmtree(kw["cache"], ignore_errors=True)
-            return record
-
-        for tasks, jobs in ((warm, dev_jobs), (cold, 1)):
-            if not tasks:
-                continue
-            with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = [executor.submit(run_and_drop, *a, **kw) for a, kw in tasks]
-                for future in concurrent.futures.as_completed(futures):
-                    record = future.result()
-                    progress.tick(record)
-                    records.append(record)
+        records += pool(children, max(1, args.jobs // 4), run_and_drop, warm, progress)
+        records += pool(children, 1, run_and_drop, cold, progress)
     finally:
         shutil.rmtree(vite, ignore_errors=True)
     return records
@@ -291,30 +360,47 @@ def read_junit(path):
     return reporter, cases
 
 
+def file_outcome(record, cases):
+    """What one repeat says about the file apart from its tests: TIMEOUT or CRASH; NOREPORT
+    when bun wrote no readable JUnit file; ERROR when bun saw an error no test owns (an exit
+    1 with no red test, or "# Unhandled error between tests" in the log); else OK. A red
+    test is not file-level evidence: its own entry carries it."""
+    if record["verdict"] in ("TIMEOUT", "CRASH"):
+        return record["verdict"]
+    if cases is None:
+        return "NOREPORT"
+    if record["outside_errors"] or (record["verdict"] == "FAIL" and not any(r in RED for _, _, r in cases)):
+        return "ERROR"
+    return "OK"
+
+
 def analyze(meta, runs):
     """runs: {package: [[file record, ...] per repeat]}. Returns (receipt, flaky lines, exit code).
-    A test's flakiness is judged over the repeats in which its file wrote a report; a file
-    that timed out, crashed or failed to load in some repeat is one (file) entry instead of
-    one NOTRUN flake per test in it."""
+    A test's flakiness is judged over the repeats in which its file wrote a report. The
+    file's own (file) entry is judged on file_outcome only, so a test that flips gives one
+    flake (the test's), and a file-level failure gives one entry, not a NOTRUN per test."""
     errors, packages, flaky_lines = [], {}, []
     for package, repeats in runs.items():
         count = len(repeats)
-        by_test, by_file, summaries = {}, {}, []
+        by_test, by_file, reported, summaries = {}, {}, {}, []
         for index, records in enumerate(repeats):
             reporter = {"tests": 0, "failures": 0, "skipped": 0, "assertions": 0}
             tests, verdicts = {}, {}
             for record in sorted(records, key=lambda r: r["file"]):
                 rel = record["file"]
                 verdicts[record["verdict"]] = verdicts.get(record["verdict"], 0) + 1
-                by_file.setdefault(rel, [None] * count)[index] = record["verdict"]
+                cases = None
                 if record["junit"] is None:
                     if record["verdict"] == "PASS":
                         errors.append(f"{package} repeat {index + 1}: {rel} exited 0 but bun wrote no JUnit file")
-                    continue
-                try:
-                    counts, cases = read_junit(record["junit"])
-                except (ET.ParseError, OSError, ValueError) as exc:
-                    errors.append(f"{package} repeat {index + 1}: {rel}: unreadable JUnit file ({exc})")
+                else:
+                    try:
+                        counts, cases = read_junit(record["junit"])
+                    except (ET.ParseError, OSError, ValueError) as exc:
+                        errors.append(f"{package} repeat {index + 1}: {rel}: unreadable JUnit file ({exc})")
+                by_file.setdefault(rel, [None] * count)[index] = file_outcome(record, cases)
+                reported.setdefault(rel, [False] * count)[index] = cases is not None
+                if cases is None:
                     continue
                 for key in reporter:
                     reporter[key] += counts[key]
@@ -335,22 +421,18 @@ def analyze(meta, runs):
                               "reporter": reporter, "tests": tests,
                               "slowest_file_seconds": seconds})
         stable_red, flaky, stable_pass = [], [], 0
-        for rel, verdicts in sorted(by_file.items()):
-            results = [v or "NOTRUN" for v in verdicts]
+        for rel, outcomes in sorted(by_file.items()):
+            results = [v or "NOTRUN" for v in outcomes]
             entry = {"file": rel, "test": f"{rel} {FILE_KEY}", "results": results}
             if len(set(results)) > 1:
                 flaky.append(entry)
-            elif results[0] in RED:
+            elif results[0] != "OK":
                 stable_red.append(entry)
-        reported = {}
-        for index, records in enumerate(repeats):
-            for record in records:
-                reported.setdefault(record["file"], [False] * count)[index] = record["junit"] is not None
         for (rel, classname, name), results in sorted(by_test.items()):
-            file_verdicts = by_file[rel]
+            outcomes = by_file[rel]
             # A repeat whose file wrote no report says nothing about the test (the file entry does).
             judged = [r or "NOTRUN" for r, has_report in zip(results, reported[rel]) if has_report]
-            shown = [r or ("FILE_" + (file_verdicts[i] or "NOTRUN")) for i, r in enumerate(results)]
+            shown = [r or ("FILE_" + (outcomes[i] or "NOTRUN")) for i, r in enumerate(results)]
             label = " > ".join(p for p in (classname, name) if p)
             entry = {"file": rel, "classname": classname, "name": name, "test": f"{rel} {label}", "results": shown}
             distinct = set(judged)
@@ -405,27 +487,83 @@ def report(receipt, receipt_path):
 
 # ---------------------------------------------------------------- self-test
 
-def self_test():
-    """The runner with a stand-in bun (pass, fail, hang, crash, leftover child, no
-    report), then the classifier on made-up repeats. Exit 0 when every check holds."""
-    work = tempfile.mkdtemp(prefix="webviews-tests-selftest-")
-    try:
-        bun = os.path.join(work, "bun")
-        with open(bun, "w") as handle:
-            handle.write("""#!/usr/bin/env bash
+STAND_IN_BUN = """#!/usr/bin/env bash
 # Stand-in bun: test --timeout MS --reporter=junit --reporter-outfile=FILE ./NAME
 out="${5#--reporter-outfile=}"
 junit() { printf '<testsuites name="bun test" tests="1" failures="%s" skipped="0" assertions="1"><testsuite name="x"><testcase name="t" classname="c">%s</testcase></testsuite></testsuites>' "$1" "$2" > "$out"; }
 case "$6" in
   ./pass.test.ts) junit 0 "" ;;
   ./fail.test.ts) junit 1 '<failure type="AssertionError"/>'; exit 1 ;;
+  ./between.test.ts) printf '\\n# Unhandled error between tests\\n---\\nerror: x\\n'; junit 1 '<failure type="AssertionError"/>'; exit 1 ;;
   ./hang.test.ts) sleep 30 ;;
   ./crash.test.ts) kill -SEGV $$ ;;
   ./orphan.test.ts) (sleep 30 & echo $! > "$(dirname "$out")/../orphan.pid"); junit 0 "" ;;
   ./silent.test.ts) exit 0 ;;
   ./env.test.ts) [ -n "$CMUX_VITE_CACHE_DIR" ] && [ -e "$CMUX_VITE_CACHE_DIR/seeded" ] && junit 0 "" || exit 1 ;;
+  ./block*)
+    # A file that never ends, with a child that ignores SIGTERM; records both pids.
+    started="$(dirname "$out")/../started"; name="${6#./}"
+    mkdir -p "$started"
+    bash -c 'trap "" TERM; exec sleep 60' &
+    echo $! > "$started/$name.child"
+    echo $$ > "$started/$name.tmp" && mv "$started/$name.tmp" "$started/$name.pid"
+    sleep 60 ;;
 esac
-""")
+"""
+
+
+def alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().split(") ")[1][0] != "Z"
+    except OSError:
+        return False
+
+
+def interrupt_fixture(children, work):
+    """The runner half of the interrupt self-test: six never-ending files, two at once."""
+    args = argparse.Namespace(jobs=2, test_timeout_ms=5000, file_timeout=60, warm_attempts=1)
+    files = [f"block{i}.test.ts" for i in range(6)]
+    run_repeat(children, os.path.join(work, "bun"), "web", work, files, os.path.join(work, "repeat-1"),
+               {"PATH": os.environ["PATH"]}, args)
+    return 0
+
+
+def interrupted_run(work, sig):
+    """Start a runner on interrupt_fixture, send it `sig` once two files run, and return
+    (exit code, files started, pids of those files and their children still alive)."""
+    rdir = os.path.join(work, "repeat-1")
+    shutil.rmtree(rdir, ignore_errors=True)
+    started = os.path.join(rdir, "started")
+    pid_files = lambda suffix: [os.path.join(started, n) for n in sorted(os.listdir(started))
+                                if n.endswith(suffix)] if os.path.isdir(started) else []
+    runner = subprocess.Popen(["bash", SELF, "--self-test-interrupt", work], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 30
+        while len(pid_files(".pid")) < 2 and runner.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        runner.send_signal(sig)
+        try:
+            code = runner.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            code = None
+    finally:
+        kill_group(runner.pid, signal.SIGKILL)
+    pids = [int(open(path).read()) for path in pid_files(".pid") + pid_files(".child")]
+    time.sleep(0.2)
+    return code, len(pid_files(".pid")), [pid for pid in pids if alive(pid)]
+
+
+def self_test():
+    """The runner with a stand-in bun (pass, fail, hang, crash, leftover child, no
+    report, an interrupted run), then the classifier on made-up repeats. Exit 0 when
+    every check holds."""
+    work = tempfile.mkdtemp(prefix="webviews-tests-selftest-")
+    try:
+        bun = os.path.join(work, "bun")
+        with open(bun, "w") as handle:
+            handle.write(STAND_IN_BUN)
         os.chmod(bun, 0o755)
         rdir = os.path.join(work, "repeat-1")
         for sub in ("logs", "junit"):
@@ -434,23 +572,29 @@ esac
         os.makedirs(seed)
         open(os.path.join(seed, "seeded"), "w").close()
         got = {}
-        for name in ("pass", "fail", "hang", "crash", "orphan", "silent", "env"):
+        for name in ("pass", "fail", "between", "hang", "crash", "orphan", "silent", "env"):
             kwargs = {"cache": os.path.join(work, "cache"), "seed": seed} if name == "env" else {}
-            got[name] = run_file(bun, work, f"{name}.test.ts", rdir, {"PATH": os.environ["PATH"]}, 5000,
+            got[name] = run_file(Children(), bun, work, f"{name}.test.ts", rdir, {"PATH": os.environ["PATH"]}, 5000,
                                  2 if name == "hang" else 20, **kwargs)
         orphan_pid = int(open(os.path.join(rdir, "orphan.pid")).read())
         time.sleep(0.2)
-        orphan_alive = os.path.exists(f"/proc/{orphan_pid}") and \
-            open(f"/proc/{orphan_pid}/stat").read().split(") ")[1][0] != "Z"
         verdicts = {k: v["verdict"] for k, v in got.items()}
         checks = {
-            "runner verdicts": verdicts == {"pass": "PASS", "fail": "FAIL", "hang": "TIMEOUT", "crash": "CRASH",
-                                            "orphan": "PASS", "silent": "PASS", "env": "PASS"},
+            "runner verdicts": verdicts == {"pass": "PASS", "fail": "FAIL", "between": "FAIL", "hang": "TIMEOUT",
+                                            "crash": "CRASH", "orphan": "PASS", "silent": "PASS", "env": "PASS"},
             "a hung file is killed at its limit": got["hang"]["seconds"] < 15,
-            "the file's process group dies with it": not orphan_alive,
+            "the file's process group dies with it": not alive(orphan_pid),
             "a dev-server file gets a copy of the warm cache": got["env"]["vite_cache"] == "warm",
             "no report when bun wrote none": got["silent"]["junit"] is None and got["pass"]["junit"] is not None,
+            "bun's error between tests is counted from the log": got["between"]["outside_errors"] == 1
+                and got["fail"]["outside_errors"] == 0,
         }
+        for sig, want in ((signal.SIGTERM, 143), (signal.SIGINT, 130)):
+            name = signal.Signals(sig).name
+            code, count, left = interrupted_run(work, sig)
+            checks[f"{name}: the runner exits {want}"] = code == want
+            checks[f"{name}: no new file starts after it"] = count == 2
+            checks[f"{name}: no file or child of one is left alive"] = not left
 
         # Classifier: three repeats of made-up reports.
         def junit_file(tag, cases):
@@ -463,16 +607,22 @@ esac
             return path
         ok, bad, slow, todo = "", '<failure type="AssertionError"/>', '<failure type="TimeoutError"/>', '<skipped message="TODO"/>'
 
-        def rec(rel, verdict, junit):
+        def rec(rel, verdict, junit, outside=0):
             return {"file": rel, "verdict": verdict, "exit": 0 if verdict == "PASS" else 1, "seconds": 1,
-                    "limit": 120, "log": "", "junit": junit, "vite_cache": None}
+                    "limit": 120, "log": "", "junit": junit, "outside_errors": outside, "vite_cache": None}
         repeats = []
         for i, (a_flip, b_verdict, c_ok) in enumerate((("ok", "PASS", True), ("bad", "TIMEOUT", True), ("ok", "PASS", False))):
             a = junit_file(f"a{i}", [("steady", ok), ("flip", ok if a_flip == "ok" else bad), ("red", bad),
                                      ("slow", slow if i == 0 else bad), ("later", todo), ("dup", ok), ("dup", ok)])
             records = [rec("a.test.ts", "FAIL", a),
                        rec("b.test.ts", b_verdict, junit_file(f"b{i}", [("t", ok)]) if b_verdict == "PASS" else None),
-                       rec("c.test.ts", "PASS" if c_ok else "FAIL", junit_file(f"c{i}", [("t", ok)]) if c_ok else None)]
+                       rec("c.test.ts", "PASS" if c_ok else "FAIL", junit_file(f"c{i}", [("t", ok)]) if c_ok else None),
+                       # d: one test flips, the file always writes a report.
+                       rec("d.test.ts", "FAIL" if i == 1 else "PASS", junit_file(f"d{i}", [("t", bad if i == 1 else ok)])),
+                       # e: a test red in every repeat, and in repeat 2 an error between tests.
+                       rec("e.test.ts", "FAIL", junit_file(f"e{i}", [("red", bad), ("fine", ok)]), 1 if i == 1 else 0),
+                       # f: in repeat 2 the file fails with every test green (an error outside a test).
+                       rec("f.test.ts", "FAIL" if i == 1 else "PASS", junit_file(f"f{i}", [("t", ok)]))]
             repeats.append(records)
         meta = {"run_id": "selftest", "sha": "0" * 40, "jobs": 300}
         receipt, lines, code = analyze(meta, {"webviews": repeats})
@@ -481,15 +631,22 @@ esac
         red = {e["test"] for e in pkg["stable_red"]}
         checks.update({
             "exit 1 (a test red in every repeat)": code == 1 and not receipt["errors"],
-            "flaky = flip, slow, the timed-out file, the file that failed to load": set(flaky) == {
-                "a.test.ts g > flip", "a.test.ts g > slow", "b.test.ts (file)", "c.test.ts (file)"},
+            "flaky = flip, slow, d's t and the files with a file-level failure in one repeat": set(flaky) == {
+                "a.test.ts g > flip", "a.test.ts g > slow", "b.test.ts (file)", "c.test.ts (file)",
+                "d.test.ts g > t", "e.test.ts (file)", "f.test.ts (file)"},
             "TIMEOUT differs from FAIL": flaky.get("a.test.ts g > slow") == ["TIMEOUT", "FAIL", "FAIL"],
+            "file entries show file-level outcomes": flaky.get("b.test.ts (file)") == ["OK", "TIMEOUT", "OK"]
+                and flaky.get("c.test.ts (file)") == ["OK", "OK", "NOREPORT"]
+                and flaky.get("e.test.ts (file)") == ["OK", "ERROR", "OK"]
+                and flaky.get("f.test.ts (file)") == ["OK", "ERROR", "OK"],
+            "a test that flips in a file that always reports is one flaky line":
+                [l["test"] for l in lines if l["test"].startswith("webviews/d.test.ts")] == ["webviews/d.test.ts g > t"],
             "tests of a file without a report are not flakes": "b.test.ts g > t" not in flaky
                 and "c.test.ts g > t" not in flaky,
-            "red = red and the file that always fails": red == {"a.test.ts g > red", "a.test.ts (file)"},
-            "steady, dup, dup #2, later (TODO), b and c's t pass": pkg["stable_pass"] == 6,
-            "counts are bun's": pkg["repeats"][0]["reporter"]["tests"] == 9
-                and pkg["repeats"][1]["reporter"]["tests"] == 8,
+            "red = the tests red in every repeat, not their files": red == {"a.test.ts g > red", "e.test.ts g > red"},
+            "steady, dup, dup #2, later (TODO), b, c and f's t, e's fine pass": pkg["stable_pass"] == 8,
+            "counts are bun's": pkg["repeats"][0]["reporter"]["tests"] == 13
+                and pkg["repeats"][1]["reporter"]["tests"] == 12,
             "one flaky line per flaky test": sorted(l["test"] for l in lines) == sorted(f"webviews/{t}" for t in flaky),
         })
         # A file that exits 0 without a report is an error, not a pass.
@@ -528,6 +685,7 @@ def parse(argv):
     parser.add_argument("--warm-attempts", type=positive, default=3, help=argparse.SUPPRESS)
     parser.add_argument("--browser-lane", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--self-test-interrupt", metavar="DIR", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.repeats < 2 and not args.self_test:
         raise UsageError("--repeats must be at least 2: one run cannot show a flake")
@@ -549,10 +707,33 @@ def check(command, cwd, log):
         raise SetupError(f"`{' '.join(command)}` in {os.path.relpath(cwd, ROOT)} exited {code}; see {log}")
 
 
+def on_signal(signum, frame):
+    # Once only: a second signal must not cut the cleanup of the first short.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
 def main(argv):
     args = parse(argv)
     if args.self_test:
         return self_test()
+    children = Children()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, on_signal)
+    try:
+        if args.self_test_interrupt:
+            return interrupt_fixture(children, args.self_test_interrupt)
+        return run(children, args)
+    except Interrupted as exc:
+        children.stop()
+        say(f"stopped by {exc}: killed the process groups of {len(children.killed)} running files; no receipt")
+        return 128 + exc.signum
+    finally:
+        children.stop()
+
+
+def run(children, args):
     if os.uname().sysname != "Linux":
         raise UsageError("Linux only: never test on a person's Mac (CLAUDE.md)")
     os.nice(10)
@@ -604,7 +785,7 @@ def main(argv):
             rdir = os.path.join(pdir, f"repeat-{repeat}")
             shutil.rmtree(rdir, ignore_errors=True)
             started = time.monotonic()
-            records = run_repeat(bun, package, package_dir, files, rdir, env, args)
+            records = run_repeat(children, bun, package, package_dir, files, rdir, env, args)
             with open(os.path.join(rdir, "files.jsonl"), "w", encoding="utf-8") as handle:
                 for record in sorted(records, key=lambda r: r["file"]):
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
