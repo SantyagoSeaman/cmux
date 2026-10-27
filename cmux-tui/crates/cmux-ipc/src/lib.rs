@@ -26,7 +26,13 @@
 //!
 //! [`fds`] passes file descriptors with `SCM_RIGHTS` and queues the ones that
 //! arrive in order: the holder link uses it, and so do the daemon's frame lanes.
-//! It is the only module with `unsafe` (libc `sendmsg`/`recvmsg`).
+//! It is one of three modules with `unsafe` (libc `sendmsg`/`recvmsg`).
+//!
+//! [`shm`] makes shared memory segments that only descriptors reach (the
+//! holder's ring segments, and read-only ones for other processes), and
+//! [`output_ring`] is a terminal's output ring for the app in such a segment
+//! (`CMAR` layout 1, app-daemon-connection-DESIGN.md section 4). They hold the
+//! rest of the crate's `unsafe` (libc `memfd_create`, `shm_open`, `mmap`).
 //!
 //! [`lane_writer`] is the outbound priority policy (design 3.4): input
 //! streams, then the one control FIFO, then bulk, then background, with
@@ -67,10 +73,22 @@ pub mod fds;
 pub mod frame;
 pub mod lane_writer;
 pub mod methods;
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "a ring in shared memory needs libc mmap and atomics at fixed offsets of the mapping"
+)]
+pub mod output_ring;
 pub mod reader;
 pub mod schema;
 mod schema_digest;
 mod server_families;
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "segments are made and mapped with libc memfd_create, shm_open, fcntl and mmap"
+)]
+pub mod shm;
 
 pub use frame::{
     Aux, AuxClass, BadMessage, CallAux, CallFlags, Frame, FrameHeader, FrameKind, HEADER_LEN,

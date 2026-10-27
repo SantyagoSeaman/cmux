@@ -2,7 +2,8 @@
 //! holder can hand to another process.
 //!
 //! Wire version 4: the ring lives in a shared memory segment (`memfd` on
-//! Linux, an unlinked POSIX `shm_open` object elsewhere). The holder passes
+//! Linux, an unlinked POSIX `shm_open` object elsewhere, both made by
+//! `cmux_ipc::shm`). The holder passes
 //! its descriptor to the daemon with the PTY master, and the daemon keeps a
 //! custody dup of both. When the holder dies, the bytes it read from the PTY
 //! but never sent are still in the segment: the daemon hands the segment to
@@ -50,8 +51,9 @@
 //! its layout: a reader trusts only `oldest .. end`, so it never reads a
 //! released page.
 
+use cmux_ipc::shm::{self, SegmentKind};
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Header bytes before the data.
@@ -462,15 +464,8 @@ impl Drop for Ring {
 /// holder of wire version 5 (`crate::wire::RING_VERSION`), so the next
 /// holder crash loses no byte either.
 pub fn create_segment(base: u64, capacity: usize) -> io::Result<OwnedFd> {
-    let segment = new_segment()?;
-    // Already close-on-exec where the platform opens it so; else this
-    // closes the rest of the window (see `new_segment`).
-    crate::pty::set_cloexec(segment.as_raw_fd());
-    let size = (HEADER + capacity) as libc::off_t;
-    // SAFETY: sizes a descriptor this function owns.
-    if unsafe { libc::ftruncate(segment.as_raw_fd(), size) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // Sized, close-on-exec and nameless (cmux_ipc::shm module docs).
+    let segment = shm::create(SegmentKind::HolderRing, HEADER + capacity)?;
     let map = map_shared(segment.as_raw_fd(), HEADER)?;
     // SAFETY: the header mapping is HEADER bytes.
     unsafe {
@@ -602,73 +597,6 @@ fn map_shared(fd: RawFd, len: usize) -> io::Result<*mut u8> {
         return Err(io::Error::last_os_error());
     }
     Ok(map.cast())
-}
-
-#[cfg(target_os = "linux")]
-fn new_segment() -> io::Result<OwnedFd> {
-    // SAFETY: memfd_create returns a new descriptor or -1.
-    let fd = unsafe { libc::memfd_create(c"cmux-holder-ring".as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a fresh descriptor this function owns.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-/// An unlinked POSIX shared memory object: only descriptors reach it.
-///
-/// It is opened close-on-exec (`O_CLOEXEC`), so a process another thread
-/// of a multithreaded daemon spawns meanwhile does not inherit a writable
-/// descriptor to a terminal's output. A system whose `shm_open` refuses the
-/// flag (`EINVAL`) gets the object without it and [`create_segment`] sets
-/// `FD_CLOEXEC` right after: there, a process spawned on another thread
-/// between the two calls can inherit the descriptor, and with it keep the
-/// segment alive and write to it.
-#[cfg(not(target_os = "linux"))]
-fn new_segment() -> io::Result<OwnedFd> {
-    use std::sync::atomic::AtomicU32;
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    for _ in 0..16 {
-        // At most 31 bytes on macOS (PSHMNAMLEN).
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
-        let name = format!(
-            "/cmhr{:x}.{:x}.{:x}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-            nanos
-        );
-        let name = std::ffi::CString::new(name).map_err(|_| invalid("ring name"))?;
-        let open = |flags: libc::c_int| {
-            // SAFETY: shm_open with a NUL-terminated name; the mode is variadic.
-            unsafe {
-                libc::shm_open(
-                    name.as_ptr(),
-                    flags | libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                    0o600 as libc::c_uint,
-                )
-            }
-        };
-        let mut fd = open(libc::O_CLOEXEC);
-        if fd < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
-            // SAFETY: removes the name in case the refused open made it.
-            unsafe { libc::shm_unlink(name.as_ptr()) };
-            fd = open(0);
-        }
-        if fd < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                continue;
-            }
-            return Err(error);
-        }
-        // SAFETY: removes the name just made; the descriptor keeps the object.
-        unsafe { libc::shm_unlink(name.as_ptr()) };
-        // SAFETY: a fresh descriptor this function owns.
-        return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
-    }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free ring segment name"))
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -813,15 +741,13 @@ mod tests {
         assert_eq!(adopted.read(0, 64), (8, b"efghijkl".to_vec()));
     }
 
-    /// A new segment is close-on-exec from the moment `shm_open` (or
-    /// `memfd_create`) returns it, before [`create_segment`] sets the flag
-    /// again: a process another daemon thread spawns meanwhile does not
-    /// inherit a writable copy of a terminal's output. Red on a macOS major
-    /// whose `shm_open` ignores `O_CLOEXEC` (or refuses it: the `EINVAL`
-    /// fallback opens without it).
+    /// A made segment is close-on-exec: a process the daemon spawns does
+    /// not inherit a writable copy of a terminal's output (that it already
+    /// is when `shm_open` or `memfd_create` returns it is
+    /// `cmux_ipc::shm`'s test).
     #[test]
     fn a_new_segment_is_close_on_exec_when_it_is_opened() {
-        let segment = new_segment().unwrap();
+        let segment = create_segment(0, 8).unwrap();
         // SAFETY: F_GETFD of a descriptor this test owns.
         let flags = unsafe { libc::fcntl(segment.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0, "F_GETFD: {}", io::Error::last_os_error());
@@ -999,9 +925,7 @@ mod tests {
 
     #[test]
     fn a_foreign_descriptor_is_not_a_ring() {
-        let segment = new_segment().unwrap();
-        // SAFETY: sizes a descriptor this test owns.
-        assert_eq!(unsafe { libc::ftruncate(segment.as_raw_fd(), 4096) }, 0);
+        let segment = shm::create(SegmentKind::HolderRing, 4096).unwrap();
         assert!(Ring::adopt(segment).is_err());
     }
 }
