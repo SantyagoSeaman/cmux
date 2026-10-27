@@ -200,6 +200,55 @@ impl SnapshotRequestGate {
     }
 }
 
+/// A snapshot viewer attached for the terminal's output ring
+/// ([`Surface::attach_snapshot_ring_stream`]).
+#[cfg(unix)]
+#[cfg_attr(not(test), expect(dead_code, reason = "read by attach frames once bound"))]
+pub(crate) struct RingAttachStream {
+    pub stream: SnapshotAttachStream,
+    /// The ring the viewer's output is published in, announced by its RING
+    /// frame; without one the viewer is a snapshot viewer of bytes (OUTPUT
+    /// frames).
+    pub ring: Result<OutputRingGrant, RingUnavailable>,
+}
+
+/// Why a ring attach got no ring.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum RingUnavailable {
+    /// The terminal exited: its final screen is served once, no output follows.
+    Exited,
+    /// The ring could not be made or its descriptor copied.
+    Ring(cmux_ipc::output_ring::RingError),
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for RingUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exited => f.write_str("the terminal exited"),
+            Self::Ring(error) => error.fmt(f),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for RingUnavailable {}
+
+/// A ring attach's grant, or why it has none.
+#[cfg(unix)]
+type RingGrantResult = Result<OutputRingGrant, RingUnavailable>;
+#[cfg(not(unix))]
+type RingGrantResult = std::convert::Infallible;
+
+/// Which queue a snapshot viewer gets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotViewerOutput {
+    Bytes,
+    #[cfg(unix)]
+    Ring,
+}
+
 impl Surface {
     /// Register a snapshot viewer. Its first event is a READY snapshot.
     /// `local_history`: the viewer reflows its own history, so a resize
@@ -210,6 +259,49 @@ impl Surface {
         backlog_bytes: usize,
         local_history: bool,
     ) -> ghostty_vt::Result<SnapshotAttachStream> {
+        self.register_snapshot_viewer(
+            lifecycle,
+            backlog_bytes,
+            local_history,
+            SnapshotViewerOutput::Bytes,
+        )
+        .map(|(stream, _)| stream)
+    }
+
+    /// Register a snapshot viewer whose output is the terminal's ring
+    /// (`terminal-output-ring-v1`): its events are READY snapshots and
+    /// [`ViewerEvent::Ring`] advances. The first ring attach of a terminal
+    /// makes its ring, at the snapshot offset now. Grant it only to a
+    /// connection whose peer may map the ring (server/capabilities.rs,
+    /// `grants_output_ring`). When no ring can be had the viewer is an
+    /// ordinary snapshot viewer of bytes, and `ring` says why.
+    #[cfg(unix)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "attached by attach frames once bound"))]
+    pub(crate) fn attach_snapshot_ring_stream(
+        &self,
+        lifecycle: AttachLifecycle,
+        backlog_bytes: usize,
+        local_history: bool,
+    ) -> ghostty_vt::Result<RingAttachStream> {
+        let (stream, ring) = self.register_snapshot_viewer(
+            lifecycle,
+            backlog_bytes,
+            local_history,
+            SnapshotViewerOutput::Ring,
+        )?;
+        Ok(RingAttachStream { stream, ring: ring.unwrap_or(Err(RingUnavailable::Exited)) })
+    }
+
+    /// Both attaches: the viewer's queue is made and registered, and its
+    /// ring granted, under one terminal lock, so no output byte lands
+    /// between the ring's end and the viewer's first READY cut.
+    fn register_snapshot_viewer(
+        &self,
+        lifecycle: AttachLifecycle,
+        backlog_bytes: usize,
+        local_history: bool,
+        output: SnapshotViewerOutput,
+    ) -> ghostty_vt::Result<(SnapshotAttachStream, Option<RingGrantResult>)> {
         let Some(pty) = self.as_pty() else {
             return Err(ghostty_vt::Error::InvalidValue);
         };
@@ -221,8 +313,25 @@ impl Surface {
         if dead && !exited {
             return Err(ghostty_vt::Error::NoValue);
         }
-        let (tap, receiver) =
-            AttachTap::snapshot_pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes);
+        // An exited terminal prints nothing more: no ring for it.
+        let output = if exited { SnapshotViewerOutput::Bytes } else { output };
+        let ((tap, receiver), ring) = match output {
+            SnapshotViewerOutput::Bytes => (
+                AttachTap::snapshot_pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes),
+                None,
+            ),
+            #[cfg(unix)]
+            SnapshotViewerOutput::Ring => {
+                let offset = pty.snapshot_position.load().1;
+                let grant = pty.taps.lock().unwrap().ring_grant(offset);
+                let pair =
+                    if grant.is_ok() { AttachTap::ring_pair } else { AttachTap::snapshot_pair };
+                (
+                    pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes),
+                    Some(grant.map_err(RingUnavailable::Ring)),
+                )
+            }
+        };
         receiver.set_local_history(local_history);
         if exited {
             // The final screen is still served once; then the stream ends.
@@ -231,7 +340,7 @@ impl Surface {
             pty.taps.lock().unwrap().push(tap);
         }
         let requests = SnapshotRequestGate::new(receiver.snapshot_request_handle());
-        Ok(SnapshotAttachStream { receiver, lifecycle, requests })
+        Ok((SnapshotAttachStream { receiver, lifecycle, requests }, ring))
     }
 
     /// Take the snapshot a viewer's worker owes it and drop the queued
@@ -367,13 +476,14 @@ impl Surface {
     }
 
     /// Apply `bytes` as PTY output the way the reader does (parse, then
-    /// broadcast, under the terminal lock).
+    /// broadcast, under the terminal lock). The bytes the parser accepted.
     #[cfg(test)]
-    pub(crate) fn inject_output_for_test(&self, bytes: &[u8]) {
+    pub(crate) fn inject_output_for_test(&self, bytes: &[u8]) -> Vec<u8> {
         let pty = self.as_pty().expect("a PTY surface");
         let mut term = pty.term.lock().unwrap();
         let normalized = term.vt_write_with_normalized(bytes).into_owned();
         pty.broadcast_attach_output(&normalized);
+        normalized
     }
 
     /// `(generation, offset)` of the published stream.

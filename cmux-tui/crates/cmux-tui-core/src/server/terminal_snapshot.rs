@@ -698,6 +698,10 @@ impl SnapshotWorker {
                     digest_at = None;
                     self.send_local_ready(&ready)
                 }
+                // This JSON worker's viewer is a byte viewer
+                // (`attach_snapshot_stream`); a ring advance carries no bytes
+                // it could send, so the stream ends instead of losing them.
+                Ok(ViewerEvent::Ring(_)) => false,
                 Ok(ViewerEvent::Frame(frame)) => {
                     self.offset += frame_output_len(&frame) as u64;
                     if frame_output_len(&frame) > 0 {

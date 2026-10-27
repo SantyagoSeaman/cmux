@@ -193,7 +193,7 @@ impl IpcCapability {
         Self::ALL
             .into_iter()
             .filter(|capability| {
-                transports.bound(*capability) && capability.allowed(peer, current_revision)
+                transports.serves(*capability) && capability.allowed(peer, current_revision)
             })
             .collect()
     }
@@ -204,7 +204,10 @@ impl IpcCapability {
 /// once its implementation is bound. The task that lands a transport adds its
 /// capability to [`Self::BOUND`]: the frame reader (p05-ipc-061) `Frames`,
 /// streams and `cancel-stream` (p05-ipc-074) `AttachStreams`, attach frames
-/// `AttachFrames`, the ring (p05-ipc-111) `OutputRing`.
+/// `AttachFrames`, the ring `OutputRing` (the daemon side of p05-ipc-111 is
+/// the terminal ring, `Surface::attach_snapshot_ring_stream`, and its RING /
+/// RING_ADVANCE encoding, server/attach_frames.rs; it is bound with the
+/// attach-frames writer that sends them).
 pub(super) struct IpcTransports(AtomicU8);
 
 impl IpcTransports {
@@ -215,13 +218,26 @@ impl IpcTransports {
         self.0.load(Ordering::Acquire) & capability.bit() != 0
     }
 
+    /// Bound with every capability it [requires](IpcCapability::requires):
+    /// a ring announces its spans in attach frames, so a bound ring without
+    /// bound attach frames is never advertised or granted.
+    pub(super) fn serves(&self, capability: IpcCapability) -> bool {
+        self.bound(capability) && capability.requires().iter().all(|required| self.bound(*required))
+    }
+
     /// Binds every transport, so tests can check the grant rule before the
     /// transports land.
     #[cfg(test)]
     pub(super) fn bind_all_for_test(&self) {
         for capability in IpcCapability::ALL {
-            self.0.fetch_or(capability.bit(), Ordering::AcqRel);
+            self.bind_for_test(capability);
         }
+    }
+
+    /// Binds one transport.
+    #[cfg(test)]
+    pub(super) fn bind_for_test(&self, capability: IpcCapability) {
+        self.0.fetch_or(capability.bit(), Ordering::AcqRel);
     }
 }
 
@@ -279,7 +295,7 @@ impl IpcPeer {
 /// Whether the framed IPC `capability` is bound and `record`'s connection
 /// still meets its rule.
 fn still_allowed(record: &ClientRecord, transports: &IpcTransports, ipc: IpcCapability) -> bool {
-    transports.bound(ipc)
+    transports.serves(ipc)
         && ipc.allowed(IpcPeer::of(record), record.writer.api_revision.is_current())
 }
 
@@ -328,6 +344,19 @@ pub(super) fn revoke_lapsed_ipc_grants(record: &mut ClientRecord, transports: &I
 pub(super) fn holds(record: &ClientRecord, transports: &IpcTransports, capability: &str) -> bool {
     record.capabilities.contains(capability)
         && IpcCapability::named(capability).is_none_or(|ipc| still_allowed(record, transports, ipc))
+}
+
+/// Whether a ring attach on `record`'s connection may get the terminal's
+/// output ring: the connection holds `terminal-output-ring-v1` and is, by
+/// what the kernel said at accept, a direct process of the daemon's own user
+/// on the Unix socket (`getpeereid`). The ring's descriptor goes only to
+/// such a peer; a WebSocket, remote-entry, relay, bridged, page or
+/// unverified connection never gets one, whatever it asked for
+/// (app-daemon-connection-DESIGN.md 4.5; request-origin.md "Output ring").
+#[cfg_attr(not(test), expect(dead_code, reason = "asked by attach frames once bound"))]
+pub(super) fn grants_output_ring(record: &ClientRecord, transports: &IpcTransports) -> bool {
+    IpcPeer::of(record) == IpcPeer::Local
+        && holds(record, transports, IpcCapability::OutputRing.name())
 }
 
 impl ClientRegistry {

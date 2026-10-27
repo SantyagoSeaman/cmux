@@ -351,6 +351,9 @@ mod attach_tap;
 pub use attach_tap::AttachFrameReceiver;
 pub(crate) use attach_tap::AttachLifecycle;
 pub(crate) use attach_tap::AttachResize;
+#[cfg(unix)]
+pub(crate) use attach_tap::OutputRingGrant;
+pub(crate) use attach_tap::RingAdvance;
 pub(crate) use attach_tap::ViewerEvent;
 #[cfg(test)]
 use attach_tap::{
