@@ -1765,8 +1765,12 @@ def goal_rows(budget, session, kinds):
 
 def window_facts(entry):
     """over_budget's `facts` of one summarized window: the animated page's rAF rate, the saver state and reason
-    both ends agree on (none when an end did not report one) and the power assertions held by the pid set."""
+    both ends agree on (none when an end did not report one), the power assertions held by the pid set and the
+    window's length in seconds (periodic_allowance)."""
     facts = {"assertions": entry["assertions"]}
+    seconds = (entry.get("result") or {}).get("seconds")
+    if isinstance(seconds, (int, float)):
+        facts["seconds"] = seconds
     observed = entry["saver"]["observed"]
     if observed and isinstance(observed[0], bool) and all(state == observed[0] for state in observed):
         facts["saver"] = observed[0]
@@ -1898,7 +1902,7 @@ def over_budget(session, kinds, budget, facts=None):
                 continue  # judged per process, with D16's defaults: role_audit
             value = entry.get(field)
             if isinstance(value, (int, float)) and value > limit and not periodic_excuse(budget, name, field, entry,
-                                                                                          limit):
+                                                                                          limit, facts.get("seconds")):
                 out.append((name, field, value, limit))
     for selector, limits in (own.get("sums") or {}).items():
         for field, limit in limits.items():
@@ -1919,24 +1923,47 @@ def over_budget(session, kinds, budget, facts=None):
 D15_FIELDS = ("disk_bytes_per_s", "network_bytes", "log_lines")
 
 
-def periodic_excuse(budget, name, field, entry, limit=0):
+def periodic_excuse(budget, name, field, entry, limit=0, seconds=None):
     """Whether allowed_periodic entries excuse D15 `field` of kind `name` over `limit`: an entry names the kind
-    (`kind`) and the field (`metrics`). Without `remote` it excuses the whole value. With `remote` it applies to
-    network_bytes only and excuses the bytes moved to that end (procs.remote_matches: the whole host or host:port,
-    never a substring); the bytes left (to other ends, or not on a listed flow) must stay within `limit`. An entry
-    without `kind` and `metrics` excuses no D15 value: its owner is a wakeup owner only."""
+    (`kind`) and the field (`metrics`). Without `remote` and `bytes_per_period` it excuses the whole value. With
+    either it applies to network_bytes only. `remote` excuses the bytes moved to that end (procs.remote_matches:
+    the whole host or host:port, never a substring). `bytes_per_period` excuses at most that many bytes per
+    `period_s` of the window (`seconds`; periodic_allowance), toward its `remote` when it names one: a keepalive's
+    ping and pong, never a socket that moves data (p14-energy-121). The bytes left must stay within `limit`. An
+    entry without `kind` and `metrics` excuses no D15 value: its owner is a wakeup owner only."""
     if field not in D15_FIELDS:
         return False
     rules = [rule for rule in budget.get("allowed_periodic") or []
              if rule.get("kind") == name and field in (rule.get("metrics") or [])]
-    if any(rule.get("remote") is None for rule in rules):
+    if any(rule.get("remote") is None and rule.get("bytes_per_period") is None for rule in rules):
         return True
-    allowed = [rule["remote"] for rule in rules]
-    if field != "network_bytes" or not allowed or not isinstance(entry.get(field), (int, float)):
+    if field != "network_bytes" or not rules or not isinstance(entry.get(field), (int, float)):
         return False
-    excused = sum(moved for end, moved in (entry.get("remote_bytes") or {}).items()
-                  if any(procs.remote_matches(remote, end) for remote in allowed))
-    return entry[field] - excused <= limit
+    moved = entry.get("remote_bytes") or {}
+
+    def toward(remotes):
+        return sum(count for end, count in moved.items() if any(procs.remote_matches(remote, end) for remote in remotes))
+
+    uncapped = [rule["remote"] for rule in rules if rule.get("bytes_per_period") is None]
+    left = entry[field] - toward(uncapped)
+    for rule in rules:
+        if rule.get("bytes_per_period") is None:
+            continue
+        allowance = periodic_allowance(rule, seconds)
+        left -= allowance if rule.get("remote") is None else min(allowance, toward([rule["remote"]]))
+    return left <= limit
+
+
+def periodic_allowance(rule, seconds):
+    """The network bytes a `bytes_per_period` entry excuses in a window of `seconds`: one period's bytes for each
+    period the window can touch (floor(seconds / period_s) + 1, since a window may hold the fire at both ends); an
+    unknown window counts one period. A malformed entry excuses nothing."""
+    per, period = rule.get("bytes_per_period"), rule.get("period_s")
+    if not isinstance(per, (int, float)) or isinstance(per, bool) or per <= 0 \
+            or not isinstance(period, (int, float)) or period <= 0:
+        return 0
+    periods = 1 if not isinstance(seconds, (int, float)) or seconds <= 0 else int(seconds // period) + 1
+    return per * periods
 
 
 def assertion_overs(own, budget, facts):

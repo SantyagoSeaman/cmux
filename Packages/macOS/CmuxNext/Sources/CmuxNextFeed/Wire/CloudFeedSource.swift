@@ -13,6 +13,10 @@ public import CmuxNextWakeups
 /// With the app's Energy Saver policy (p14-energy-120, ``KeepaliveGate``) a sleep of the Mac or its
 /// displays drops a pending pong deadline (its 10 s would run through the sleep), and a wake that
 /// finds the network closes the socket once and reconnects within ``EnergyPolicy/reconnectJitter``.
+///
+/// The socket is silent while idle (p14-energy-121): the owner never pings it, and this side probes
+/// (``checkAlive()``) only after ``keepaliveSilence`` with no frame either way (``SilenceKeepalive``),
+/// which Cloudflare answers without waking the owner's Durable Object.
 @MainActor
 public final class CloudFeedSource: FeedSource {
     /// Returns a fresh bearer token (a Stack session token today; an install token later).
@@ -47,6 +51,11 @@ public final class CloudFeedSource: FeedSource {
     private var probes = 0
     /// How long ``checkAlive()`` waits for the pong; a flexible deadline (WakeLeeway: 1 s leeway).
     static let pongLimit: Duration = .seconds(10)
+    /// The silence, both ways, before the keepalive probes an open socket: short enough that no proxy
+    /// on the path reaps the idle socket, long enough that an idle Mac sends one ping a minute.
+    nonisolated static let keepaliveSilence: Duration = .seconds(60)
+    /// Probes the open socket after ``keepaliveSilence`` with no frame either way.
+    let keepalive: SilenceKeepalive
     private var stream = ""
     private var connected = false
     private var active = false
@@ -65,6 +74,7 @@ public final class CloudFeedSource: FeedSource {
 
     init(apiBaseURL: URL, device: String, token: @escaping TokenProvider, reconnect: Backoff, connect: Connect?,
          clock: any Clock<Duration> = ContinuousClock(), energy: EnergyPolicySource? = nil,
+         keepaliveSilence: Duration = CloudFeedSource.keepaliveSilence,
          wakeJitter: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
         var c = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) ?? URLComponents()
         c.scheme = c.scheme == "http" ? "ws" : "wss"
@@ -79,13 +89,20 @@ public final class CloudFeedSource: FeedSource {
         // timer-class-allow: off-main: the retry deadline only resolves the gate's wait (thread-safe); the run loop resumes on its own actor.
         retry = DemandTimer(owner: "feed.cloud.reconnect", clock: clock)
         gate = KeepaliveGate(energy, random: wakeJitter)
-        gate.follow { [probe] edge in if edge == .pause { probe.cancel() } }
+        keepalive = SilenceKeepalive(owner: "cloud.wire.keepalive", silence: keepaliveSilence, clock: clock, gate: gate)
+        gate.follow { [probe, keepalive] edge in
+            if edge == .pause {
+                probe.cancel()
+                keepalive.pause()
+            }
+        }
     }
 
     public func start(_ sink: @escaping @MainActor (FeedSourceEvent) -> Void) {
         self.sink = sink
         runner?.cancel()
         probe.cancel()
+        keepalive.stop()
         generation += 1
         let generation = generation
         runner = Task { await self.run(generation) }
@@ -96,6 +113,7 @@ public final class CloudFeedSource: FeedSource {
         runner?.cancel()
         runner = nil
         probe.cancel()
+        keepalive.stop()
         gate.closed()
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
@@ -136,7 +154,12 @@ public final class CloudFeedSource: FeedSource {
         probe.schedule(after: Self.pongLimit) { close() }
         return { [weak self] failed in
             guard let self, generation == self.generation else { return }
-            if failed { close() } else if id == probes { probe.cancel() }
+            if failed {
+                close()
+            } else {
+                keepalive.heard()
+                if id == probes { probe.cancel() }
+            }
         }
     }
 
@@ -200,6 +223,7 @@ public final class CloudFeedSource: FeedSource {
             }
             guard generation == self.generation else { return }
             gate.closed()
+            keepalive.stop()
             connected = false
             socket = nil
             sink?(.connection(.disconnected(reason)))
@@ -225,7 +249,8 @@ public final class CloudFeedSource: FeedSource {
         task.maximumMessageSize = 8 << 20
         socket = task
         task.resume()
-        gate.opened { task.cancel(with: .goingAway, reason: nil) }
+        keepalive.start { [weak self] in self?.checkAlive() }
+        gate.opened(close: { task.cancel(with: .goingAway, reason: nil) }, resume: { [keepalive] in keepalive.heard() })
         defer { task.cancel(with: .goingAway, reason: nil) }
         // wakeup-allow: each turn awaits the next frame; a closed socket throws and ends the loop.
         while !Task.isCancelled {
@@ -237,6 +262,7 @@ public final class CloudFeedSource: FeedSource {
                 if (task.response as? HTTPURLResponse)?.statusCode == 401 { throw Unauthorized() }
                 throw error
             }
+            keepalive.heard()
             let data: Data
             switch message {
             case let .string(text): data = Data(text.utf8)
@@ -301,6 +327,7 @@ public final class CloudFeedSource: FeedSource {
         guard let socket, JSONSerialization.isValidJSONObject(frame), let data = try? JSONSerialization.data(withJSONObject: frame),
               let text = String(data: data, encoding: .utf8) else { return }
         socket.send(.string(text)) { _ in }
+        keepalive.heard()
     }
 }
 

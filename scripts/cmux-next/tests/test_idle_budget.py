@@ -2480,6 +2480,46 @@ class D15BudgetTests(unittest.TestCase):
         self.assertFalse(ib.periodic_excuse({"allowed_periodic": [{**rule, "metrics": ["wakeups_per_s"]}]}, "app",
                                             "wakeups_per_s", kinds["app"]))
 
+    def test_a_keepalive_allowance_excuses_its_bytes_per_period_of_the_window(self):
+        # p14-energy-121: the app's 200 bytes in a 60 s window against a 30 s keepalive's per-period bytes.
+        kinds = self.kinds(procs.parse_nettop(NETTOP), {})
+        rule = {"owner": "DeviceHubSocket.ping", "period_s": 30, "why": "keepalive", "kind": "app",
+                "metrics": ["network_bytes"], "bytes_per_period": 70}
+        budget = {**self.BUDGET, "allowed_periodic": [rule]}
+        # floor(60 / 30) + 1 = 3 periods: 210 bytes excused, 200 moved
+        self.assertEqual(ib.over_budget("light", kinds, budget, {"seconds": 60.0}), [])
+        # a shorter window touches fewer periods: 2 x 70 = 140 < 200
+        self.assertEqual(ib.over_budget("light", kinds, budget, {"seconds": 45.0}), [("app", "network_bytes", 200, 0)])
+        # an unknown window counts one period
+        self.assertEqual(ib.over_budget("light", kinds, budget), [("app", "network_bytes", 200, 0)])
+        # toward a named end it excuses only what moved there, never more than its allowance
+        for remote, over in (("17.253.4.125:443", []), ("1.1.1.1:443", [("app", "network_bytes", 200, 0)])):
+            self.assertEqual(ib.over_budget("light", kinds, {**self.BUDGET, "allowed_periodic": [{**rule, "remote": remote}]},
+                                            {"seconds": 60.0}), over, remote)
+        # allowances of several keepalives add up; a malformed one excuses nothing
+        halves = [{**rule, "bytes_per_period": 35}, {**rule, "owner": "cloud.wire.keepalive", "bytes_per_period": 35}]
+        self.assertEqual(ib.over_budget("light", kinds, {**self.BUDGET, "allowed_periodic": halves}, {"seconds": 60.0}), [])
+        for bad in ({**rule, "bytes_per_period": 0}, {**rule, "bytes_per_period": True}, {**rule, "period_s": 0}):
+            self.assertEqual(ib.periodic_allowance(bad, 60.0), 0, bad)
+        # a byte allowance never excuses a disk or log value
+        self.assertFalse(ib.periodic_excuse({"allowed_periodic": [{**rule, "metrics": ["log_lines"]}]}, "app",
+                                            "log_lines", {"log_lines": 1}, 0, 60.0))
+
+    def test_window_facts_carry_the_window_length_for_keepalive_allowances(self):
+        entry = {"assertions": [], "saver": {"observed": [None, None], "reason": None}, "result": {"seconds": 59.8}}
+        self.assertEqual(ib.window_facts(entry)["seconds"], 59.8)
+        self.assertNotIn("seconds", ib.window_facts({**entry, "result": {}}))
+
+    def test_checked_in_keepalives_have_byte_allowances_within_the_periodic_limits(self):
+        budget = ib.load_budget(ib.BUDGET_FILE)
+        rules = {rule["owner"]: rule for rule in budget["allowed_periodic"]}
+        self.assertLessEqual(len(rules), 6)
+        for owner in ("DeviceHubSocket.ping", "cloud.wire.keepalive", "presence.control.heartbeat"):
+            rule = rules[owner]
+            self.assertEqual((rule["kind"], rule["metrics"]), ("app", ["network_bytes"]), owner)
+            self.assertGreater(ib.periodic_allowance(rule, 60.0), 0, owner)
+            self.assertNotIn("remote", rule, owner)
+
     def test_a_remote_excuse_matches_the_whole_end_not_a_substring(self):
         text = NETTOP.replace("17.253.4.125:443", "11.1.1.1:443")
         kinds = self.kinds(procs.parse_nettop(text), {})

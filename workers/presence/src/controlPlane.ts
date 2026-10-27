@@ -61,6 +61,15 @@ export const CONTROL_REFRESH_INTERVAL_MS = 60_000;
  * It is a liveness signal, not an authentication or subscription deadline. */
 export const CONTROL_HEARTBEAT_TYPE = "ping" as const;
 
+/** The alarm heartbeats a socket only after the DO sent it nothing for this
+ * long (p14-energy-121). Any frame it sent (a delta, an ack retry, the last
+ * heartbeat) already showed the client and the path that the socket is alive,
+ * so the extra alarms (hint confirm, ack rungs, snapshot retry) never ping an
+ * idle client again. The longest a live socket waits for a frame is one
+ * refresh interval plus this silence, inside the client's 90 s receive
+ * timeout (IrxControlPlaneClient.receiveTimeout). */
+export const CONTROL_HEARTBEAT_SILENCE_MS = 20_000;
+
 /** A publish_hint is an ANNOUNCEMENT (phase A never writes hints to Vercel —
  * hint registration upstream is a challenge + Ed25519-signed registration flow
  * only the Mac itself can perform). The DO broadcasts the claim immediately,
@@ -809,6 +818,10 @@ export interface CtlAttachment {
    * resend the LATEST directory at nextAt, then climb the ladder. Cleared by
    * an ack covering `rev`. */
   ackRetry?: { rev: number; attempt: number; nextAt: number };
+  /** When the DO last sent this socket a frame (epoch ms); the alarm's
+   * heartbeat waits CONTROL_HEARTBEAT_SILENCE_MS after it. Absent on sockets
+   * attached before it existed, which count as silent. */
+  lastSentAt?: number;
 }
 
 // ---- Device revocation (worker HTTP route -> account DO) ----
@@ -999,7 +1012,9 @@ export class ControlPlaneCore {
         }));
       } catch {
         // The peer went away between receive and reply.
+        return;
       }
+      this.noteSent(socket, attachment);
       return;
     }
     if (isObject(body) && body.type === "pong") return;
@@ -1447,7 +1462,9 @@ export class ControlPlaneCore {
         peer.send(frameJson);
       } catch {
         // Socket already gone; hibernation cleans it up.
+        continue;
       }
+      this.noteSent(peer, peerAttachment);
     }
     await this.deps.scheduleAlarmAt(now + HINT_CONFIRM_DELAY_MS);
   }
@@ -1602,6 +1619,7 @@ export class ControlPlaneCore {
       } catch {
         continue; // Socket already gone; hibernation cleans it up.
       }
+      this.noteSent(socket, peer);
       await this.markAckPending(socket, peer, rev);
     }
     return rev;
@@ -1711,25 +1729,38 @@ export class ControlPlaneCore {
   }
 
   /** Send one lightweight application heartbeat to every live, handshaken
-   * socket. Production control sockets have no subscription deadline. */
+   * socket the DO left silent for CONTROL_HEARTBEAT_SILENCE_MS. Production
+   * control sockets have no subscription deadline. */
   private sendHeartbeat(live: CtlSocket[]): void {
+    const now = this.deps.now();
     const frame = JSON.stringify({
       v: CONTROL_PROTOCOL_VERSION,
       type: CONTROL_HEARTBEAT_TYPE,
-      payload: { at: new Date(this.deps.now()).toISOString() },
+      payload: { at: new Date(now).toISOString() },
     });
     for (const socket of live) {
       const attachment = socket.getAttachment();
       if (!attachment || !attachment.helloed
-        || (attachment.expiresAt !== undefined && attachment.expiresAt <= this.deps.now())) {
+        || (attachment.expiresAt !== undefined && attachment.expiresAt <= now)
+        || (attachment.lastSentAt !== undefined && now - attachment.lastSentAt < CONTROL_HEARTBEAT_SILENCE_MS)) {
         continue;
       }
       try {
         socket.send(frame);
       } catch {
         // Runtime close callbacks own stale socket cleanup.
+        continue;
       }
+      this.noteSent(socket, attachment);
     }
+  }
+
+  /** The DO just sent `socket` a frame: its heartbeat waits a full
+   * CONTROL_HEARTBEAT_SILENCE_MS from now. Stamps the caller's attachment
+   * object, so a later setAttachment of that object keeps the stamp. */
+  private noteSent(socket: CtlSocket, attachment: CtlAttachment): void {
+    attachment.lastSentAt = this.deps.now();
+    socket.setAttachment(attachment);
   }
 
   /** Resend the LATEST merged directory to every live socket whose retry rung
@@ -1759,6 +1790,7 @@ export class ControlPlaneCore {
         }
         try {
           socket.send(frameJson);
+          attachment.lastSentAt = now; // stored with the ladder below
         } catch {
           // Socket already gone; hibernation cleans it up.
         }
@@ -1914,7 +1946,9 @@ export class ControlPlaneCore {
           // Socket already gone; hibernation cleans it up.
         }
       }
-      if (delivered) await this.markAckPending(socket, attachment, rev);
+      if (!delivered) continue;
+      this.noteSent(socket, attachment);
+      await this.markAckPending(socket, attachment, rev);
     }
   }
 
@@ -1932,7 +1966,9 @@ export class ControlPlaneCore {
       socket.send(JSON.stringify(frame));
     } catch {
       // Socket already gone; hibernation cleans it up.
+      return;
     }
+    this.noteSent(socket, attachment);
   }
 
   private async upstreamOnceRetry(

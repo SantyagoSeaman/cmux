@@ -5,6 +5,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   BEARER_PREFIX,
+  CONTROL_HEARTBEAT_SILENCE_MS,
   CONTROL_REFRESH_INTERVAL_MS,
   CONTROL_SERVER_CAPABILITIES,
   ControlPlaneCore,
@@ -365,7 +366,8 @@ describe("hello fact streaming", () => {
     // Upstream recovers; the alarm completes the snapshot.
     harness.serveDiscovery(() => discoveryResponse(42));
     await harness.core.handleAlarm();
-    expect(socket.types()).toEqual(["hello_ack", "error", "directory", "snapshot_complete", "ping"]);
+    // The snapshot just sent shows the socket is alive: no heartbeat after it.
+    expect(socket.types()).toEqual(["hello_ack", "error", "directory", "snapshot_complete"]);
     expect(socket.frame("snapshot_complete")?.rev).toBe(42);
     expect(socket.getAttachment()?.snapshotPending).toBe(false);
   });
@@ -422,7 +424,16 @@ describe("hello fact streaming", () => {
     await harness.core.handleAlarm();
 
     expect(socket.closes).toEqual([]);
-    expect(socket.types()).toContain("ping");
+    // The unacked directory's resend is the run's frame for it; no heartbeat after it.
+    expect(socket.types()).toEqual(["directory"]);
+
+    // Acked and silent: the next run sends the heartbeat.
+    await harness.send(socket, { v: 1, type: "ack", rev: 42, payload: {} });
+    socket.clearFrames();
+    harness.now += CONTROL_REFRESH_INTERVAL_MS;
+    await harness.core.handleAlarm();
+    expect(socket.closes).toEqual([]);
+    expect(socket.types()).toEqual(["ping"]);
   });
 
   it("ignores a duplicate hello (reconnect is the resync path)", async () => {
@@ -702,7 +713,7 @@ describe("alarm-driven refresh", () => {
     await harness.core.handleAlarm();
 
     for (const socket of [first, second]) {
-      expect(socket.types()).toEqual(["hint_update", "ping"]);
+      expect(socket.types()).toEqual(["hint_update"]);
       const update = socket.frame("hint_update") as { rev: number; payload: Record<string, unknown> };
       expect(update.rev).toBe(43);
       expect(update.payload.homeRelayUrl).toBe(RELAY_2);
@@ -720,7 +731,7 @@ describe("alarm-driven refresh", () => {
     await harness.core.handleAlarm();
 
     for (const socket of [first, second]) {
-      expect(socket.types()).toEqual(["directory", "ping"]);
+      expect(socket.types()).toEqual(["directory"]);
       const directory = socket.frame("directory") as { rev: number; payload: { bindings: unknown[] } };
       expect(directory.rev).toBe(44);
       expect(directory.payload.bindings).toHaveLength(2);
@@ -731,8 +742,9 @@ describe("alarm-driven refresh", () => {
     const harness = new Harness();
     const [first, second] = await snapshottedPair(harness);
     await harness.core.handleAlarm();
-    expect(first.types()).toEqual(["ping"]);
-    expect(second.types()).toEqual(["ping"]);
+    // Their snapshots went out this instant, so no heartbeat either.
+    expect(first.types()).toEqual([]);
+    expect(second.types()).toEqual([]);
     expect(harness.discoveryCalls()).toHaveLength(1); // it did re-fetch
   });
 
@@ -771,5 +783,79 @@ describe("alarm-driven refresh", () => {
     expect(socket.closes).toHaveLength(1);
     expect(harness.map.has(`${BEARER_PREFIX}s1`)).toBe(false);
     expect(harness.alarms).toHaveLength(0); // idle account: no reschedule
+  });
+});
+
+describe("heartbeat after silence (p14-energy-121)", () => {
+  /** One helloed, acked socket whose snapshot went out at T0; frames cleared. */
+  async function quietSocket(harness: Harness): Promise<FakeSocket> {
+    harness.serveDiscovery(() => discoveryResponse(42));
+    const socket = await harness.connectLongLived("s1");
+    await harness.hello(socket, { endpointId: ENDPOINT_A, haveRev: null, wantPasses: false });
+    await harness.send(socket, { v: 1, type: "ack", rev: 42, payload: {} });
+    socket.clearFrames();
+    return socket;
+  }
+
+  function pings(socket: FakeSocket): number {
+    return socket.types().filter((type) => type === "ping").length;
+  }
+
+  it("sends no heartbeat while a frame reaches the socket every 5 s and an alarm runs every 5 s", async () => {
+    const harness = new Harness();
+    const socket = await quietSocket(harness);
+    const peer = await harness.connectLongLived("s2");
+    await harness.hello(peer, { endpointId: ENDPOINT_B, haveRev: 42, wantPasses: false });
+    for (let step = 1; step <= 12; step++) {
+      harness.now = T0 + step * 5_000;
+      // A peer's hint announcement reaches the socket, then an alarm (the hint confirm) runs.
+      await harness.send(peer, {
+        v: 1,
+        type: "publish_hint",
+        payload: { endpointId: ENDPOINT_B, homeRelayUrl: step % 2 === 0 ? RELAY_1 : RELAY_2 },
+      });
+      await harness.core.handleAlarm();
+    }
+    expect(socket.types().filter((type) => type === "hint_update")).toHaveLength(12);
+    expect(pings(socket)).toBe(0);
+  });
+
+  it("sends one heartbeat after the silence budget and none on an alarm right after it", async () => {
+    const harness = new Harness();
+    const socket = await quietSocket(harness);
+
+    harness.now = T0 + CONTROL_HEARTBEAT_SILENCE_MS - 1;
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(0);
+
+    harness.now = T0 + CONTROL_HEARTBEAT_SILENCE_MS;
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(1);
+
+    // An extra alarm (an ack rung or a hint confirm for another socket) 5 s later pings nobody again.
+    harness.now += 5_000;
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(1);
+
+    // The steady cadence: one heartbeat per refresh interval while nothing else is sent.
+    harness.now += CONTROL_REFRESH_INTERVAL_MS;
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(2);
+    expect(socket.getAttachment()?.lastSentAt).toBe(harness.now);
+  });
+
+  it("keeps the longest silence of a live socket inside the client's 90 s receive timeout", () => {
+    expect(CONTROL_REFRESH_INTERVAL_MS + CONTROL_HEARTBEAT_SILENCE_MS).toBeLessThan(90_000);
+  });
+
+  it("treats a socket attached before the stamp existed as silent", async () => {
+    const harness = new Harness();
+    const socket = await quietSocket(harness);
+    const attachment = socket.getAttachment();
+    if (attachment === null) throw new Error("no attachment");
+    delete attachment.lastSentAt;
+    socket.setAttachment(attachment);
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(1);
   });
 });
