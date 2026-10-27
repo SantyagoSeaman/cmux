@@ -27,7 +27,7 @@ enum HandshakeLines {
     /// tells whether frames were granted, from which schema, and for which methods (``WireNegotiation``).
     static func send(_ transport: LineTransport, configuration: DaemonConnectionConfiguration,
                      logger: Logger) async -> Replies {
-        let negotiation = WireNegotiation(upgrades: configuration.wireUpgrades, bridged: transport.bridged)
+        let negotiation = WireNegotiation(upgrades: configuration.wireUpgrades, carrier: transport.carrier)
         let subscribe = PipelinedLine(SubscribeRequest(treeEvents: configuration.treeEvents))
         guard let hello = configuration.clientHello else {
             var lines = await transport.pipeline([PipelinedLine(IdentifyRequest()),

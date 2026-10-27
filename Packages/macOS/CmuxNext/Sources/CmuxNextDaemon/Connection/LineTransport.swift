@@ -62,6 +62,8 @@ final class LineTransport: Sendable {
     /// The bridge child of this connection (``DaemonBridge``), killed and
     /// reaped when the connection closes.
     private let child: BridgeChild?
+    /// What carries the connection's bytes: the socket, or the bridge child (``DaemonBridge/Opened/carrier``).
+    let carrier: WireCarrier
     /// Why this connection exists, for ``recorder``.
     let role: DaemonWireStats.Role
     /// Where this connection's traffic is counted (lock-free; the reader thread records too); nil
@@ -104,9 +106,11 @@ final class LineTransport: Sendable {
         if let opened {
             fd = opened.fd
             child = opened.child
+            carrier = opened.carrier
         } else {
             fd = try Self.connect(path)
             child = nil
+            carrier = .direct
         }
         Self.sizeBuffers(fd)
         socket = Mutex(Socket(fd: fd), rank: .daemonLineTransportSocket)
@@ -156,8 +160,6 @@ final class LineTransport: Sendable {
     }
 
     var isClosed: Bool { state.withLock { $0.closed != nil } }
-    /// The connection runs through a bridge child (``DaemonBridge``), which carries bytes but no descriptors.
-    var bridged: Bool { child != nil }
     /// The writer queue's class (``DaemonWireStats/Role/writerQoS``; tests).
     var writerQoS: DispatchQoS { writer.queueQoS }
     /// How long since the daemon last sent anything (a reply, an event, a stream line); from the open until its first.

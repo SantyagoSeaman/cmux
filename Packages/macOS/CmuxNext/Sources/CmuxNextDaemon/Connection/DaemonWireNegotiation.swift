@@ -3,10 +3,10 @@ import CmuxNextIPC
 /// The app's half of the framed IPC grant rule (cmux-tui capabilities.rs, `IpcCapability::allowed`).
 ///
 /// The daemon offers in `identify` what the connection may be granted, and grants what the client echoes in
-/// `set-client-info`. Frames need a direct local peer at exactly the daemon's API revision, because their
-/// payloads skip the daemon's revision translation; streams are JSON lines, so a bridge carries them at any
-/// revision. Mojo binds an interface only on a channel that can carry it and assumes both ends of an
-/// unversioned interface come from one build (mojo/core/channel_posix.cc;
+/// `set-client-info`. Frames need the daemon's exact API revision, because their payloads skip the daemon's
+/// revision translation, and a carrier that passes them (``WireCarrier``); streams are JSON lines, so a bridge
+/// carries them at any revision. Mojo binds an interface only on a channel that can carry it and assumes both
+/// ends of an unversioned interface come from one build (mojo/core/channel_posix.cc;
 /// mojo/public/tools/bindings/README.md, "Versioning").
 ///
 /// An equal API revision does not prove equal method tables: a new command is additive and takes no new
@@ -26,9 +26,9 @@ struct WireNegotiation {
     static let apiRevision: UInt32 = 12
 
     let upgrades: DaemonWireUpgrades
-    /// The connection runs through a byte bridge (`cmux link dial`, a relay): the daemon may see the bridge as
-    /// a direct peer, so only the client knows frames cannot pass and never asks for them.
-    let bridged: Bool
+    /// What carries the connection's bytes. The daemon may see a bridge as a direct peer, so only the client
+    /// knows whether frames pass and never asks for them where they cannot.
+    let carrier: WireCarrier
 
     /// `digest` as the daemon writes `sdk_schema_digest`: 16 lowercase hex digits (frame_dispatch.rs).
     static func digestText(_ digest: UInt64) -> String {
@@ -39,7 +39,7 @@ struct WireNegotiation {
     /// What to echo to a daemon whose first `identify` offered `offered`; nil when nothing is offered or asked,
     /// so the handshake stays what it was (an older daemon refuses `revisions` and `api_revision`).
     func echo(offered identity: DaemonIdentity) -> Echo? {
-        let frames = bridged || !identity.supports(Self.framesCapability) ? nil : upgrades.frames
+        let frames = carrier.carriesFrames && identity.supports(Self.framesCapability) ? upgrades.frames : nil
         let streams = upgrades.streams && identity.supports(Self.streamsCapability)
         guard frames != nil || streams else { return nil }
         return Echo(frames: frames, streams: streams)
@@ -86,6 +86,35 @@ struct WireNegotiation {
                   daemon.sdkSchemaDigest == WireNegotiation.digestText(schema.identity.sdkSchemaDigest),
                   let served = daemon.framedMethods, !served.isEmpty else { return nil }
             return FramedRequests(table: schema.table, served: Set(served.map { MethodID(rawValue: $0) }))
+        }
+    }
+}
+
+/// What carries one connection's bytes to the daemon, as the dialing client knows it (cmux-tui/spec/transports.md,
+/// "Framed IPC grants").
+enum WireCarrier: Sendable, Equatable {
+    /// The app's own Unix socket to the daemon.
+    case direct
+    /// A bridge child (``DaemonBridge``). Frames cross it only when its dial line named
+    /// ``DaemonBridge/framesFeature``; an older bridge cuts JSON lines only, so it keeps the connection on lines.
+    /// No descriptor (SCM_RIGHTS) or shared memory crosses any bridge, so the output ring and shared buffers
+    /// never do, as a Mojo channel passes platform handles only where its endpoint can carry them
+    /// (mojo/core/channel_posix.cc).
+    case bridge(carriesFrames: Bool)
+
+    /// Whether cmux-ipc frames reach the daemon unchanged.
+    var carriesFrames: Bool {
+        switch self {
+        case .direct: true
+        case .bridge(let carriesFrames): carriesFrames
+        }
+    }
+
+    /// How the handshake's log names it.
+    var logName: String {
+        switch self {
+        case .direct: "socket"
+        case .bridge(let carriesFrames): carriesFrames ? "bridge with frames" : "bridge, lines only"
         }
     }
 }

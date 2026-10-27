@@ -36,11 +36,16 @@ public struct DaemonBridge: Hashable, Sendable {
 
     static let replyTimeoutMs: Int32 = 10_000
     static let maxReplyBytes = 1024
+    /// The dial line's `features` entry of a bridge that passes cmux-ipc frames through by header next to JSON
+    /// lines (cmux-tui/spec/remote-daemon.md, `bridge-frames-v1`).
+    static let framesFeature = "bridge-frames-v1"
 
-    /// An opened bridge: the descriptor of the connected stream and the child that carries it.
+    /// An opened bridge: the descriptor of the connected stream, the child that carries it, and what its dial
+    /// line said it passes (frames only with ``framesFeature``; never a descriptor or shared memory).
     struct Opened: Sendable {
         let fd: Int32
         let child: BridgeChild
+        var carrier = WireCarrier.bridge(carriesFrames: false)
     }
 
     /// A spawned bridge whose dial line is not read yet.
@@ -60,8 +65,9 @@ public struct DaemonBridge: Hashable, Sendable {
         return try await withOnceContinuation(failingWith: { _ in dropped }) { (continuation: OnceContinuation<Opened, DaemonError>) in
             dial.async {
                 do throws(DaemonError) {
-                    try DaemonBridge.check(try Self.readLine(spawned.stderr))
-                    continuation.resume(returning: spawned.opened)
+                    var opened = spawned.opened
+                    opened.carrier = try DaemonBridge.check(try Self.readLine(spawned.stderr))
+                    continuation.resume(returning: opened)
                 } catch {
                     spawned.opened.child.terminate()
                     Darwin.close(spawned.opened.fd)
@@ -145,12 +151,16 @@ public struct DaemonBridge: Hashable, Sendable {
         throw .endpointBlocked("the link dial's answer is too long")
     }
 
-    /// The dial line: `"ok": true` passes; a refusal names its `error_code`.
-    static func check(_ reply: Data) throws(DaemonError) {
+    /// The dial line: `"ok": true` passes, and its `features` say what the bridge carries; a refusal names its
+    /// `error_code`.
+    static func check(_ reply: Data) throws(DaemonError) -> WireCarrier {
         let object = (try? JSONSerialization.jsonObject(with: reply)) as? [String: Any]
         guard let object else { throw .endpointBlocked("the link dial's answer is not JSON") }
-        if object["ok"] as? Bool == true { return }
-        throw .endpointBlocked("the link refused the dial: \(object["error_code"] as? String ?? "refused")")
+        guard object["ok"] as? Bool == true else {
+            throw .endpointBlocked("the link refused the dial: \(object["error_code"] as? String ?? "refused")")
+        }
+        let features = object["features"] as? [String] ?? []
+        return .bridge(carriesFrames: features.contains(framesFeature))
     }
 }
 

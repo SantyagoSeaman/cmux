@@ -522,8 +522,12 @@ platform handles pass only on a channel that can carry them
 (`mojo/core/channel_posix.cc`), and unversioned interfaces assume that both
 ends come from one build. A bridge that the daemon does not identify reaches
 it as a direct peer. The dialing client knows about the bridge, so it echoes
-only `attach-streams-v1` until the bridge can carry frames
-(`bridge-frames-v1`, p05-ipc-161).
+`ipc-frames-v2` through a bridge only when the bridge's dial line lists
+`bridge-frames-v1` in `features` (`{"ok":true,"features":["bridge-frames-v1"]}`,
+p05-ipc-161). A bridge that does not list it cuts JSON lines only, so the
+client echoes only `attach-streams-v1` through it. A client never echoes
+`terminal-output-ring-v1` through a bridge and never sends a `SHARED_BUFFER`
+through one.
 
 Each `set-client-info` first removes every grant that the connection's
 current state does not allow, for example after an `api_revision` other

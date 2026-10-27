@@ -30,7 +30,7 @@ struct DaemonHandshake {
         transport.adopt(granted)
         if configuration.wireUpgrades.asksAny {
             let grants = granted.grants, framed = granted.framing?.served.count ?? 0
-            logger.info("daemon wire grants: frames \(grants.frames, privacy: .public) (\(framed, privacy: .public) methods), streams \(grants.streams, privacy: .public)")
+            logger.info("daemon wire grants over \(transport.carrier.logName, privacy: .public): frames \(grants.frames, privacy: .public) (\(framed, privacy: .public) methods), streams \(grants.streams, privacy: .public)")
         }
         return (identity, handshake.userOriginAllowed)
     }
