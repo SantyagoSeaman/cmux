@@ -148,6 +148,9 @@ final class TabContentCache {
     /// Tabs whose deferred page waits for the launch order (`deferredPage`), not for the person, with the tab
     /// node that starts it when it shows: held here, as `node(for:)` holds nodes weakly.
     var launchDeferredNodes: [String: VisibilityNode] = [:]
+    /// Starts the launch's restored pages a few at a time, focus first, the hidden ones only once they show
+    /// (feature `restoredPageLoader`, p08-startup-090); nil: each starts by ``CEFLaunchDeferral`` alone.
+    var restoredPages: RestoredPageLoader?
     /// The launch read every browser tab's page waits for before an engine makes it (the browser
     /// profiles, p08-startup-028); nil: none.
     var enginesAwait: LaunchReadEvent?
@@ -453,6 +456,7 @@ final class TabContentCache {
                                  history: incognito?.history ?? history(for: page.profileID), mainWork: mainWork, node: node(for: key))
         pageRequests.routeOmnibarOpens(of: entry.chrome, page: page)
         mount(entry, as: key)
+        trackRestoredLoad(page, key: key)
         return entry
     }
 
@@ -535,6 +539,7 @@ final class TabContentCache {
         if let owner = ledger.remove(key), displacing { presenters[owner]?.value?.surfaceWasDisplaced(key) }
         applyLifecycle(lifecycle.send(.removed(key)))
         pendingMounts[key] = nil; framedStandIns.remove(key); pendingBrowsers.remove(key); awaitingRead.remove(key); launchDeferredNodes[key] = nil
+        restoredPages?.forget(key)
         hibernation?.forget(key); pageLifecycle?.remove(key)
         agentMarks.forget(key)
         pageRequests.services?.remoteViewPages.forget(key)

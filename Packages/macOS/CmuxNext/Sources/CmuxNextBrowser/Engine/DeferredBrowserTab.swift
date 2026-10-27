@@ -20,6 +20,9 @@ public final class DeferredBrowserTab: BrowserTab {
     @ObservationIgnored public weak var keyRouter: (any BrowserKeyRouting)?
     /// Called once, with the URL to open, when the user asks for the page.
     @ObservationIgnored public var onStart: ((URL?) -> Void)?
+    /// Called each time the page takes the keyboard focus (the person clicked its pane): a launch's restored page
+    /// waiting for its turn starts at its next one (`RestoredPageLoader.promote`).
+    @ObservationIgnored public var onFocus: (() -> Void)?
     @ObservationIgnored public let contentView: NSView = NSView()
     @ObservationIgnored private var started = false
 
@@ -41,7 +44,9 @@ public final class DeferredBrowserTab: BrowserTab {
     public func goBack() {}
     public func goForward() {}
     public func stop() {}
-    public func setFocused(_ focused: Bool) {}
+    public func setFocused(_ focused: Bool) {
+        if focused, !started { onFocus?() }
+    }
     public func setContentVisible(_ visible: Bool) {}
     public func snapshot() async throws -> CGImage { throw BrowserTabError.snapshotUnavailable }
     public func evaluate(_ script: String, world: BrowserScriptWorld, gesture: BrowserScriptGesture) async throws -> BrowserJSValue {

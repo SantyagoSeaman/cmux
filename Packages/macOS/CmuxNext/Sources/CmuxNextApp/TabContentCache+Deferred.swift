@@ -1,11 +1,14 @@
 import CmuxNextBrowser
 import Foundation
 import CmuxNextDaemon
+import CmuxNextLaunch
 
 /// Restored pages that load nothing until they are started: after two quick unexpected ends in a row
 /// (`defersRestoredPages`), and, while the app launches, those that do not show (p08-startup-040: Chrome's
 /// session restore loads the visible tab first, chrome/browser/sessions/tab_loader.cc; the order is the
-/// Chromium slot's ``CEFLaunchDeferral``, one deferral path, this one).
+/// Chromium slot's ``CEFLaunchDeferral``, one deferral path, this one). With ``restoredPages`` (feature
+/// `restoredPageLoader`, p08-startup-090) every page the launch restored waits here for its turn in that loader,
+/// Chrome's `TabLoader`: the ones that show a few at a time, focus first, the hidden ones only once they show.
 extension TabContentCache {
     /// The deferred page `tab` shows now, nil when its page is made now. `origin` is ``launchOrigin(of:)`` read in
     /// the same turn, which the page made now gets too: a page whose start was not deferred never waits for
@@ -13,6 +16,9 @@ extension TabContentCache {
     func deferredPage(_ tab: TabModel, url: URL?, origin: BrowserTabOrigin) -> BrowserEntry? {
         let key = tab.id
         if defersRestoredPages, !startedDeferred.contains(key), !browserTabs.wasOpenedHere(tab) { return deferred(tab, url: url) }
+        if let loader = restoredPages, origin == .restoreVisible || origin == .restoreHidden, !startedDeferred.contains(key) {
+            return waitForTurn(tab, url: url, in: loader)
+        }
         guard origin == .restoreHidden else { return nil }
         let entry = deferred(tab, url: url, notice: nil), page = entry.tab, tabNode = node(for: key)
         launchDeferredNodes[key] = tabNode  // its start when it shows lives with the node
@@ -20,6 +26,26 @@ extension TabContentCache {
             if let page, self?.existingBrowser(key)?.tab === page { page.reload() }
         }
         return entry
+    }
+
+    /// Restored tab `tab` shows its deferred page (no notice) until `loader` gives it its turn; the person
+    /// focusing it, a reload or a command starts it sooner. The page made then gets its origin again, as a started one.
+    private func waitForTurn(_ tab: TabModel, url: URL?, in loader: RestoredPageLoader) -> BrowserEntry {
+        let key = tab.id
+        let entry = deferred(tab, url: url, notice: nil), tabNode = node(for: key)
+        launchDeferredNodes[key] = tabNode  // the loader holds it weakly
+        guard let page = entry.tab as? DeferredBrowserTab else { return entry }
+        page.onFocus = { [weak loader] in loader?.promote(key) }
+        loader.enqueue(key, node: tabNode) { [weak self, weak page] in
+            if let page, self?.existingBrowser(key)?.tab === page { page.reload() }
+        }
+        return entry
+    }
+
+    /// Tab `key`'s live page `page` frees its slot in ``restoredPages`` at its first content frame (or its timeout).
+    func trackRestoredLoad(_ page: any BrowserTab, key: String) {
+        guard let restoredPages, !(page is DeferredBrowserTab), let reporting = page as? any BrowserFirstContentFrameReporting else { return }
+        restoredPages.track(key) { reporting.whenFirstContentFrame($0) }
     }
 
     /// The origin of a page `browser(for:)` makes now for `tab`: ``pageOrigin(of:)`` for a Chromium tab, else `.user`.
@@ -56,6 +82,7 @@ extension TabContentCache {
 
     func startDeferred(_ key: String, url: URL?) {
         startedDeferred.insert(key)
+        restoredPages?.didStart(key)  // its turn, the person's reload or a command: it holds a slot until its first content
         launchDeferredNodes[key] = nil
         browsers.removeValue(forKey: key)?.close()
         guard let tab = browserTabs.tabModel(key) else { return }

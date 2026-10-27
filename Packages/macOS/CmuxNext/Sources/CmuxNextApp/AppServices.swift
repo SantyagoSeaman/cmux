@@ -780,6 +780,19 @@ final class AppServices {
         }
         cache.machineBadge = { [weak self] key, url in self?.browserMachineBadge(key: key, url: url) }
         cache.defersRestoredPages = crashRecovery.recovery.skipsBrowserPages; crashRecovery.armSurvivalWindow(on: mainDeadlines)
+        if self.features.isEnabled(.restoredPageLoader), self.features.isEnabled(.cefLaunchOrigin) {  // Chrome's TabLoader (p08-startup-090)
+            cache.restoredPages = RestoredPageLoader(cores: ProcessInfo.processInfo.activeProcessorCount, pressure: memoryCoordinator,
+                                                     focus: { [weak self] key -> RestoredPageLoader.Focus in  // a window's shown focus is on the tab
+                                                         guard let window = self?.windows.controllers.first(where: {
+                                                             NotificationCenterService.shownFocus($0).flatMap(NotificationCenterService.contentTab) == key
+                                                         }) else { return .unfocused }
+                                                         return window.focus.state.windowKey ? .keyWindow : .window
+                                                     },
+                                                     post: { AfterFrameCommit().run($0) },
+                                                     makeTimer: { [mainDeadlines] in
+                                                         MainDeadline(owner: "RestoredPageLoader.next", workClass: .visible, scheduler: mainDeadlines)
+                                                     })
+        }
         cache.useLaunchPictures(environment.browserLaunchPictures, enabled: self.features.isEnabled(.browserLaunchPictures), deadlines: mainDeadlines)
         cache.browserTabs.isIncognitoTab = { [weak self] key in
             guard let self, let workspace = workspaceID(ofTab: key) else { return false }

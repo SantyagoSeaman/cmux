@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "restoredPageLoader",
+  "owner": "Performance Lead",
+  "description": "With cefLaunchOrigin on, restored browser pages load like Chrome's TabLoader: focused first, then the shown ones, one per 2 cores (max 4, 1 under memory pressure), the next at first paint or 3 s; hidden pages wait until shown; a clicked page starts at once.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "app",
+  "params": [],
+  "stories": ["launch-cold", "launch-cold-realistic", "launch-warm"],
+  "sticky": false,
+  "runtimeMutable": false
+}
