@@ -64,7 +64,7 @@ fn lane_writer_pops_do_not_allocate() {
     writer.push_control(big_reply.unwrap()).unwrap();
     // A coalesced frame takes the queued one's place through `replace`; it
     // must be made shareable there too.
-    let key = CoalesceKey(1);
+    let key = CoalesceKey::new(0xC00B, 1);
     let event = |fill: u8| {
         Frame::new(FrameKind::TypedEvent, 0, reply, Bytes::from(vec![fill; 1 << 20])).unwrap()
     };

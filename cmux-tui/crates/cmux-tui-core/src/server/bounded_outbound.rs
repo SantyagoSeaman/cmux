@@ -40,6 +40,7 @@ use super::attach_streams::AttachStreamError;
 use super::attach_streams::ClientStreamId;
 use super::attach_streams::ClientStreams;
 use crate::panic_free::RecoverPoison;
+use cmux_ipc::CoalesceKey;
 use cmux_ipc::FrameHeader;
 use cmux_ipc::lane_writer::BULK_FRAME_MAX;
 use cmux_threads::checked::sync as waits;
@@ -233,6 +234,61 @@ impl BoundedOutbound {
         drop(state);
         self.changed.notify_all();
         result
+    }
+
+    /// Queues the line `text` on `stream`, replacing in place the unsent line
+    /// it queued with `key` when only keyed lines were queued after that one
+    /// (cmux_ipc::LaneWriter's coalescing, p05-ipc-141): the stream's item
+    /// count stays, so a peer that stopped reading holds the newest state and
+    /// the stream does not overflow. A replacement that does not fit the byte
+    /// budgets, or a key with nothing to replace, queues as `push_regular`.
+    pub(super) fn push_regular_coalescing(
+        &self,
+        text: Arc<BudgetedText>,
+        stream: &OutboundStream,
+        key: CoalesceKey,
+    ) -> std::io::Result<()> {
+        let mut state = self.state.lock().recover_poison();
+        let replaced = !state.closed
+            && stream.is_open()
+            && Self::replace_locked(&mut state, &text, stream, key);
+        let result = if replaced {
+            Ok(())
+        } else {
+            let message = RegularOutbound::coalescing_line(text, stream, key);
+            Self::push_regular_locked(&mut state, message, false)
+        };
+        drop(state);
+        self.changed.notify_all();
+        result
+    }
+
+    /// Puts `text` in place of `stream`'s unsent line with `key` if the byte
+    /// budgets take the difference; false when there is none or it does not fit.
+    fn replace_locked(
+        state: &mut BoundedOutboundState,
+        text: &Arc<BudgetedText>,
+        stream: &OutboundStream,
+        key: CoalesceKey,
+    ) -> bool {
+        let stream_bytes = state.stream_usage.get(&stream.id).map_or(0, |usage| usage.bytes);
+        let regular_bytes = state.regular_bytes;
+        let Some(slot) = state.coalescing_slot(stream, key) else {
+            return false;
+        };
+        let (old, new) = (slot.text.len(), text.len());
+        let fits = |used: usize, max: usize| used.saturating_sub(old).saturating_add(new) <= max;
+        if !fits(stream_bytes, OUTBOUND_BYTE_CAPACITY)
+            || !fits(regular_bytes, OUTBOUND_CONNECTION_BYTE_CAPACITY)
+        {
+            return false;
+        }
+        slot.text = text.clone();
+        state.regular_bytes = regular_bytes.saturating_sub(old).saturating_add(new);
+        if let Some(usage) = state.stream_usage.get_mut(&stream.id) {
+            usage.bytes = usage.bytes.saturating_sub(old).saturating_add(new);
+        }
+        true
     }
 
     pub(super) fn push_regular_backpressured(

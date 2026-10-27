@@ -13,6 +13,7 @@ use super::super::attach_streams::ClientStreamId;
 use super::BoundedOutbound;
 use crate::panic_free::RecoverPoison;
 use crate::platform::transport;
+use cmux_ipc::CoalesceKey;
 use cmux_ipc::FrameHeader;
 use cmux_threads::sync::Mutex;
 use std::collections::VecDeque;
@@ -225,6 +226,15 @@ impl MessageSink for QueuedSink {
         stream: &OutboundStream,
     ) -> std::io::Result<()> {
         self.outbound.push_regular_backpressured(text, stream)
+    }
+
+    fn send_stream_coalescing(
+        &self,
+        text: Arc<BudgetedText>,
+        stream: &OutboundStream,
+        key: CoalesceKey,
+    ) -> std::io::Result<()> {
+        self.outbound.push_regular_coalescing(text, stream, key)
     }
 
     fn send_control(&self, text: Arc<BudgetedText>) -> std::io::Result<()> {

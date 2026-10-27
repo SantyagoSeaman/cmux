@@ -425,3 +425,63 @@ fn frame_cut_run(chunk: usize, rounds: usize) -> (Vec<f64>, f64) {
     delays.sort_by(f64::total_cmp);
     (delays, (rounds * SNAPSHOT_BYTES) as f64 / (1 << 20) as f64 / elapsed)
 }
+
+fn size_state(surface: u64, generation: u64) -> serde_json::Value {
+    json!({"event": "size-state", "surface": surface, "state": {"generation": generation}})
+}
+
+/// Every queued item's text, in write order.
+fn drain_texts(outbound: &BoundedOutbound) -> Vec<String> {
+    std::iter::from_fn(|| outbound.try_pop()).collect()
+}
+
+#[test]
+fn bounded_outbound_coalesce_1000_size_states_behind_a_blocked_socket_send_1() {
+    let outbound = Arc::new(BoundedOutbound::default());
+    let writer = MessageWriter::new(QueuedSink { outbound: outbound.clone(), control: None });
+    let overflow = json!({"event": "overflow"});
+    let lane_stream = writer.start_stream(&overflow).unwrap();
+    let control_stream = writer.start_control_stream(&overflow).unwrap();
+    // Nothing pops: the peer stopped reading while the sizing state changed.
+    for generation in 0..1000 {
+        for stream in [&lane_stream, &control_stream] {
+            writer.send_event_coalesced(&size_state(7, generation), stream).unwrap();
+            writer.send_event_coalesced(&size_state(8, generation), stream).unwrap();
+        }
+    }
+    assert_eq!(outbound.queued_stream_items(), 4, "one state per surface and stream");
+    let texts = drain_texts(&outbound);
+    assert_eq!(texts.len(), 4);
+    for (text, surface) in texts.iter().zip([7, 8, 7, 8]) {
+        let event: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(event["surface"], surface, "{text}");
+        assert_eq!(event["state"]["generation"], 999, "the newest state is sent: {text}");
+    }
+}
+
+#[test]
+fn bounded_outbound_coalesce_keeps_order_with_unkeyed_items() {
+    let outbound = Arc::new(BoundedOutbound::default());
+    let writer = MessageWriter::new(QueuedSink { outbound: outbound.clone(), control: None });
+    let stream = writer.start_stream(&json!({"event": "overflow"})).unwrap();
+    let title = |n: u64| json!({"event": "title-changed", "surface": 7, "title": n.to_string()});
+    writer.send_event_coalesced(&size_state(7, 1), &stream).unwrap();
+    writer.send_event_coalesced(&size_state(7, 2), &stream).unwrap();
+    // An event the schema does not coalesce is queued as is, and a newer
+    // state never passes it.
+    writer.send_event_coalesced(&title(1), &stream).unwrap();
+    writer.send_event_coalesced(&title(2), &stream).unwrap();
+    writer.send_event_coalesced(&size_state(7, 3), &stream).unwrap();
+    writer.send_event_coalesced(&size_state(7, 4), &stream).unwrap();
+    let order: Vec<String> = drain_texts(&outbound)
+        .iter()
+        .map(|text| {
+            let event: serde_json::Value = serde_json::from_str(text).unwrap();
+            match event["event"].as_str() {
+                Some("size-state") => format!("size {}", event["state"]["generation"]),
+                _ => format!("title {}", event["title"].as_str().unwrap()),
+            }
+        })
+        .collect();
+    assert_eq!(order, ["size 2", "title 1", "title 2", "size 4"]);
+}

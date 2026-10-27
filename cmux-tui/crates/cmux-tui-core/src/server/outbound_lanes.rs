@@ -29,7 +29,8 @@ use super::OutboundStream;
 use super::SpaceWoken;
 use cmux_ipc::lane_writer::{BULK_FRAME_MAX, STARVATION_BOUND, STREAM_CREDIT};
 use cmux_ipc::{
-    Aux, BadMessage, CallFlags, FrameHeader, FrameKind, Lane, MAX_FRAME_PAYLOAD, StreamLane,
+    Aux, BadMessage, CallFlags, CoalesceKey, FrameHeader, FrameKind, Lane, MAX_FRAME_PAYLOAD,
+    StreamLane,
 };
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -64,11 +65,30 @@ pub(in crate::server) struct RegularOutbound {
     pub(super) frame: Option<FrameHeader>,
     /// Payload bytes already written as chunks.
     sent: usize,
+    /// A queued line a newer one with this key replaces (p05-ipc-141).
+    pub(super) coalesce: Option<CoalesceKey>,
 }
 
 impl RegularOutbound {
     pub(super) fn line(text: Arc<BudgetedText>, stream: &OutboundStream) -> Self {
-        Self { text, stream: stream.clone(), frame: None, sent: 0 }
+        Self { text, stream: stream.clone(), frame: None, sent: 0, coalesce: None }
+    }
+
+    /// A line that a newer one with `key` replaces while it is unsent.
+    pub(super) fn coalescing_line(
+        text: Arc<BudgetedText>,
+        stream: &OutboundStream,
+        key: CoalesceKey,
+    ) -> Self {
+        Self { coalesce: Some(key), ..Self::line(text, stream) }
+    }
+
+    /// Whether a coalescing push of `key` on `stream` may pass this queued
+    /// item (`Some(false)`), replaces it (`Some(true)`), or stops (`None`): a
+    /// merge passes only unsent keyed lines, as `cmux_ipc::LaneWriter` does.
+    fn coalesces_with(&self, stream: u64, key: CoalesceKey) -> Option<bool> {
+        let queued = self.coalesce?;
+        Some(queued == key && self.stream.id == stream)
     }
 
     pub(super) fn frame(
@@ -269,6 +289,18 @@ impl StreamLanes {
         lane_was_empty.then_some(lane.lane())
     }
 
+    /// The unsent line of `stream` queued with `key` among the keyed lines at
+    /// the tail of its FIFO.
+    fn coalescing_slot(&mut self, stream: u64, key: CoalesceKey) -> Option<&mut RegularOutbound> {
+        let fifo = self.streams.get_mut(&stream)?;
+        for message in fifo.iter_mut().rev() {
+            if message.coalesces_with(stream, key)? {
+                return Some(message);
+            }
+        }
+        None
+    }
+
     /// Drops what `stream` has queued.
     pub(super) fn purge(&mut self, stream: u64, lane: StreamLane) {
         self.streams.remove(&stream);
@@ -436,6 +468,25 @@ impl BoundedOutboundState {
         } else if let Some(lane) = self.lanes.push(message) {
             self.turns.became_ready(lane);
         }
+    }
+
+    /// The unsent line `stream` queued with `key` that a newer one replaces:
+    /// in the control FIFO for a control-sequence stream, else in its lane.
+    pub(super) fn coalescing_slot(
+        &mut self,
+        stream: &OutboundStream,
+        key: CoalesceKey,
+    ) -> Option<&mut RegularOutbound> {
+        if !stream.control_sequence {
+            return self.lanes.coalescing_slot(stream.id, key);
+        }
+        for item in self.control.iter_mut().rev() {
+            let ControlOutbound::Stream(message) = item else { return None };
+            if message.coalesces_with(stream.id, key)? {
+                return Some(message);
+            }
+        }
+        None
     }
 
     pub(super) fn enqueue_control(&mut self, item: ControlOutbound) {

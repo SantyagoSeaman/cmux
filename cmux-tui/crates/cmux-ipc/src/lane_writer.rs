@@ -58,18 +58,27 @@
 //! `LaneError::Overflow`, and the owner closes the connection. Input and
 //! control frames are never dropped.
 //!
-//! Coalescing (task 141) hooks in through the `*_coalescing` pushes: when the
-//! unsent tail of the FIFO has the same `CoalesceKey`, it is replaced by what
-//! the caller's merge returns, as Blink coalesces continuous input only into
-//! the last queued event
-//! (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc).
-//! A frame queued in between stops the merge, so coalescing never moves
-//! content past an item pushed before it.
+//! Producer-side coalescing (task 141) goes through the `*_coalescing` pushes.
+//! A coalescing push walks back from the FIFO's tail over its unsent keyed
+//! items: the first with the same `CoalesceKey` is replaced, in place, by what
+//! the caller's merge returns (the newer frame, with the schema's additive
+//! fields summed); an item without a key, or one partly written, stops the
+//! walk, and the frame joins the back. This is Blink's
+//! `MainThreadEventQueueTaskList::Enqueue`
+//! (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc),
+//! which walks back over tasks that let a new event pass and coalesces it into
+//! the first that can take it. Keyed items carry replaceable state (a size
+//! state, a resize, a scroll delta) and items of different keys are
+//! independent, so a merge may pass them; it never passes an unkeyed item, so
+//! the order of every unkeyed item and the keyed items around it is kept.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
-use crate::frame::{Aux, BadMessage, CallFlags, Frame, FrameKind, HEADER_LEN, PriorityHint};
+use crate::frame::{BadMessage, Frame, PriorityHint};
+
+mod fifo;
+use fifo::{Fifo, Queued, frame_cost};
 
 /// Default chunk size: the preemption boundary for long payloads. The
 /// daemon's outbound writer picks its value from the 16/32/64 KiB bench
@@ -84,9 +93,6 @@ pub const STARVATION_BOUND: u32 = 8;
 
 /// Default byte bound of everything queued: four maximal frames.
 pub const MAX_QUEUED_BYTES: usize = 4 * crate::frame::MAX_FRAME_PAYLOAD as usize;
-
-/// A freed FIFO keeps no more than this many slots of capacity.
-const IDLE_CAPACITY: usize = 16;
 
 /// An outbound lane, highest priority first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -161,10 +167,21 @@ impl Default for LaneWriterConfig {
     }
 }
 
-/// Identifies frames that replace each other while unsent: the producer
-/// derives it from the method or event id and the schema `coalesce` key.
+/// Identifies frames that replace each other while unsent: the method or
+/// event id, and the value of the schema `coalesce` key fields (a surface id).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CoalesceKey(pub u64);
+pub struct CoalesceKey {
+    /// The method or event id (`family << 8 | ordinal`).
+    pub id: u16,
+    /// What the key fields name, for example the surface.
+    pub target: u64,
+}
+
+impl CoalesceKey {
+    pub const fn new(id: u16, target: u64) -> CoalesceKey {
+        CoalesceKey { id, target }
+    }
+}
 
 /// What a successful push did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,180 +256,6 @@ impl fmt::Display for LaneError {
 }
 
 impl std::error::Error for LaneError {}
-
-/// A queued frame and how much of its payload has been written.
-#[derive(Debug)]
-struct Queued {
-    frame: Frame,
-    sent: usize,
-    key: Option<CoalesceKey>,
-}
-
-impl Queued {
-    fn cost(&self) -> usize {
-        HEADER_LEN.saturating_add(self.frame.payload().len().saturating_sub(self.sent))
-    }
-}
-
-/// The cost of a frame not yet queued.
-fn frame_cost(frame: &Frame) -> usize {
-    HEADER_LEN.saturating_add(frame.payload().len())
-}
-
-/// One FIFO: the control sequence or one stream.
-#[derive(Debug, Default)]
-struct Fifo {
-    items: VecDeque<Queued>,
-    bytes: usize,
-}
-
-/// Makes a payload that `pop` will chunk shareable now: the first slice of a
-/// Vec-backed payload allocates, and doing it at push keeps it out of `pop`.
-fn prepare_chunks(frame: &Frame, chunk_bytes: usize) {
-    if frame.payload().len() > chunk_bytes && chunk_rule(frame.header().kind()).is_some() {
-        drop(frame.payload().clone());
-    }
-}
-
-impl Fifo {
-    fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    fn push(&mut self, frame: Frame, key: Option<CoalesceKey>, chunk_bytes: usize) {
-        prepare_chunks(&frame, chunk_bytes);
-        let item = Queued { frame, sent: 0, key };
-        self.bytes = self.bytes.saturating_add(item.cost());
-        self.items.push_back(item);
-    }
-
-    /// The index of the tail item when it is unsent and has `key`.
-    fn coalesce_index(&self, key: CoalesceKey) -> Option<usize> {
-        let index = self.items.len().checked_sub(1)?;
-        let item = self.items.get(index)?;
-        (item.sent == 0 && item.key == Some(key)).then_some(index)
-    }
-
-    /// Replaces the unsent item at `index`; returns false if it is gone.
-    fn replace(&mut self, index: usize, frame: Frame, chunk_bytes: usize) -> bool {
-        let Some(item) = self.items.get_mut(index) else {
-            return false;
-        };
-        prepare_chunks(&frame, chunk_bytes);
-        let old = item.cost();
-        item.frame = frame;
-        let new = item.cost();
-        self.bytes = self.bytes.saturating_sub(old).saturating_add(new);
-        true
-    }
-
-    /// Takes the next frame or chunk of the front item. On a refused chunk
-    /// the front item is dropped and the error returned.
-    fn pop_chunk(&mut self, chunk_bytes: usize) -> Option<Result<Frame, BadMessage>> {
-        let front = self.items.front_mut()?;
-        let len = front.frame.payload().len();
-        let start = front.sent;
-        let rule = chunk_rule(front.frame.header().kind());
-        let Some(rule) = rule.filter(|_| start > 0 || len > chunk_bytes) else {
-            return self.pop_front_item().map(|item| Ok(item.frame));
-        };
-        let end = len.min(start.saturating_add(chunk_bytes.max(1)));
-        let chunk = chunk_frame(&front.frame, rule, start, end);
-        front.sent = end;
-        self.bytes = self.bytes.saturating_sub(end.saturating_sub(start));
-        if chunk.is_err() || end >= len {
-            self.pop_front_item();
-        }
-        Some(chunk)
-    }
-
-    fn pop_front_item(&mut self) -> Option<Queued> {
-        let item = self.items.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(item.cost());
-        if self.items.is_empty() {
-            self.release_idle();
-        }
-        Some(item)
-    }
-
-    /// Frees the memory of an empty FIFO beyond a small reserve. Only frees.
-    fn release_idle(&mut self) {
-        if self.items.capacity() > IDLE_CAPACITY {
-            self.items = VecDeque::new();
-        }
-    }
-
-    /// Drops everything; returns the bytes dropped.
-    fn clear(&mut self) -> usize {
-        let dropped = self.bytes;
-        self.items.clear();
-        self.bytes = 0;
-        self.release_idle();
-        dropped
-    }
-}
-
-/// How a kind is cut into chunks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChunkRule {
-    /// Each chunk carries the PTY offset of its first byte.
-    Offset,
-    /// Every chunk keeps the frame's kind and aux: the payload is an
-    /// envelope whose bytes are not PTY bytes, so the offset stays the cut.
-    SameAux,
-    /// SNAPSHOT, then SNAPSHOT_MORE with the same offset.
-    Snapshot,
-    /// The same call aux, with MORE on every chunk but the last and FDS only
-    /// on the first: the descriptors ride with the first chunk.
-    Call,
-}
-
-const fn chunk_rule(kind: FrameKind) -> Option<ChunkRule> {
-    match kind {
-        FrameKind::Output => Some(ChunkRule::Offset),
-        FrameKind::Replay => Some(ChunkRule::SameAux),
-        FrameKind::Snapshot | FrameKind::SnapshotMore => Some(ChunkRule::Snapshot),
-        FrameKind::Request | FrameKind::Reply | FrameKind::Error | FrameKind::TypedEvent => {
-            Some(ChunkRule::Call)
-        }
-        FrameKind::Grid
-        | FrameKind::Event
-        | FrameKind::Ring
-        | FrameKind::RingAdvance
-        | FrameKind::Input
-        | FrameKind::SharedBuffer
-        | FrameKind::RingAck
-        | FrameKind::Cancel => None,
-    }
-}
-
-/// The frame carrying `frame`'s payload bytes `start..end`.
-fn chunk_frame(
-    frame: &Frame,
-    rule: ChunkRule,
-    start: usize,
-    end: usize,
-) -> Result<Frame, BadMessage> {
-    let header = frame.header();
-    let last = end >= frame.payload().len();
-    let (kind, aux) = match (rule, header.aux()) {
-        (ChunkRule::Offset, Aux::Offset(offset)) => {
-            (header.kind(), Aux::Offset(offset.saturating_add(start as u64)))
-        }
-        (ChunkRule::Snapshot, aux) if start > 0 => (FrameKind::SnapshotMore, aux),
-        (ChunkRule::Call, Aux::Call(mut call)) => {
-            if !last {
-                call.flags = call.flags.with(CallFlags::MORE);
-            }
-            if start > 0 {
-                call.flags = call.flags.without(CallFlags::FDS);
-            }
-            (header.kind(), Aux::Call(call))
-        }
-        (_, aux) => (header.kind(), aux),
-    };
-    Frame::new(kind, header.stream(), aux, frame.payload().slice(start..end))
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StreamState {
@@ -615,7 +458,8 @@ impl LaneWriter {
         Ok(Pushed::Queued)
     }
 
-    /// `push_control`, merged into the unsent control frame with `key`.
+    /// `push_control`, merged into the unsent control frame with `key` when
+    /// only keyed frames were queued after it (see the module documentation).
     /// `merge` gets the queued frame and the new one and returns the frame
     /// that takes the queued frame's place.
     pub fn push_control_coalescing(
@@ -625,7 +469,7 @@ impl LaneWriter {
         merge: impl FnOnce(&Frame, Frame) -> Frame,
     ) -> Result<Pushed, LaneError> {
         self.check_control(&frame)?;
-        let Some(index) = self.control.coalesce_index(key) else {
+        let Some(index) = self.control.coalesce_index(key, frame.header().stream()) else {
             self.make_room(frame_cost(&frame), None)?;
             self.queue_control(frame, Some(key));
             return Ok(Pushed::Queued);
@@ -657,7 +501,7 @@ impl LaneWriter {
     ) -> Result<Pushed, LaneError> {
         let stream = frame.header().stream();
         let queue = self.check_stream(stream)?;
-        let Some(index) = queue.fifo.coalesce_index(key) else {
+        let Some(index) = queue.fifo.coalesce_index(key, stream) else {
             self.make_room(frame_cost(&frame), Some(stream))?;
             self.queue_stream(frame, Some(key))?;
             return Ok(Pushed::Queued);

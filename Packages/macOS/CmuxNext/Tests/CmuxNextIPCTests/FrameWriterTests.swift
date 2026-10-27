@@ -178,6 +178,77 @@ import Testing
         }
     }
 
+    // MARK: Coalescing (p05-ipc-141)
+
+    private static let resize = FrameWriter.CoalesceKey(method: MethodID(rawValue: 0x0502), target: 7)
+
+    /// A 4-byte message naming `value`, so the wire shows which one was sent.
+    private static func message(_ value: UInt32) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
+
+    @Test func aThousandContinuousMessagesBehindABlockedSocketSendOne() throws {
+        let plug = Data("P".utf8)
+        let sink = GatedSink(expectedBytes: plug.count + 4)
+        let writer = FrameWriter(sink: sink, label: "com.cmuxterm.next.daemon.write", qos: .userInitiated)
+        defer { writer.close() }
+
+        #expect(writer.enqueue(plug, priority: .control) == nil)
+        try #require(sink.waitUntilSending(), "the drain never started")
+        // The socket is blocked inside the plug's send while the view resizes 1,000 times.
+        for value in 0 ..< UInt32(1000) {
+            #expect(writer.enqueue(Self.message(value), priority: .input, coalesce: Self.resize) == nil)
+        }
+        #expect(writer.queuedBytes == 4, "the newer resize did not replace the queued one")
+        sink.open()
+        try #require(sink.waitUntilFinished(), "the writer did not deliver every byte")
+        #expect(sink.bytes == Array(plug) + Array(Self.message(999)))
+    }
+
+    @Test func aHundredResizesInAFrameSendOneAtTheRefresh() throws {
+        let refresh = ManualRefresh()
+        let sink = GatedSink(expectedBytes: 4, heldSends: [])
+        let writer = FrameWriter(sink: sink, label: "com.cmuxterm.next.daemon.write", qos: .userInitiated,
+                                 refresh: refresh)
+        defer { writer.close() }
+
+        for value in 0 ..< UInt32(100) {
+            #expect(writer.enqueue(Self.message(value), priority: .input, coalesce: Self.resize) == nil)
+        }
+        // Held for the frame: nothing reached the socket, and one refresh was asked for.
+        #expect(sink.sendSizes.isEmpty)
+        #expect(writer.queuedBytes == 4)
+        #expect(refresh.pending == 1)
+        refresh.fire()
+        try #require(sink.waitUntilFinished(), "the refresh did not release the resize")
+        #expect(sink.sendSizes == [4])
+        #expect(sink.bytes == Array(Self.message(99)))
+    }
+
+    @Test func continuousMessagesKeepTheirPlaceAmongOtherMessages() throws {
+        let refresh = ManualRefresh()
+        let other = FrameWriter.CoalesceKey(method: MethodID(rawValue: 0x0502), target: 8)
+        let plug = Data("P".utf8)
+        let sink = GatedSink(expectedBytes: plug.count + 8)
+        let writer = FrameWriter(sink: sink, label: "com.cmuxterm.next.daemon.write", qos: .userInitiated,
+                                 refresh: refresh)
+        defer { writer.close() }
+
+        #expect(writer.enqueue(plug, priority: .bulk) == nil)
+        try #require(sink.waitUntilSending(), "the drain never started")
+        #expect(writer.enqueue(Data("a1".utf8), priority: .input, coalesce: Self.resize) == nil)
+        // A message without a key releases the held one before it and is never passed by a newer one.
+        #expect(writer.enqueue(Data("k1".utf8), priority: .input) == nil)
+        #expect(writer.enqueue(Data("a2".utf8), priority: .input, coalesce: Self.resize) == nil)
+        #expect(writer.enqueue(Data("b1".utf8), priority: .input, coalesce: other) == nil)
+        // Passes the other key's message to replace a2 in its place.
+        #expect(writer.enqueue(Data("a3".utf8), priority: .input, coalesce: Self.resize) == nil)
+        #expect(writer.queuedBytes == 8)
+        sink.open()
+        // The plug and the released a1 k1 leave; a3 b1 wait for the refresh.
+        refresh.fire()
+        try #require(sink.waitUntilFinished(), "the writer did not deliver every byte")
+        #expect(String(decoding: sink.bytes, as: UTF8.self) == "Pa1k1a3b1")
+    }
+
     @Test func aSocketSinkSendsTheBytesWithTheirDescriptors() throws {
         var pair: [Int32] = [-1, -1]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
@@ -293,4 +364,25 @@ private nonisolated final class GatedSink: FrameSink {
 
     /// The byte count of each send, in order.
     var sendSizes: [Int] { recorded.withLock { $0.sendSizes } }
+}
+
+/// A ``FrameRefreshSource`` the test fires by hand: one display refresh per ``fire()``.
+private nonisolated final class ManualRefresh: FrameRefreshSource {
+    private let requests = Mutex<[@Sendable () -> Void]>([])
+
+    func requestRefresh(_ fire: @escaping @Sendable () -> Void) {
+        requests.withLock { $0.append(fire) }
+    }
+
+    /// Refreshes asked for and not fired yet.
+    var pending: Int { requests.withLock { $0.count } }
+
+    /// The display refreshed: runs every refresh asked for.
+    func fire() {
+        let fired = requests.withLock { requests -> [@Sendable () -> Void] in
+            defer { requests.removeAll() }
+            return requests
+        }
+        for refresh in fired { refresh() }
+    }
 }

@@ -787,9 +787,9 @@ impl ClientRegistry {
         Some(ClientSizingIdentity { remote, ..identity.into_identity() })
     }
 
-    /// Deliver a `size-state` event on every attach stream of `surface`.
-    /// A full stream queue terminates that stream with its overflow notice,
-    /// so a slow viewer re-attaches instead of silently missing a state.
+    /// Deliver a `size-state` event on every attach stream of `surface`. It
+    /// replaces an unsent older state (schema `coalesce`); a full queue still
+    /// ends the stream with its overflow notice, and the viewer re-attaches.
     pub(crate) fn send_size_state(
         &self,
         surface: SurfaceId,
@@ -823,7 +823,7 @@ impl ClientRegistry {
         for (reader, writer, streams) in targets {
             let event = size_state_event_json(surface, runtime, size_state, Some(reader));
             for stream in streams {
-                let _ = writer.send_stream(&event, &stream);
+                let _ = writer.send_event_coalesced(&event, &stream);
             }
         }
     }

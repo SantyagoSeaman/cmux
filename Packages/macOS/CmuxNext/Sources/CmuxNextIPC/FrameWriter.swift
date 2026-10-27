@@ -6,10 +6,10 @@ public import Foundation
 /// Writes whole wire messages (JSON lines and 0xFF frames) to the daemon socket in priority order without ever
 /// blocking the caller (plans/cmux-next/chrome-parity/p05-ipc.md, section 3.4 and task 055).
 ///
-/// ``enqueue(_:priority:fds:)`` appends to one FIFO per ``MethodPriority`` and returns at once; one private serial
-/// queue (`com.cmuxterm.next.daemon.write`, at the QoS the owner picks from the connection's role) drains them.
-/// Each drain step takes the head of the highest non-empty FIFO, so a message never waits for more than the step
-/// in flight: an input frame enqueued behind 8 MiB of bulk frames is the next message on the wire. Within one
+/// ``enqueue(_:priority:fds:coalesce:)`` appends to one FIFO per ``MethodPriority`` and returns at once; one private
+/// serial queue (`com.cmuxterm.next.daemon.write`, at the QoS the owner picks from the connection's role) drains
+/// them. Each drain step takes the head of the highest non-empty FIFO, so a message never waits for more than the
+/// step in flight: an input frame enqueued behind 8 MiB of bulk frames is the next message on the wire. Within one
 /// priority the wire order is the call order. A message is never split by another: the producer cuts bulk at
 /// BULK_FRAME_MAX with the MORE flag, and that cut is the preemption boundary (p05-ipc.md section 3.2).
 ///
@@ -21,10 +21,16 @@ public import Foundation
 /// order. A bulk or background message is always a drain step of its own, so the step in flight is never more than
 /// one BULK_FRAME_MAX chunk of bulk.
 ///
-/// Only the drain queue's thread waits on the socket. Past ``limit`` queued bytes ``enqueue(_:priority:fds:)``
-/// fails with ``Failure/backlog(queued:)`` instead of buffering without bound.
+/// Continuous messages (a resize, a scroll) carry a ``CoalesceKey`` (p05-ipc-141): a newer one replaces the unsent
+/// one with its key in place when only keyed messages were queued after it, so a writer whose peer does not read
+/// holds one per key. With a ``FrameRefreshSource`` they also wait for the next display refresh, as Blink holds
+/// rAF-aligned input for the frame (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc);
+/// a message without a key releases the held ones before it, so the order within a FIFO never changes.
+///
+/// Only the drain queue's thread waits on the socket. Past ``limit`` queued bytes
+/// ``enqueue(_:priority:fds:coalesce:)`` fails with ``Failure/backlog(queued:)`` instead of buffering without bound.
 public final class FrameWriter: Sendable {
-    /// Why ``FrameWriter/enqueue(_:priority:fds:)`` refused a message.
+    /// Why ``FrameWriter/enqueue(_:priority:fds:coalesce:)`` refused a message.
     public enum Failure: Error, Equatable, Sendable, CustomStringConvertible {
         /// The other end closed the connection (EPIPE, ECONNRESET).
         case peerClosed
@@ -53,6 +59,18 @@ public final class FrameWriter: Sendable {
         }
     }
 
+    /// Identifies continuous messages that replace each other while unsent: the method, and what the schema
+    /// `coalesce` key fields of the message name (a surface).
+    public struct CoalesceKey: Hashable, Sendable {
+        public let method: MethodID
+        public let target: UInt64
+
+        public init(method: MethodID, target: UInt64) {
+            self.method = method
+            self.target = target
+        }
+    }
+
     /// Descriptors one message may carry (cmux-ipc fds.rs `MAX_FDS_PER_FRAME`; Chromium's
     /// base/posix/unix_domain_socket.cc caps a message the same way).
     public static let maxFdsPerMessage = 4
@@ -71,6 +89,7 @@ public final class FrameWriter: Sendable {
     private let queue: DispatchQueue
     private let state = Mutex(State())
     private let runStep: StepRunner?
+    private let refresh: (any FrameRefreshSource)?
 
     /// - Parameters:
     ///   - sink: Where the bytes go: ``SocketFrameSink`` for a socket, a recorder in tests.
@@ -78,22 +97,29 @@ public final class FrameWriter: Sendable {
     ///   - qos: The drain queue's class, chosen by the owner from what the connection carries.
     ///   - target: A serial queue the drain runs on (its target), nil for none (p04-input-058).
     ///   - limit: The most bytes that may wait (not counting the step in flight).
+    ///   - refresh: The display refresh continuous messages wait for; nil sends them at once.
     ///   - runStep: Runs each drain step, once per step (a hang scope); nil runs it bare.
     public init(sink: any FrameSink, label: String, qos: DispatchQoS, target: DispatchQueue? = nil,
-                limit: Int = FrameWriter.defaultLimit, runStep: StepRunner? = nil) {
+                limit: Int = FrameWriter.defaultLimit, refresh: (any FrameRefreshSource)? = nil,
+                runStep: StepRunner? = nil) {
         self.sink = sink
         self.limit = limit
+        self.refresh = refresh
         self.runStep = runStep
         queue = DispatchQueue(label: label, qos: qos, target: target)
     }
 
     /// Appends `bytes` after every message of the same priority written before, ahead of every lower priority.
+    /// With a `key` it is a continuous message: it replaces the unsent one with that key (see the type) and, when
+    /// the writer has a ``FrameRefreshSource``, waits for the next display refresh. A message with descriptors is
+    /// never replaced.
     ///
     /// The writer owns `fds` from this call on, also when it refuses the message: it closes them once they are
     /// sent, dropped or refused. Never blocks.
     /// - Returns: nil, or why the message was refused (the socket failed, the writer closed, the backlog passed
     ///   the limit, or the descriptors are malformed).
-    public func enqueue(_ bytes: Data, priority: MethodPriority, fds: [Int32] = []) -> Failure? {
+    public func enqueue(_ bytes: Data, priority: MethodPriority, fds: [Int32] = [],
+                        coalesce key: CoalesceKey? = nil) -> Failure? {
         guard fds.count <= Self.maxFdsPerMessage else {
             Self.closeDescriptors(fds)
             return .tooManyFds(count: fds.count)
@@ -106,16 +132,27 @@ public final class FrameWriter: Sendable {
             return nil
         }
         let limit = limit
-        let (failure, startDrain) = state.withLock { state -> (Failure?, Bool) in
-            if let failure = state.failure { return (failure, false) }
-            guard !state.closed else { return (.closed, false) }
-            guard state.queuedBytes + bytes.count <= limit else { return (.backlog(queued: state.queuedBytes), false) }
-            state.append(Message(bytes: bytes, fds: fds), priority: priority)
-            guard !state.draining else { return (nil, false) }
+        let key = fds.isEmpty ? key : nil
+        let held = key != nil && refresh != nil
+        let (failure, startDrain, askRefresh) = state.withLock { state -> (Failure?, Bool, Bool) in
+            if let failure = state.failure { return (failure, false, false) }
+            guard !state.closed else { return (.closed, false, false) }
+            if let key, let replaced = state.replace(bytes, key: key, priority: priority, limit: limit) {
+                // The replaced message keeps its place, its hold, and the drain or refresh already due for it.
+                return (replaced ? nil : .backlog(queued: state.queuedBytes), false, false)
+            }
+            guard state.queuedBytes + bytes.count <= limit else {
+                return (.backlog(queued: state.queuedBytes), false, false)
+            }
+            state.append(Message(bytes: bytes, fds: fds, key: key), priority: priority, held: held)
+            let askRefresh = held && !state.refreshRequested
+            if askRefresh { state.refreshRequested = true }
+            guard !state.draining, state.hasReady else { return (nil, false, askRefresh) }
             state.draining = true
-            return (nil, true)
+            return (nil, true, askRefresh)
         }
         if failure != nil { Self.closeDescriptors(fds) }
+        if askRefresh { refresh?.requestRefresh { [weak self] in self?.refreshed() } }
         if startDrain { queue.async { [self] in drain() } }
         return failure
     }
@@ -134,6 +171,18 @@ public final class FrameWriter: Sendable {
             return state.removeAll()
         }
         Self.closeDescriptors(dropped)
+    }
+
+    /// The display refresh came: the held continuous messages may go.
+    private func refreshed() {
+        let startDrain = state.withLock { state -> Bool in
+            state.refreshRequested = false
+            state.releaseHeld()
+            guard !state.draining, !state.closed, state.failure == nil, state.hasReady else { return false }
+            state.draining = true
+            return true
+        }
+        if startDrain { queue.async { [self] in drain() } }
     }
 
     // MARK: - Drain (serial queue)
@@ -188,130 +237,10 @@ public final class FrameWriter: Sendable {
     }
 }
 
-// MARK: - Queues
-
-extension FrameWriter {
-    private struct Message {
-        let bytes: Data
-        let fds: [Int32]
-    }
-
-    /// One drain step: messages in wire order; `fds` go with the first byte.
-    private struct Batch {
-        var messages: [Data]
-        let fds: [Int32]
-        var byteCount: Int
-
-        func joined() -> Data {
-            var data = Data(capacity: byteCount)
-            for message in messages { data.append(message) }
-            return data
-        }
-    }
-
-    /// One priority's FIFO: popped slots are cleared at once, so a sent message's bytes are not retained.
-    private struct Lane {
-        private var slots: [Message?] = []
-        private var head = 0
-
-        var first: Message? { head < slots.count ? slots[head] : nil }
-
-        mutating func append(_ message: Message) {
-            slots.append(message)
-        }
-
-        mutating func popFirst() -> Message? {
-            guard head < slots.count else { return nil }
-            let message = slots[head]
-            slots[head] = nil
-            head += 1
-            if head == slots.count {
-                slots.removeAll(keepingCapacity: true)
-                head = 0
-            } else if head >= 64, head * 2 >= slots.count {
-                slots.removeFirst(head)
-                head = 0
-            }
-            return message
-        }
-
-        /// Empties the FIFO; returns the descriptors of the dropped messages.
-        mutating func removeAll() -> [Int32] {
-            let fds = slots[head...].flatMap { $0?.fds ?? [] }
-            slots.removeAll()
-            head = 0
-            return fds
-        }
-    }
-
-    private struct State {
-        /// Indexed by ``MethodPriority/rawValue``: input, control, bulk, background.
-        private var lanes = [Lane](repeating: Lane(), count: MethodPriority.allCases.count)
-        private(set) var queuedBytes = 0
-        var draining = false
-        var closed = false
-        var failure: Failure?
-
-        mutating func append(_ message: Message, priority: MethodPriority) {
-            lanes[Int(priority.rawValue)].append(message)
-            queuedBytes += message.bytes.count
-        }
-
-        /// The next drain step: the head of the highest non-empty FIFO. When that head is input or control, the
-        /// following input and control heads join it in priority order while they fit in `budget`, stopping at a
-        /// message with descriptors (its descriptors must ride its own first byte). A bulk or background head is
-        /// sent alone: one chunk is the preemption boundary (p05-ipc.md section 3.2). nil, and draining ends,
-        /// when there is nothing to send.
-        mutating func takeBatch(budget: Int) -> Batch? {
-            guard !closed, failure == nil, let first = popHighest() else {
-                draining = false
-                return nil
-            }
-            var batch = Batch(messages: [first.message.bytes], fds: first.message.fds,
-                              byteCount: first.message.bytes.count)
-            guard Self.joins(first.priority) else {
-                queuedBytes -= batch.byteCount
-                return batch
-            }
-            while let head = peekHighest(), Self.joins(head.priority), head.message.fds.isEmpty,
-                  batch.byteCount + head.message.bytes.count <= budget {
-                let next = head.message
-                _ = popHighest()
-                batch.messages.append(next.bytes)
-                batch.byteCount += next.bytes.count
-            }
-            queuedBytes -= batch.byteCount
-            return batch
-        }
-
-        mutating func removeAll() -> [Int32] {
-            queuedBytes = 0
-            var fds: [Int32] = []
-            for index in lanes.indices { fds += lanes[index].removeAll() }
-            return fds
-        }
-
-        /// Whether a message of `priority` may share a send with other waiting messages: only input and control,
-        /// which are small; bulk and background are cut at BULK_FRAME_MAX and each chunk is its own step.
-        private static func joins(_ priority: MethodPriority) -> Bool {
-            switch priority {
-            case .input, .control: true
-            case .bulk, .background: false
-            }
-        }
-
-        private func peekHighest() -> (message: Message, priority: MethodPriority)? {
-            for priority in MethodPriority.allCases {
-                if let message = lanes[Int(priority.rawValue)].first { return (message, priority) }
-            }
-            return nil
-        }
-
-        private mutating func popHighest() -> (message: Message, priority: MethodPriority)? {
-            for priority in MethodPriority.allCases {
-                if let message = lanes[Int(priority.rawValue)].popFirst() { return (message, priority) }
-            }
-            return nil
-        }
-    }
+/// The display refresh a ``FrameWriter`` holds continuous messages for (Chromium's begin-frame source, which
+/// Blink's input queue waits on for rAF-aligned input).
+public protocol FrameRefreshSource: Sendable {
+    /// Calls `fire` once, at the next display refresh, on any thread. The writer asks again for each refresh it
+    /// needs.
+    func requestRefresh(_ fire: @escaping @Sendable () -> Void)
 }

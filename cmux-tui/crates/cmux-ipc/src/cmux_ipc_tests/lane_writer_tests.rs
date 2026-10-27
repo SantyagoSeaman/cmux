@@ -14,10 +14,10 @@ use crate::{
 };
 
 /// xorshift64*: deterministic, so a failing seed replays.
-struct Rng(u64);
+pub(super) struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Rng {
+    pub(super) fn new(seed: u64) -> Rng {
         Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
@@ -28,7 +28,7 @@ impl Rng {
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         self.next() % n.max(1)
     }
 }
@@ -348,7 +348,7 @@ fn lane_writer_overflow_never_drops_input_or_control() {
 #[test]
 fn lane_writer_coalesce_hook_replaces_unsent_frame_in_place() {
     let mut writer = LaneWriter::new(small_chunks());
-    let key = CoalesceKey(0xC0_01);
+    let key = CoalesceKey::new(0xC001, 7);
     let keep_newer = |_: &Frame, newer: Frame| newer;
     let event = |message: u32| control_frame(message, 10, FrameKind::TypedEvent);
     assert_eq!(writer.push_control_coalescing(event(1), key, keep_newer), Ok(Pushed::Queued));
@@ -484,7 +484,7 @@ fn lane_writer_control_goes_before_lower_grants_under_input_flood() {
 
 #[test]
 fn lane_writer_coalescing_keeps_emit_order() {
-    let keys = [CoalesceKey(1), CoalesceKey(2)];
+    let keys = [CoalesceKey::new(0xC00B, 1), CoalesceKey::new(0xC00B, 2)];
     for seed in 0..300 {
         let mut rng = Rng::new(seed);
         let mut writer = LaneWriter::new(small_chunks());
@@ -525,12 +525,14 @@ fn lane_writer_coalescing_keeps_emit_order() {
                     } else {
                         writer.push_control_coalescing(frame, key, keep_newer)
                     };
-                    match fifo.back_mut() {
-                        Some(tail) if tail.1 == Some(key) => {
+                    // The walk back passes keyed items and stops at an unkeyed one.
+                    let run = fifo.iter_mut().rev().take_while(|item| item.1.is_some());
+                    match run.into_iter().find(|item| item.1 == Some(key)) {
+                        Some(queued) => {
                             assert_eq!(pushed, Ok(Pushed::Coalesced), "seed {seed}");
-                            tail.0 = message;
+                            queued.0 = message;
                         }
-                        _ => {
+                        None => {
                             assert_eq!(pushed, Ok(Pushed::Queued), "seed {seed}");
                             fifo.push_back((message, Some(key)));
                         }

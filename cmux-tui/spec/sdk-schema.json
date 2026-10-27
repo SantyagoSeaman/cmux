@@ -40076,7 +40076,12 @@
     "additional_properties": false
    },
    "event_id": 49163,
-   "priority": "control"
+   "priority": "control",
+   "coalesce": {
+    "key": [
+     "surface"
+    ]
+   }
   },
   "tab-changed": {
    "since": 12,

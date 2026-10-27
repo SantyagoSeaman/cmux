@@ -27,7 +27,7 @@ use crate::mux::ResourceWaitWake;
 use crate::panic_free::RecoverPoison;
 use crate::stream_interrupt::InterruptSet;
 use crate::stream_interrupt::StreamInterrupt;
-use cmux_ipc::{FrameHeader, StreamLane};
+use cmux_ipc::{CoalesceKey, FrameHeader, MethodTables, StreamLane};
 use cmux_threads::sync::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -38,76 +38,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-#[derive(Clone)]
-pub(super) struct OutboundStream {
-    pub(super) id: u64,
-    pub(super) open: Arc<AtomicBool>,
-    /// The stream rides the connection's control sequence (stream 0): its
-    /// items share the reply FIFO. False for every other stream.
-    pub(super) control_sequence: bool,
-    /// The outbound lane of a stream outside the control sequence.
-    pub(super) lane: StreamLane,
-    pub(super) terminal_enqueued: Arc<AtomicBool>,
-    pub(super) overflow_text: Arc<Mutex<Arc<BudgetedText>>>,
-    /// Fired by `close`, so stream loops block instead of polling `is_open`.
-    pub(super) closed: InterruptSet,
-    /// The id the client minted for this stream (attach-streams-v1): every
-    /// item carries it as `"stream"` and the terminal is `stream-end`.
-    pub(super) client_stream: Option<ClientStreamId>,
-    /// Run when the writer takes an item of this stream while it held its
-    /// backpressure cap: the producer's drain task (p05-ipc-079), which
-    /// stopped at the cap instead of waiting for room.
-    pub(super) space_hook: Arc<crate::stream_interrupt::ReadyHook>,
-}
-
-impl OutboundStream {
-    #[cfg(test)]
-    pub(super) fn new(id: u64, overflow_text: Arc<BudgetedText>) -> Self {
-        Self::with_sequence(id, overflow_text, false, StreamLane::Bulk)
-    }
-
-    pub(super) fn with_sequence(
-        id: u64,
-        overflow_text: Arc<BudgetedText>,
-        control_sequence: bool,
-        lane: StreamLane,
-    ) -> Self {
-        Self {
-            id,
-            open: Arc::new(AtomicBool::new(true)),
-            control_sequence,
-            lane,
-            terminal_enqueued: Arc::new(AtomicBool::new(false)),
-            overflow_text: Arc::new(Mutex::new(overflow_text)),
-            closed: InterruptSet::default(),
-            client_stream: None,
-            space_hook: Arc::default(),
-        }
-    }
-
-    /// Runs `hook` each time the writer takes an item of this stream while
-    /// it was at its backpressure cap. False when a hook is set already.
-    pub(super) fn on_space(&self, hook: impl Fn() + Send + Sync + 'static) -> bool {
-        self.space_hook.set(hook)
-    }
-
-    pub(super) fn register_interrupt(&self, interrupt: &Arc<StreamInterrupt>) {
-        self.closed.register(interrupt);
-    }
-
-    pub(super) fn is_open(&self) -> bool {
-        self.open.load(Ordering::Acquire)
-    }
-
-    pub(super) fn close(&self) {
-        self.open.store(false, Ordering::Release);
-        self.closed.fire();
-    }
-
-    pub(super) fn update_overflow(&self, text: Arc<BudgetedText>) {
-        *self.overflow_text.lock().recover_poison() = text;
-    }
-}
+#[path = "outbound_stream.rs"]
+mod outbound_stream;
+pub(super) use outbound_stream::OutboundStream;
 
 /// A non-blocking producer's wake for when the connection's queue has room
 /// for its stream's ordered terminal
@@ -122,6 +55,16 @@ pub(super) trait MessageSink: Send + Sync {
         &self,
         text: Arc<BudgetedText>,
         stream: &OutboundStream,
+    ) -> std::io::Result<()> {
+        self.send_stream(text, stream)
+    }
+    /// `send_stream`, replacing an unsent item of `stream` queued with `key`
+    /// (p05-ipc-141). A sink without a queue sends it as is.
+    fn send_stream_coalescing(
+        &self,
+        text: Arc<BudgetedText>,
+        stream: &OutboundStream,
+        _key: CoalesceKey,
     ) -> std::io::Result<()> {
         self.send_stream(text, stream)
     }
@@ -419,6 +362,31 @@ impl MessageWriter {
         result
     }
 
+    /// `event` on `stream`; while unsent it is replaced by a newer event with
+    /// the same schema `coalesce` key (p05-ipc-141), so a peer that stopped
+    /// reading gets the newest state instead of an overflow. An event without
+    /// a key goes as `send_stream`.
+    pub(super) fn send_event_coalesced(
+        &self,
+        event: &Value,
+        stream: &OutboundStream,
+    ) -> std::io::Result<()> {
+        let Some(key) = event_coalesce_key(event) else {
+            return self.send_stream(event, stream);
+        };
+        if !self.is_open() {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection closed"));
+        }
+        let result = self
+            .render_service
+            .serialize_for(event, stream.client_stream)
+            .and_then(|text| self.sink.send_stream_coalescing(text, stream, key));
+        if result.as_ref().is_err_and(|error| error.kind() != std::io::ErrorKind::WouldBlock) {
+            stream.close();
+        }
+        result
+    }
+
     /// A frame on `stream` whose payload is `text`: one longer than the
     /// connection's BULK_FRAME_MAX leaves in chunks, so replies and
     /// input-lane items pass it between chunks.
@@ -691,4 +659,19 @@ impl MessageWriter {
     pub(super) fn close(&self) {
         self.close_with(false);
     }
+}
+
+/// The coalesce key of `event` from the schema: its event id and the value of
+/// its one `coalesce` key field, an unsigned id. `None` for an event the schema
+/// does not coalesce, one with `additive` fields (the daemon queues text and
+/// does not sum it), or one whose key is not a single id.
+fn event_coalesce_key(event: &Value) -> Option<CoalesceKey> {
+    let tables = MethodTables::schema();
+    let id = tables.event_id(event.get("event")?.as_str()?)?;
+    let coalesce = tables.event(id)?.coalesce?;
+    let [field] = coalesce.key else { return None };
+    if !coalesce.additive.is_empty() {
+        return None;
+    }
+    Some(CoalesceKey::new(id.raw(), event.get(field)?.as_u64()?))
 }
