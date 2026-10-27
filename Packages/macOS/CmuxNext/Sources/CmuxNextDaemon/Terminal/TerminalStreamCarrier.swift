@@ -19,7 +19,8 @@ public struct TerminalStreamCarrier: Sendable {
     /// The connection is the one view's: it closes when that view's stream ends.
     let ownsConnection: Bool
     /// The daemon serves `attach-streams-v1`: requests and events name the stream.
-    /// False only on a connection of the view's own to an older daemon, whose
-    /// untagged events all belong to that one view (``LineTransport/deliverToOpenStreams(_:)``).
+    /// False only on a connection of the view's own (`daemonTerminalStreams` off,
+    /// or an older daemon), whose untagged events all belong to that one view
+    /// (``LineTransport/deliverToOpenStreams(_:)``).
     let tagsStreams: Bool
 }

@@ -7,7 +7,10 @@ extension DaemonConnection {
     /// shared by every view with no connection or handshake of its own;
     /// otherwise a connection of the view's own to this connection's daemon
     /// that carries only that stream (an older daemon's untagged events are the
-    /// stream's, ``TerminalStreamCarrier/tagsStreams``).
+    /// stream's, ``TerminalStreamCarrier/tagsStreams``). With the flag off that
+    /// connection advertises no stream wire (`attach-streams-v1`,
+    /// `attach-frames-v1`, `terminal-output-ring-v1`), so even a daemon that
+    /// serves them sends the view untagged JSON events.
     ///
     /// The first shared call of each connect declares the views' sizing
     /// identity once for the connection (`set-client-info` with
@@ -23,9 +26,14 @@ extension DaemonConnection {
     ///   of its own meanwhile; `DaemonError` when a connection of its own fails.
     public func terminalStreams(for view: TerminalAttachRoute.View) async throws -> TerminalStreamCarrier {
         guard let ready, let endpoint else { throw DaemonError.notConnected }
+        guard configuration.terminalStreams else {
+            // The rollback: the view's connection advertises none of the stream wire, so the daemon
+            // serves it untagged JSON with no binary frames and no output ring.
+            let legacy = configuration.advertisedCapabilities.filter { !Self.streamWire.contains($0) }
+            return try await TerminalStreamCarrier.dedicated(endpoint: endpoint, capabilities: legacy, view: view)
+        }
         let streams = DaemonCapability.attachStreams.rawValue
-        guard configuration.terminalStreams, ready.identity.supports(streams),
-              configuration.advertisedCapabilities.contains(streams) else {
+        guard ready.identity.supports(streams), configuration.advertisedCapabilities.contains(streams) else {
             return try await TerminalStreamCarrier.dedicated(
                 endpoint: endpoint, capabilities: configuration.advertisedCapabilities, view: view)
         }
@@ -37,6 +45,12 @@ extension DaemonConnection {
         return TerminalStreamCarrier(transport: ready.transport, identity: ready.identity, frames: frames,
                                      ownsConnection: false, tagsStreams: true)
     }
+
+    /// What `daemonTerminalStreams` gates on the wire: tagged streams, binary
+    /// attach frames and the local output ring.
+    private static let streamWire: Set<String> = [DaemonCapability.attachStreams.rawValue,
+                                                  DaemonCapability.attachFrames.rawValue,
+                                                  DaemonCapability.terminalOutputRing.rawValue]
 
     /// One `set-client-info` per connect, shared by every caller of this
     /// connect (a failed one is tried again by the next caller).

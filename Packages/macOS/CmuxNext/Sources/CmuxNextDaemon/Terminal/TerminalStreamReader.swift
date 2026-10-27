@@ -309,12 +309,17 @@ final class TerminalStreamReader: Sendable {
     }
 
     /// The view fell `highWater` behind and lost its queued output. A snapshot
-    /// stream resyncs (`snapshot-request`); a replay stream has no snapshot to
-    /// resync from, so it ends and the view reattaches for a fresh replay.
+    /// stream on a daemon that names streams resyncs (`snapshot-request`; such
+    /// a daemon holds a throttled request until its interval ends). A replay
+    /// stream has no snapshot to resync from, and an older daemon answers a
+    /// throttled request with no snapshot at all, so either stream ends and
+    /// the view reattaches.
     private func overflowed() {
+        let resyncs = tagsRequests
         let snapshots = state.withLock { stream -> Bool in
-            if stream.snapshots { stream.resyncing = true }
-            return stream.snapshots
+            guard resyncs, stream.snapshots else { return false }
+            stream.resyncing = true
+            return true
         }
         if snapshots {
             requestResync()

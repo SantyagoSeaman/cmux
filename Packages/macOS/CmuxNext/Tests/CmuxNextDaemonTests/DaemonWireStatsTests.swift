@@ -123,6 +123,38 @@ struct DaemonWireStatsTests {
         await control.close()
     }
 
+    /// `daemonTerminalStreams` off is the rollback of the whole stream wire: against a daemon that
+    /// serves streams, frames and the output ring, the view's connection of its own advertises none
+    /// of them, its attach names no stream, and it negotiates no frames (so no RING is mapped).
+    @Test func withStreamsOffAViewOfAStreamsDaemonGetsTheUntaggedLegacyWire() async throws {
+        let stats = DaemonWireStats()
+        let daemon = try FakeWireDaemon(outputBytesPerAttach: 4096, servesWire: true)
+        defer { daemon.stop() }
+        var configuration = Self.configuration(role: .main)
+        configuration.advertisedCapabilities = DaemonCapability.advertisedLocally
+        let control = DaemonConnection(endpoint: DaemonEndpoint(socketPath: daemon.path, wireStats: stats),
+                                       configuration: configuration)
+        _ = try await control.start()
+        let carrier = try await control.terminalStreams(for: TerminalAttachRoute.View(device: nil))
+        #expect(carrier.ownsConnection)
+        #expect(!carrier.tagsStreams)
+        #expect(!carrier.frames)
+        let attachment = try await TerminalAttachment.attach(
+            carrier: carrier, target: .init(surface: SurfaceID(rawValue: 1)),
+            size: CellSize(cols: 80, rows: 24), claimGeometry: false)
+        #expect(await Self.outputBytes(of: attachment, atLeast: 4096) == 4096)
+        let attaches = daemon.requests.named(AttachSurfaceRequest.command)
+        #expect(attaches.count == 1)
+        #expect(attaches.allSatisfy { $0["attach_stream"] == nil }, "\(attaches)")
+        // The last set-client-info is the view's own connection's.
+        let advertised = daemon.requests.named(SetClientInfoRequest.command).last?["capabilities"] as? [String] ?? []
+        for gated in [DaemonCapability.attachStreams, .attachFrames, .terminalOutputRing] {
+            #expect(!advertised.contains(gated.rawValue), "the view's connection advertised \(gated.rawValue)")
+        }
+        attachment.detachNow()
+        await control.close()
+    }
+
     /// A page relay's `DaemonConnection` opens its connection with role page_relay.
     @Test func aPageRelayConnectionCountsAsPageRelay() async throws {
         let stats = DaemonWireStats()
@@ -426,150 +458,6 @@ struct DaemonWireStatsTests {
             if total >= atLeast { break }
         }
         return total
-    }
-}
-
-/// A Unix socket served by this test process that speaks just enough raw protocol v12 for control,
-/// page relay and byte-mode terminal stream connections: `identify` (after one line that is not
-/// JSON; it offers `origin-claim-v1`, and `attach-streams-v1` unless it plays an older daemon), `client-hello`
-/// with a connection id, nothing for ``unanswered``, `ok:true` for every other request, and after each
-/// `attach-surface` reply an optional `colors-changed`, then `outputBytesPerAttach` bytes of `output` events
-/// in 64 KiB chunks, each JSON event tagged with the request's `attach_stream` when it named one.
-private final class FakeWireDaemon: Sendable {
-    static let chunkBytes = 64 << 10
-    /// A command the fake never answers.
-    static let unanswered = "never-reply"
-
-    let path: String
-    private let listener: Int32
-
-    static func chunks(for bytes: Int) -> Int { (bytes + chunkBytes - 1) / chunkBytes }
-    static func base64Bytes(of bytes: Int) -> Int { (bytes + 2) / 3 * 4 }
-
-    init(outputBytesPerAttach: Int, colorsBeforeOutput: Bool = false, servesStreams: Bool = true) throws {
-        path = "/tmp/cnd-wire-\(UUID().uuidString.prefix(8).lowercased()).sock"
-        let listener = socket(AF_UNIX, SOCK_STREAM, 0)  // a local: the closures below may not capture self
-        self.listener = listener
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            buffer.copyBytes(from: pathBytes)
-            buffer[pathBytes.count] = 0
-        }
-        let bound = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bound == 0, listen(listener, 8) == 0 else {
-            close(listener)
-            throw POSIXError(.EADDRINUSE)
-        }
-        let script = Script(outputBytes: outputBytesPerAttach, colors: colorsBeforeOutput, streams: servesStreams)
-        let thread = Thread {
-            while true {
-                let client = accept(listener, nil, nil)
-                guard client >= 0 else { return }
-                let serving = Thread { Self.serve(client, script: script) }
-                serving.qualityOfService = .utility
-                serving.start()
-            }
-        }
-        thread.qualityOfService = .utility
-        thread.start()
-    }
-
-    func stop() {
-        shutdown(listener, SHUT_RDWR)
-        close(listener)
-        unlink(path)
-    }
-
-    /// What every connection is sent after its `attach-surface` reply.
-    private struct Script: Sendable {
-        var outputBytes: Int
-        var colors: Bool
-        /// Offers `attach-streams-v1` (false: an older daemon).
-        var streams: Bool
-    }
-
-    private static func serve(_ client: Int32, script: Script) {
-        defer { close(client) }
-        var on: Int32 = 1
-        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-        var buffer = Data()
-        var chunk = [UInt8](repeating: 0, count: 64 << 10)
-        while true {
-            let count = recv(client, &chunk, chunk.count, 0)
-            guard count > 0 else { return }
-            buffer.append(contentsOf: chunk[0..<count])
-            while let newline = buffer.firstIndex(of: 0x0A) {
-                let line = Data(buffer[buffer.startIndex..<newline])
-                buffer.removeSubrange(buffer.startIndex...newline)
-                guard let request = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                      let id = request["id"] as? Int, let command = request["cmd"] as? String else { continue }
-                guard answer(command, id: id, request: request, to: client, script: script) else { return }
-            }
-        }
-    }
-
-    private static func answer(_ command: String, id: Int, request: [String: Any], to client: Int32, script: Script) -> Bool {
-        switch command {
-        case unanswered:
-            return true
-        case IdentifyRequest.command:
-            let capabilities = [DaemonClientRole.originClaimCapability]
-                + (script.streams ? [DaemonCapability.attachStreams.rawValue] : [])
-            let identity: [String: Any] = ["app": "cmux-tui", "protocol": 12, "generation": "gen-wire",
-                                           "capabilities": capabilities]
-            return write(Data("{]".utf8), to: client) && reply(id, data: identity, to: client)
-        case "client-hello":
-            return reply(id, data: ["connection_id": "conn-\(id)"], to: client)
-        case AttachSurfaceRequest.command:
-            guard reply(id, data: ["lease": "lease-\(id)"], to: client) else { return false }
-            let surface = request["surface"] as? Int ?? 0
-            let tag: [String: Any] = (request["attach_stream"] as? Int).map { ["attach_stream": $0] } ?? [:]
-            let colors: [String: Any] = ["event": "colors-changed", "surface": surface, "fg": "#ffffff"]
-            if script.colors, !send(colors.merging(tag, uniquingKeysWith: { $1 }), to: client) { return false }
-            var sent = 0
-            while sent < script.outputBytes {
-                let size = min(chunkBytes, script.outputBytes - sent)
-                let event: [String: Any] = ["event": "output", "surface": surface,
-                                            "data": Data(repeating: 0x61, count: size).base64EncodedString()]
-                guard send(event.merging(tag, uniquingKeysWith: { $1 }), to: client) else { return false }
-                sent += size
-            }
-            return true
-        default:
-            return reply(id, data: [String: Any](), to: client)
-        }
-    }
-
-    private static func reply(_ id: Int, data: [String: Any], to client: Int32) -> Bool {
-        send(["id": id, "ok": true, "data": data], to: client)
-    }
-
-    private static func send(_ object: [String: Any], to client: Int32) -> Bool {
-        guard let line = try? JSONSerialization.data(withJSONObject: object) else { return false }
-        return write(line, to: client)
-    }
-
-    /// Writes `line` and its newline whole.
-    private static func write(_ line: Data, to client: Int32) -> Bool {
-        var bytes = line
-        bytes.append(0x0A)
-        return bytes.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return false }
-            var offset = 0
-            while offset < raw.count {
-                let written = Darwin.send(client, base + offset, raw.count - offset, 0)
-                if written < 0, errno == EINTR { continue }
-                guard written > 0 else { return false }
-                offset += written
-            }
-            return true
-        }
     }
 }
 

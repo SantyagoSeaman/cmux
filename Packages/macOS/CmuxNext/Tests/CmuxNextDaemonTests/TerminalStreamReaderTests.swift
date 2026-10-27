@@ -17,7 +17,8 @@ import Testing
         /// - Parameters:
         ///   - ownsConnection: The socket is the view's own (`daemonTerminalStreams` off).
         ///   - highWater: The view's queue bound.
-        init(ownsConnection: Bool = false, highWater: Int = 8 << 20) throws {
+        ///   - tagsStreams: The daemon names streams (`attach-streams-v1`); false: an older daemon.
+        init(ownsConnection: Bool = false, highWater: Int = 8 << 20, tagsStreams: Bool = true) throws {
             var fds: [Int32] = [0, 0]
             #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
             transport = LineTransport(connected: fds[0], path: "socketpair")
@@ -25,7 +26,7 @@ import Testing
             queue = TerminalEventQueue(highWater: highWater)
             reader = TerminalStreamReader(transport: transport, queue: queue, control: TerminalAttachment.ControlBox(),
                                           resolvedSurface: TerminalAttachment.SurfaceBox(SurfaceID(rawValue: 4)),
-                                          ownsConnection: ownsConnection)
+                                          ownsConnection: ownsConnection, tagsRequests: tagsStreams)
             reader.stream = 9
         }
 
@@ -339,6 +340,25 @@ import Testing
         _ = try fixture.reply(#""not an attach reply""#)
         await #expect(throws: (any Error).self) { try await attach.value }
         #expect(fixture.transport.isClosed)
+    }
+
+    /// An older daemon (no `attach-streams-v1`) answers a snapshot-request within its throttle
+    /// interval with `snapshot_throttled` and sends no snapshot, so a resync could wait forever: an
+    /// overflow there ends the stream (its connection of its own closes) and the view reattaches.
+    @Test func anOverflowOnAnOlderDaemonEndsTheStreamInsteadOfWaitingForASnapshot() async throws {
+        let fixture = try Fixture(ownsConnection: true, highWater: 8, tagsStreams: false)
+        defer { fixture.transport.close(); close(fixture.daemon) }
+        let ready = #"{"event":"snapshot","surface":4,"phase":"ready","generation":1,"offset":0,"version":1,"cols":80,"rows":24,"data":"c2NyZWVu"}"#
+        fixture.reader.receive(.event(name: "snapshot", line: Data(ready.utf8)))
+        for chunk in ["MTIzNDU=", "Njc4OTA="] {  // "12345", "67890": 10 bytes queued, past the mark
+            let output = #"{"event":"output","surface":4,"data":"\#(chunk)"}"#
+            fixture.reader.receive(.event(name: "output", line: Data(output.utf8)))
+        }
+        #expect(fixture.transport.isClosed, "the view's own connection closes, so the view reattaches")
+        #expect(fixture.sent(1).isEmpty, "no snapshot-request: an older daemon may never answer it with a READY")
+        let events = await fixture.drain()
+        #expect(events.last == .closed(.overflow))
+        #expect(!events.contains { if case .output = $0 { true } else { false } })
     }
 
     @Test func aStreamEndWithReasonOverflowClosesTheViewAsAnOverflow() async throws {
