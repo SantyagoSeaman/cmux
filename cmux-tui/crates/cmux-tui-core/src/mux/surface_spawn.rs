@@ -1,8 +1,49 @@
 //! Surface spawning: terminal surfaces in a workspace, sidebar plugin surfaces, and browser surfaces with a resource identity.
 
 use super::*;
+use crate::workspace_registry::RegistryIntent;
 
 impl Mux {
+    /// Admit the `terminal-reserved` row of a reserved creation (split,
+    /// new-tab, layout and topology creates). The replay check, the revision
+    /// CAS and the revision are decided at prepare, in memory; the journal
+    /// writer commits the row later in admit order, so the request never
+    /// waits for a writer receipt here (F10, p05-ipc-120). The registry event
+    /// goes out at admit, before the reply. Chromium orders work at
+    /// scheduling and lets the backing store only apply it
+    /// (content/browser/indexed_db/indexed_db_transaction_coordinator.cc).
+    /// A retried mutation errors with `terminal_create_replayed`.
+    #[track_caller]
+    fn admit_terminal_reservation(
+        &self,
+        reservation: &TerminalReservationRequest,
+        terminal: &RegistryTerminal,
+    ) -> anyhow::Result<()> {
+        let mut registry = self.workspace_registry.lock().unwrap();
+        let intent = registry.prepare_terminal_commit(
+            &reservation.mutation,
+            &reservation.fingerprint,
+            reservation.expected_generation.as_deref(),
+            reservation.expected_revision,
+            "terminal-reserved",
+            terminal,
+            &serde_json::json!({
+                "terminal_id": terminal.terminal_id,
+                "workspace_key": terminal.workspace_key,
+                "state": "launching",
+            }),
+        )?;
+        let commit = registry
+            .admit_and_enqueue(RegistryIntent::Terminal(intent))?
+            .receipt
+            .into_terminal()?;
+        if commit.replayed {
+            anyhow::bail!("terminal_create_replayed");
+        }
+        self.emit_terminal_registry_changed(&registry, commit.revision);
+        Ok(())
+    }
+
     #[track_caller]
     pub(super) fn spawn_surface_in_workspace(
         self: &Arc<Self>,
@@ -108,41 +149,19 @@ impl Mux {
                     .map(|reservation| reservation.on_exit)
                     .unwrap_or_default(),
             };
-            let reserve_replayed = {
+            if let Some(reservation) = reservation.as_ref() {
+                self.admit_terminal_reservation(reservation, &terminal)?;
+            } else {
                 let mut registry = self.workspace_registry.lock().unwrap();
-                let (replayed, revision) = if let Some(reservation) = reservation.as_ref() {
-                    let commit = registry.commit_terminal(
-                        &reservation.mutation,
-                        &reservation.fingerprint,
-                        reservation.expected_generation.as_deref(),
-                        reservation.expected_revision,
-                        "terminal-reserved",
-                        &terminal,
-                        &serde_json::json!({
-                            "terminal_id":terminal_hex,
-                            "workspace_key":workspace_key,
-                            "state":"launching",
-                        }),
-                    )?;
-                    (commit.replayed, commit.revision)
-                } else {
-                    let revision = commit_terminal_transition(
-                        &mut registry,
-                        "terminal-reserved",
-                        "reserve-terminal",
-                        &terminal,
-                    )?;
-                    (false, revision)
-                };
-                if !replayed {
-                    self.emit_terminal_registry_changed(&registry, revision);
-                }
-                replayed
-            };
-            crate::debug_spans::mark("spawn.reserved");
-            if reserve_replayed {
-                anyhow::bail!("terminal_create_replayed");
+                let revision = commit_terminal_transition(
+                    &mut registry,
+                    "terminal-reserved",
+                    "reserve-terminal",
+                    &terminal,
+                )?;
+                self.emit_terminal_registry_changed(&registry, revision);
             }
+            crate::debug_spans::mark("spawn.reserved");
             let launched =
                 prelaunched.as_ref().map_or(&opts, |prelaunched| prelaunched.launch_opts());
             self.record_terminal_relaunch(&terminal_hex, launched);
@@ -271,26 +290,7 @@ impl Mux {
                 exit: None,
                 on_exit: reservation.on_exit,
             };
-            {
-                let mut registry = self.workspace_registry.lock().unwrap();
-                let commit = registry.commit_terminal(
-                    &reservation.mutation,
-                    &reservation.fingerprint,
-                    reservation.expected_generation.as_deref(),
-                    reservation.expected_revision,
-                    "terminal-reserved",
-                    &terminal,
-                    &serde_json::json!({
-                        "terminal_id":terminal_hex,
-                        "workspace_key":workspace_key,
-                        "state":"launching",
-                    }),
-                )?;
-                if commit.replayed {
-                    anyhow::bail!("terminal_create_replayed");
-                }
-                self.emit_terminal_registry_changed(&registry, commit.revision);
-            }
+            self.admit_terminal_reservation(reservation, &terminal)?;
             self.record_terminal_relaunch(&terminal_hex, &opts);
             #[cfg(test)]
             if let Some(hook) =
@@ -534,3 +534,7 @@ impl Mux {
         Ok(surface)
     }
 }
+
+#[cfg(test)]
+#[path = "surface_spawn_tests.rs"]
+mod tests;
