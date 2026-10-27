@@ -492,34 +492,23 @@ impl Mux {
                 "index": index,
                 "changed": true,
             });
-            let commit = if project_resource {
-                registry.commit_with_active_workspace(
-                    mutation,
-                    fingerprint,
-                    expected_generation,
-                    expected_revision,
-                    "workspace-closed",
-                    &key,
-                    &desired,
-                    desired_active_workspace,
-                    &committed_result,
-                )?
-            } else {
-                registry.commit_for_resource_effect(
-                    mutation,
-                    fingerprint,
-                    expected_generation,
-                    expected_revision,
-                    "workspace-closed",
-                    &key,
-                    &desired,
-                    desired_active_workspace,
-                    &committed_result,
-                )?
-            };
-            let resource_revision = project_resource
-                .then(|| registry.snapshot().map(|snapshot| snapshot.resource_revision))
-                .transpose()?;
+            let intent = registry.prepare_workspace_commit(
+                mutation,
+                fingerprint,
+                expected_generation,
+                expected_revision,
+                "workspace-closed",
+                &key,
+                &desired,
+                desired_active_workspace,
+                &committed_result,
+                project_resource,
+            )?;
+            // Admitted (F10): the receipt and resource revision are decided
+            // at prepare; the pin goes once the intent is on the writer's lane.
+            let admitted = registry.admit_workspace_commit(intent, false, || state.unpin())?;
+            let commit = admitted.commit;
+            let resource_revision = admitted.resource_revision;
             let mut delta = close_workspace_delta(&state, &notifications, workspace_id)
                 .expect("live workspace has a close delta");
             let was_active = state.active_workspace == index;

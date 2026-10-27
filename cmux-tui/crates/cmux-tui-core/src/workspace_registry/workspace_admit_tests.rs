@@ -74,7 +74,7 @@ fn a_staged_workspace_row_replies_before_the_writer_commits_it() {
                 tx.execute("INSERT INTO meta(key, value) VALUES(?1, '1')", [EXTRA_KEY])?;
                 Ok(())
             });
-            let commit = registry.commit_for_resource_effect_with(
+            let commit = registry.commit_for_resource_effect(
                 &stage_mutation(),
                 &stage_fingerprint(),
                 None,
@@ -163,6 +163,177 @@ fn a_presentation_commit_rides_the_admitted_intent() {
 
     let record = registry.presentation_snapshot().unwrap().workspace("titled").cloned();
     assert_eq!(record.and_then(|record| record.title).as_deref(), Some("Admitted"));
+    drop(registry);
+    drop(mux);
+    let _ = fs::remove_dir_all(root);
+}
+
+fn admit_stats(mux: &Mux) -> admitted_reply::AdmitStatsSnapshot {
+    mux.registry_connection.admit.snapshot()
+}
+
+/// Red on the base: `create_empty_workspace` pins the connection before it
+/// commits, so the commit fell back to a request-side transaction (and the
+/// reply waited for its fsync). Here the real Mux path releases its pin into
+/// the admission and replies while the journal writer is held.
+#[test]
+fn create_workspace_replies_while_the_journal_writer_is_held() {
+    let (mux, root) = admitting_mux("create");
+    let base = mux.workspace_registry.lock().unwrap().snapshot().unwrap();
+    let (request_commits, admits) = (request_side_commits(&mux), admit_stats(&mux));
+    let (entered, writer_entered) = sync_channel(1);
+    let (release_writer, release) = sync_channel(1);
+    mux.install_journal_before_commit_for_test(entered, release);
+
+    let stats = RequestPathStats::new(RequestPathMode::RECORD);
+    let (replied, reply) = sync_channel(1);
+    let request = std::thread::spawn({
+        let (mux, stats) = (mux.clone(), stats.clone());
+        move || {
+            let _scope = RequestPathScope::enter(&stats);
+            let started = std::time::Instant::now();
+            let placement = mux.create_empty_workspace(Some("admitted".into()), None, None);
+            let elapsed = started.elapsed();
+            replied.send((placement.map_err(|error| format!("{error:#}")), elapsed)).unwrap();
+        }
+    });
+
+    let (placement, elapsed) = reply
+        .recv_timeout(Duration::from_secs(5))
+        .expect("create-workspace must not wait for the held journal writer");
+    let placement = placement.expect("created");
+    eprintln!("create-workspace replied in {elapsed:?} with the journal writer held");
+    assert_eq!((placement.revision, placement.replayed), (base.revision + 1, false));
+    assert_eq!(stats.count(BlockingKind::JournalWait), 0, "{:?}", stats.sites());
+    let admitted = admit_stats(&mux);
+    assert_eq!(admitted.admitted, admits.admitted + 1, "{admitted:?}");
+    assert_eq!(admitted.fallbacks_connection_held, admits.fallbacks_connection_held);
+    request.join().unwrap();
+    writer_entered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the writer took the admitted creation");
+    release_writer.send(()).unwrap();
+
+    let registry = mux.workspace_registry.lock().unwrap();
+    let snapshot = registry.snapshot().unwrap();
+    assert_eq!(snapshot.revision, placement.revision, "the writer committed the reply");
+    assert!(snapshot.workspaces.iter().any(|workspace| workspace.key == placement.key));
+    let state = mux.state.lock().unwrap();
+    assert_eq!(state.workspace_revision, placement.revision);
+    assert_eq!(state.resource_revision, snapshot.resource_revision, "the prepared revision");
+    drop(state);
+    drop(registry);
+    assert_eq!(request_side_commits(&mux), request_commits, "the writer committed it");
+    let settled = admit_stats(&mux);
+    assert_eq!(settled.journal_degraded, admits.journal_degraded, "{settled:?}");
+    drop(mux);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A workspace intent with `project_resource` whose extra row marks it the
+/// app workspace of one app.
+fn app_workspace_intent(
+    registry: &WorkspaceRegistry,
+    base: &RegistrySnapshot,
+    key: &str,
+    mutation: &str,
+) -> anyhow::Result<WorkspaceCommitIntent> {
+    let workspaces = with_workspace(base, key);
+    let public_id = workspaces.last().unwrap().public_id.clone();
+    let intent = registry.prepare_workspace_commit(
+        &WorkspaceMutation::daemon(mutation, "test").unwrap(),
+        &serde_json::json!({"op":"create-workspace","key":key,"app":"admit-app"}),
+        None,
+        None,
+        "workspace-added",
+        key,
+        &workspaces,
+        Some(&public_id),
+        &serde_json::json!({"key":key}),
+        true,
+    )?;
+    let (marked, marked_key) = (public_id.as_str().to_string(), key.to_string());
+    let mark = crate::state::home_store::EmptyWorkspaceMark::App("admit-app".into());
+    Ok(intent.with_extra_rows(Box::new(move |tx| mark.write(tx, &marked, &marked_key))))
+}
+
+/// Red before the rows were checked at prepare: the duplicate's mark failed
+/// only in the writer's SAVEPOINT, after the request had replied success,
+/// so memory took a workspace SQLite refused (journal-degraded). The second
+/// app workspace of one app is refused at the request while the first is
+/// still admitted, and the journal stays whole.
+#[test]
+fn an_admitted_app_workspace_refuses_a_second_one_at_the_request() {
+    let (mux, root) = admitting_mux("app-mark");
+    let admits = admit_stats(&mux);
+    let (entered, writer_entered) = sync_channel(1);
+    let (release_writer, release) = sync_channel(1);
+    mux.install_journal_before_commit_for_test(entered, release);
+
+    let mut registry = mux.workspace_registry.lock().unwrap();
+    let base = registry.snapshot().unwrap();
+    let first = app_workspace_intent(&registry, &base, "app-first", "admit-app-first").unwrap();
+    let first = registry.admit_workspace_commit(first, false, || {}).expect("first admitted");
+    assert_eq!(first.commit.revision, base.revision + 1);
+    assert_eq!(admit_stats(&mux).admitted, admits.admitted + 1);
+    drop(registry);
+
+    let second = std::thread::spawn({
+        let mux = mux.clone();
+        move || {
+            let mut registry = mux.workspace_registry.lock().unwrap();
+            let base = registry.snapshot()?;
+            let intent = app_workspace_intent(&registry, &base, "app-second", "admit-app-second")?;
+            registry.admit_workspace_commit(intent, false, || {}).map(|admitted| admitted.commit)
+        }
+    });
+    writer_entered.recv_timeout(Duration::from_secs(10)).expect("the writer took the first");
+    release_writer.send(()).unwrap();
+    let error = second.join().unwrap().expect_err("a second app workspace is refused");
+    assert!(format!("{error:#}").contains("already has a workspace"), "{error:#}");
+
+    let settled = admit_stats(&mux);
+    assert_eq!(settled.admitted, admits.admitted + 1, "the refused one was never admitted");
+    assert_eq!(settled.journal_degraded, admits.journal_degraded, "{settled:?}");
+    let registry = mux.workspace_registry.lock().unwrap();
+    assert_eq!(registry.snapshot().unwrap().revision, base.revision + 1);
+    drop(registry);
+    drop(mux);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Red before the rows were checked at prepare: an icon that names a
+/// missing asset failed only in the writer, after the reply. It is refused
+/// at the request, nothing is admitted, and the journal stays whole.
+#[test]
+fn a_missing_icon_asset_is_refused_before_admission() {
+    let (mux, root) = admitting_mux("icon");
+    let admits = admit_stats(&mux);
+    let mut registry = mux.workspace_registry.lock().unwrap();
+    let base = registry.snapshot().unwrap();
+    let workspaces = with_workspace(&base, "iconed");
+    let active = workspaces.last().map(|workspace| workspace.public_id.clone());
+    let missing = format!("svg:sha256-{}", "0".repeat(64));
+    let update = WorkspacePresentationUpdate { icon: Some(Some(missing)), ..Default::default() };
+    let error = registry
+        .commit_workspace_presentation(
+            &WorkspaceMutation::daemon("workspace-admit-icon", "test").unwrap(),
+            &serde_json::json!({"op":"set-workspace-metadata","key":"iconed"}),
+            None,
+            Some(base.revision),
+            "workspace-added",
+            "iconed",
+            &workspaces,
+            active.as_ref(),
+            &update,
+            &serde_json::json!({"key":"iconed"}),
+        )
+        .expect_err("a missing icon asset is refused");
+    assert!(format!("{error:#}").contains("unknown icon asset"), "{error:#}");
+    let settled = admit_stats(&mux);
+    assert_eq!(settled.admitted, admits.admitted, "{settled:?}");
+    assert_eq!(settled.journal_degraded, admits.journal_degraded, "{settled:?}");
+    assert_eq!(registry.snapshot().unwrap().revision, base.revision);
     drop(registry);
     drop(mux);
     let _ = fs::remove_dir_all(root);

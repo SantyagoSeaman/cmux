@@ -144,6 +144,7 @@ fn interrupted_staged_workspace_keeps_reserved_public_id_without_early_publicati
                 std::slice::from_ref(&staged),
                 Some(&public_id),
                 &json!({"workspace":1,"workspace_id":public_id,"key":key,"index":0}),
+                None,
             )
             .unwrap();
         let public = registry.resource_topology_snapshot().unwrap();

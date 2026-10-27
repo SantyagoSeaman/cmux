@@ -3375,7 +3375,7 @@ impl WorkspaceRegistry {
         active_workspace: Option<&WorkspacePublicId>,
         result: &Value,
     ) -> anyhow::Result<RegistryCommit> {
-        self.admit_workspace_registry(
+        let intent = self.prepare_workspace_commit(
             mutation,
             fingerprint,
             expected_generation,
@@ -3386,8 +3386,8 @@ impl WorkspaceRegistry {
             active_workspace,
             result,
             true,
-            None,
-        )
+        )?;
+        Ok(self.admit_workspace_commit(intent, false, || {})?.commit)
     }
 
     /// Commit a workspace-registry revision that also writes one workspace's
@@ -3410,12 +3410,7 @@ impl WorkspaceRegistry {
         update: &WorkspacePresentationUpdate,
         result: &Value,
     ) -> anyhow::Result<RegistryCommit> {
-        update.validate()?;
-        let (key, presentation) = (workspace_key.to_string(), update.clone());
-        let write: OwnedTransactionWrite = Box::new(move |tx: &Transaction<'_>| {
-            presentation_store::write_workspace_presentation(tx, &key, &presentation)
-        });
-        self.admit_workspace_registry(
+        let intent = self.prepare_workspace_presentation_commit(
             mutation,
             fingerprint,
             expected_generation,
@@ -3424,10 +3419,10 @@ impl WorkspaceRegistry {
             workspace_key,
             workspaces,
             active_workspace,
+            update,
             result,
-            true,
-            Some(write),
-        )
+        )?;
+        Ok(self.admit_workspace_commit(intent, false, || {})?.commit)
     }
 
     #[track_caller]
