@@ -1,3 +1,4 @@
+import CmuxNextCompat
 public import Foundation
 
 /// Lists the Chrome Web Store extensions of a Chromium profile.
@@ -43,7 +44,7 @@ public struct ProfileExtensions: Sendable {
             }
         }
         let installed = profile.appending(path: "Extensions")
-        let folders = (try? FileManager.default.contentsOfDirectory(atPath: installed.path)) ?? []
+        let folders = (try? FileManager.checked.contentsOfDirectory(atPath: installed.path)) ?? []
         let ids = Set(settings.keys).union(folders).filter(ImportedExtension.isValidID).subtracting(Self.builtIns)
         var found: [ImportedExtension] = []
         for id in ids {
@@ -69,7 +70,7 @@ public struct ProfileExtensions: Sendable {
 
     /// The manifest in the highest version folder that has one.
     private func latestManifest(_ extensionFolder: URL) async -> FolderManifest? {
-        let versions = (try? FileManager.default.contentsOfDirectory(atPath: extensionFolder.path)) ?? []
+        let versions = (try? FileManager.checked.contentsOfDirectory(atPath: extensionFolder.path)) ?? []
         for version in versions.sorted(by: { $0.compare($1, options: .numeric) == .orderedDescending }) {
             let folder = extensionFolder.appending(path: version, directoryHint: .isDirectory)
             if let manifest = try? await reader.extensionManifest(folder.appending(path: "manifest.json")) {

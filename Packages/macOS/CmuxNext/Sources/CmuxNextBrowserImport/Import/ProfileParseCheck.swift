@@ -13,14 +13,14 @@ extension ProfileParseResult {
         guard kind == spec.format.kind else { return nil }
         switch self {
         case .bookmarks(let read):
-            guard var check = ImportReplyCheck(read.skipped) else { return nil }
-            return .bookmarks(check.bookmarks(read.items))
+            guard ImportReplyCheck.counts(read.skipped), read.items.count <= ImportReplyCheck.maximumBookmarks else { return nil }
+            return .bookmarks(ImportReplyCheck.bookmarks(read))
         case .history(let read):
-            guard var check = ImportReplyCheck(read.skipped) else { return nil }
-            return .history(check.history(read.items, limit: spec.historyLimit))
+            guard ImportReplyCheck.counts(read.skipped), read.items.count <= ImportReplyCheck.maximumEntries else { return nil }
+            return .history(ImportReplyCheck.history(read, limit: spec.historyLimit))
         case .openTabs(let read):
-            guard var check = ImportReplyCheck(read.skipped) else { return nil }
-            return .openTabs(check.tabs(read.items))
+            guard ImportReplyCheck.counts(read.skipped), read.items.count <= ImportReplyCheck.maximumTabs else { return nil }
+            return .openTabs(ImportReplyCheck.tabs(read))
         case .cookies(let rows):
             return ImportReplyCheck.cookies(rows).map(ProfileParseResult.cookies)
         case .chromiumLogins(let logins):
@@ -46,16 +46,16 @@ extension ProfileParseResult {
     }
 }
 
-/// The checks of one reply's entries, with the skip counters they add to.
+/// The checks of one reply. Every bound is past what a reader gives, so an honest reply passes as it is.
 struct ImportReplyCheck {
-    /// Counters and entries in a reply are at most this many (no reader gives more), so sums over
-    /// every profile of an import stay far from `Int.max`.
+    /// A counter in a reply is at most this (no reader counts more), so the App's sums of every
+    /// profile's counters stay far from `Int.max`.
     static let maximumCount = 2_147_483_647
     /// Bookmarks of one profile: Safari's reader stops at 2^18 entries; more than this is no real profile.
     static let maximumBookmarks = 1 << 22
     /// Open tabs of one session.
     static let maximumTabs = 1 << 20
-    /// Cookies of one store, sign-ins of one database, `logins.json` entries.
+    /// History pages, cookies of one store, sign-ins of one database, `logins.json` entries.
     static let maximumEntries = 1 << 22
     /// Master keys of one key store, extensions of one `Preferences` file.
     static let maximumKeys = 1 << 16
@@ -66,18 +66,15 @@ struct ImportReplyCheck {
     /// Parts of one export archive.
     static let maximumParts = 1024
 
-    private(set) var skipped: ImportSkipCounts
-
-    /// Nil when a counter is negative or past ``maximumCount``.
-    init?(_ skipped: ImportSkipCounts) {
-        let counters = [skipped.notImportable, skipped.badTime, skipped.repeatedFolder, skipped.tooDeep, skipped.overLimit, skipped.unsupported]
-        guard counters.allSatisfy({ (0...Self.maximumCount).contains($0) }) else { return nil }
-        self.skipped = skipped
+    /// Whether every counter is in `0...maximumCount`.
+    static func counts(_ skipped: ImportSkipCounts) -> Bool {
+        [skipped.notImportable, skipped.badTime, skipped.repeatedFolder, skipped.tooDeep, skipped.overLimit, skipped.unsupported]
+            .allSatisfy { (0...maximumCount).contains($0) }
     }
 
-    /// `more` added to one counter, which stays at most ``maximumCount`` (both are at most that, so the sum fits).
-    private mutating func count(_ counter: WritableKeyPath<ImportSkipCounts, Int>, _ more: Int = 1) {
-        skipped[keyPath: counter] = min(skipped[keyPath: counter] + min(more, Self.maximumCount), Self.maximumCount)
+    static func counts(_ skipped: LoginSkipCounts) -> Bool {
+        [skipped.neverSaved, skipped.notWebForm, skipped.empty, skipped.undecryptable, skipped.duplicate]
+            .allSatisfy { (0...maximumCount).contains($0) }
     }
 
     /// The address as a reader gives it (parsed again from its text), or nil when no reader would.
@@ -85,59 +82,58 @@ struct ImportReplyCheck {
         ImportableURL(url.absoluteString)?.url
     }
 
-    mutating func bookmarks(_ items: [ImportedBookmark]) -> ImportRead<ImportedBookmark> {
-        var kept: [ImportedBookmark] = []
-        for item in items.prefix(Self.maximumBookmarks) {
-            guard let url = Self.importable(item.url) else {
-                count(\.notImportable)
+    /// The bookmarks a reader could give; the others counted (the counts are bounded, so the sum fits).
+    static func bookmarks(_ read: ImportRead<ImportedBookmark>) -> ImportRead<ImportedBookmark> {
+        var checked = ImportRead<ImportedBookmark>(skipped: read.skipped)
+        for item in read.items {
+            guard let url = importable(item.url) else {
+                checked.skipped.notImportable += 1
                 continue
             }
-            guard item.folderPath.count <= Self.maximumPath else {
-                count(\.tooDeep)
+            guard item.folderPath.count <= maximumPath else {
+                checked.skipped.tooDeep += 1
                 continue
             }
             var bookmark = item
             bookmark.url = url
             bookmark.dateAdded = item.dateAdded.flatMap(BrowserTime.kept)
-            kept.append(bookmark)
+            checked.items.append(bookmark)
         }
-        count(\.overLimit, max(0, items.count - Self.maximumBookmarks))
-        return ImportRead(items: kept, skipped: skipped)
+        return checked
     }
 
     /// The newest `limit` pages at most (the readers' `LIMIT`; pages past it are not counted).
-    mutating func history(_ items: [ImportedHistoryEntry], limit: Int) -> ImportRead<ImportedHistoryEntry> {
-        var kept: [ImportedHistoryEntry] = []
-        for item in items.prefix(max(0, limit)) {
-            guard let url = Self.importable(item.url) else {
-                count(\.notImportable)
+    static func history(_ read: ImportRead<ImportedHistoryEntry>, limit: Int) -> ImportRead<ImportedHistoryEntry> {
+        var checked = ImportRead<ImportedHistoryEntry>(skipped: read.skipped)
+        for item in read.items.prefix(max(0, limit)) {
+            guard let url = importable(item.url) else {
+                checked.skipped.notImportable += 1
                 continue
             }
             guard let lastVisit = BrowserTime.kept(item.lastVisit) else {
-                count(\.badTime)
+                checked.skipped.badTime += 1
                 continue
             }
             // The initializer clamps the visits as a reader's does.
-            kept.append(ImportedHistoryEntry(url: url, title: item.title, visitCount: item.visitCount, lastVisit: lastVisit))
+            checked.items.append(ImportedHistoryEntry(url: url, title: item.title, visitCount: item.visitCount, lastVisit: lastVisit))
         }
-        return ImportRead(items: kept, skipped: skipped)
+        return checked
     }
 
-    mutating func tabs(_ items: [ImportedTab]) -> ImportRead<ImportedTab> {
-        var kept: [ImportedTab] = []
-        for item in items.prefix(Self.maximumTabs) {
-            guard let url = Self.importable(item.url) else {
-                count(\.notImportable)
+    static func tabs(_ read: ImportRead<ImportedTab>) -> ImportRead<ImportedTab> {
+        var checked = ImportRead<ImportedTab>(skipped: read.skipped)
+        for item in read.items {
+            guard let url = importable(item.url) else {
+                checked.skipped.notImportable += 1
                 continue
             }
-            guard (0...Self.maximumCount).contains(item.window) else {
-                count(\.unsupported)
+            guard (0...maximumTabs).contains(item.window) else {
+                checked.skipped.unsupported += 1
                 continue
             }
-            kept.append(ImportedTab(url: url, title: item.title, window: item.window, pinned: item.pinned))
+            checked.items.append(ImportedTab(url: url, title: item.title, window: item.window, pinned: item.pinned))
         }
-        count(\.overLimit, max(0, items.count - Self.maximumTabs))
-        return ImportRead(items: kept, skipped: skipped)
+        return checked
     }
 
     /// The rows again through the cookie's initializer (its path rule), with every time checked.
@@ -156,9 +152,7 @@ struct ImportReplyCheck {
     }
 
     static func logins(_ logins: SealedLogins) -> SealedLogins? {
-        let skipped = logins.skipped
-        let counters = [skipped.neverSaved, skipped.notWebForm, skipped.empty, skipped.undecryptable, skipped.duplicate]
-        guard counters.allSatisfy({ (0...maximumCount).contains($0) }), logins.logins.count <= maximumEntries else { return nil }
+        guard counts(logins.skipped), logins.logins.count <= maximumEntries else { return nil }
         var checked = logins
         checked.logins = logins.logins.map { login in
             var login = login
