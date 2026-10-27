@@ -64,11 +64,17 @@ fn lane_writer_coalesce_1000_size_states_behind_a_blocked_writer_send_1() {
     for generation in 0..1000 {
         let pushed =
             writer.push_control_coalescing(size_state(10 + generation), surface_a, keep_newer);
-        assert_eq!(pushed, Ok(if generation == 0 { Pushed::Queued } else { Pushed::Coalesced }));
+        assert_eq!(
+            pushed,
+            Ok(if generation == 0 { Pushed::Queued } else { Pushed::Coalesced { retired: None } })
+        );
         // Another surface's state between them is passed: their keys differ.
         let other = size_state(5000 + generation);
         let pushed = writer.push_control_coalescing(other, surface_b, keep_newer);
-        assert_eq!(pushed, Ok(if generation == 0 { Pushed::Queued } else { Pushed::Coalesced }));
+        assert_eq!(
+            pushed,
+            Ok(if generation == 0 { Pushed::Queued } else { Pushed::Coalesced { retired: None } })
+        );
     }
     let sent: Vec<u32> = std::iter::from_fn(|| writer.pop()).map(|frame| value(&frame)).collect();
     assert_eq!(sent, vec![0, 1009, 5999], "the reply, then one newest state per surface");
@@ -84,7 +90,7 @@ fn lane_writer_coalesce_never_passes_an_unkeyed_item() {
     assert_eq!(writer.push_control_coalescing(size_state(3), key, keep_newer), Ok(Pushed::Queued));
     assert_eq!(
         writer.push_control_coalescing(size_state(4), key, keep_newer),
-        Ok(Pushed::Coalesced)
+        Ok(Pushed::Coalesced { retired: None })
     );
     // The same key on another control-sequence stream is another item.
     let on_nine = call_frame(FrameKind::TypedEvent, 9, SIZE_STATE, 5, 5);
@@ -103,7 +109,11 @@ fn lane_writer_coalesce_100_resizes_in_a_frame_send_1_and_deltas_sum() {
     let scroll = CoalesceKey::new(0x0503, 3);
     for size in 1..=100 {
         let frame = call_frame(FrameKind::Request, 3, RESIZE, size, size);
-        writer.push_stream_coalescing(frame, resize, keep_newer).unwrap();
+        let pushed = writer.push_stream_coalescing(frame, resize, keep_newer);
+        // Each replaced request's id is retired: no reply will ever name it.
+        let retired = (size > 1).then(|| size - 1);
+        let expected = if size == 1 { Pushed::Queued } else { Pushed::Coalesced { retired } };
+        assert_eq!(pushed, Ok(expected));
         let delta = call_frame(FrameKind::Request, 3, 0x0503, 1000 + size, 1);
         writer.push_stream_coalescing(delta, scroll, sum_delta).unwrap();
     }
@@ -140,7 +150,11 @@ fn lane_writer_coalesce_keeps_order_with_unkeyed_items() {
                     let run = model.iter_mut().rev().take_while(|item| item.1.is_some());
                     match run.into_iter().find(|item| item.0 == stream && item.1 == Some(key)) {
                         Some(queued) => {
-                            assert_eq!(pushed, Ok(Pushed::Coalesced), "seed {seed}");
+                            assert_eq!(
+                                pushed,
+                                Ok(Pushed::Coalesced { retired: None }),
+                                "seed {seed}"
+                            );
                             queued.2 = message;
                         }
                         None => {

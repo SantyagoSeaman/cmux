@@ -55,8 +55,8 @@ final class LineTransport: Sendable {
     /// (LineTransport+Route.swift).
     let state = Mutex(State())
     private let socket: Mutex<Socket>
-    /// Nonblocking, ordered writes (never parks the calling actor's thread).
-    private let writer: SocketWriter
+    /// Nonblocking, ordered writes (never parks the calling actor's thread); written under the socket lock.
+    let writer: SocketWriter
     let path: String
 
     /// The bridge child of this connection (``DaemonBridge``), killed and
@@ -224,6 +224,14 @@ final class LineTransport: Sendable {
         if case .failure(let error) = submit(.discard(cmd: cmd, onError: onError), body) { throw error }
     }
 
+    /// ``sendNoReply(cmd:onError:_:)`` for a continuous request (a resize): while it is unsent, a newer one with
+    /// `key` takes its place on the wire (``FrameWriter/enqueue(_:priority:continuous:)``), and the replaced
+    /// request's waiter leaves at once, as nothing will ever answer its id.
+    func sendNoReply(cmd: String, coalescing key: FrameWriter.CoalesceKey,
+                     onError: (@Sendable (DaemonError) -> Void)? = nil, _ body: (UInt64) throws -> Data) throws {
+        if case .failure(let error) = submit(.discard(cmd: cmd, onError: onError), deadline: nil, coalescing: key, body) { throw error }
+    }
+
     /// Writes one line that has no `id` and gets no reply (`loopback-data`
     /// and the other stream lines of `loopback-forward-v1`). Ordered with
     /// every other write. False once the socket failed or closed.
@@ -245,6 +253,14 @@ final class LineTransport: Sendable {
     /// Returns the request id once the waiter is registered.
     @discardableResult
     func submit(_ waiter: Waiter, deadline: DeadlineHeap.Deadline? = nil, _ body: (UInt64) throws -> Data) -> Result<UInt64, any Error> {
+        submit(waiter, deadline: deadline, coalescing: nil, body)
+    }
+
+    /// ``submit(_:deadline:_:)``; with a `key` the line is a continuous request that may replace the unsent one with
+    /// that key, whose waiter is then removed. Only ``sendNoReply(cmd:coalescing:onError:_:)`` passes a key, with
+    /// a waiter that discards its reply, so a removed waiter never leaves a caller waiting.
+    private func submit(_ waiter: Waiter, deadline: DeadlineHeap.Deadline?, coalescing key: FrameWriter.CoalesceKey?,
+                        _ body: (UInt64) throws -> Data) -> Result<UInt64, any Error> {
         var writeFailure: String?
         var submittedID: UInt64 = 0
         let early: (any Error)? = socket.withLock { socket -> (any Error)? in
@@ -272,7 +288,7 @@ final class LineTransport: Sendable {
             submittedID = id
             var line = payload
             line.append(0x0A)
-            writeFailure = socket.fd >= 0 ? writer.write(line)?.description : "socket closed"
+            writeFailure = socket.fd >= 0 ? writeLine(line, id: id, coalescing: key) : "socket closed"
             if writeFailure == nil { recorder?.lineWritten(bytes: line.count) }
             return nil
         }

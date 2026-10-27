@@ -1,14 +1,16 @@
 import Foundation
 
-// The priority FIFOs of ``FrameWriter``: what waits, what one drain step takes, coalescing, and the continuous
-// messages held for the next display refresh (p05-ipc-055, p05-ipc-141).
+// The priority FIFOs of ``FrameWriter``: what waits, what one drain step takes, and coalescing (p05-ipc-055,
+// p05-ipc-141).
 
 extension FrameWriter {
     struct Message {
         var bytes: Data
         let fds: [Int32]
-        /// Set on a continuous message: a newer one with this key replaces it while it is unsent.
+        /// Set on a continuous message: a newer one with this key merges into it while it is unsent.
         let key: CoalesceKey?
+        /// The caller's name for a continuous message (its request id), reported when a newer one replaces it.
+        var identity: UInt64
     }
 
     /// One drain step: messages in wire order; `fds` go with the first byte.
@@ -24,25 +26,15 @@ extension FrameWriter {
         }
     }
 
-    /// One priority's FIFO: popped slots are cleared at once, so a sent message's bytes are not retained. Messages
-    /// from `released` on are continuous messages held for the next display refresh; everything before may go.
+    /// One priority's FIFO: popped slots are cleared at once, so a sent message's bytes are not retained.
     struct Lane {
         private var slots: [Message?] = []
         private var head = 0
-        private var released = 0
 
-        var first: Message? { head < released ? slots[head] : nil }
+        var first: Message? { head < slots.count ? slots[head] : nil }
 
-        mutating func append(_ message: Message, held: Bool) {
+        mutating func append(_ message: Message) {
             slots.append(message)
-            // A message that is not held releases the held ones before it: they keep their place in the FIFO
-            // (Blink's MainThreadEventQueue dispatches every event up to the last one that is not rAF-aligned).
-            if !held { released = slots.count }
-        }
-
-        /// The display refresh came: every held message may go.
-        mutating func releaseHeld() {
-            released = slots.count
         }
 
         /// The unsent message with `key` among the keyed messages at the FIFO's tail: the walk back passes
@@ -57,24 +49,24 @@ extension FrameWriter {
             return nil
         }
 
-        func byteCount(at index: Int) -> Int { slots[index]?.bytes.count ?? 0 }
+        func message(at index: Int) -> Message? { slots[index] }
 
-        mutating func replaceBytes(at index: Int, with bytes: Data) {
+        /// Puts `bytes` and `identity` in place of the message at `index`; its key, place and descriptors stay.
+        mutating func replace(at index: Int, bytes: Data, identity: UInt64) {
             slots[index]?.bytes = bytes
+            slots[index]?.identity = identity
         }
 
         mutating func popFirst() -> Message? {
-            guard head < released else { return nil }
+            guard head < slots.count else { return nil }
             let message = slots[head]
             slots[head] = nil
             head += 1
             if head == slots.count {
                 slots.removeAll(keepingCapacity: true)
                 head = 0
-                released = 0
             } else if head >= 64, head * 2 >= slots.count {
                 slots.removeFirst(head)
-                released -= head
                 head = 0
             }
             return message
@@ -85,7 +77,6 @@ extension FrameWriter {
             let fds = slots[head...].flatMap { $0?.fds ?? [] }
             slots.removeAll()
             head = 0
-            released = 0
             return fds
         }
     }
@@ -97,31 +88,26 @@ extension FrameWriter {
         var draining = false
         var closed = false
         var failure: Failure?
-        /// A refresh was asked for the held messages and has not come yet.
-        var refreshRequested = false
 
-        /// Whether a message may be sent now.
-        var hasReady: Bool { lanes.contains { $0.first != nil } }
-
-        mutating func append(_ message: Message, priority: MethodPriority, held: Bool) {
-            lanes[Int(priority.rawValue)].append(message, held: held)
+        mutating func append(_ message: Message, priority: MethodPriority) {
+            lanes[Int(priority.rawValue)].append(message)
             queuedBytes += message.bytes.count
         }
 
-        /// Puts `bytes` in place of the unsent message of `priority` with `key`. nil when there is none to
-        /// replace; else whether the replacement fit in `limit` (it is made only then).
-        mutating func replace(_ bytes: Data, key: CoalesceKey, priority: MethodPriority, limit: Int) -> Bool? {
+        /// Merges `message` into the unsent message of `priority` with its key: `merge` of the two, or `message`
+        /// when `merge` is nil, takes the queued one's place. nil when `message` has no key or none is queued to
+        /// merge into; else the replaced identity, or why the merge did not fit in `limit` (nothing changes then).
+        mutating func merge(_ message: Message, priority: MethodPriority, merge: Continuous.Merge?,
+                            limit: Int) -> Coalesced? {
             let lane = Int(priority.rawValue)
-            guard let index = lanes[lane].coalescingIndex(key) else { return nil }
-            let queued = queuedBytes - lanes[lane].byteCount(at: index) + bytes.count
-            guard queued <= limit else { return false }
-            lanes[lane].replaceBytes(at: index, with: bytes)
-            queuedBytes = queued
-            return true
-        }
-
-        mutating func releaseHeld() {
-            for index in lanes.indices { lanes[index].releaseHeld() }
+            guard let key = message.key, let index = lanes[lane].coalescingIndex(key),
+                  let queued = lanes[lane].message(at: index) else { return nil }
+            let bytes = merge.map { $0(queued.bytes, message.bytes) } ?? message.bytes
+            let total = queuedBytes - queued.bytes.count + bytes.count
+            guard total <= limit else { return .refused(.backlog(queued: queuedBytes)) }
+            lanes[lane].replace(at: index, bytes: bytes, identity: message.identity)
+            queuedBytes = total
+            return .replaced(identity: queued.identity)
         }
 
         /// The next drain step: the head of the highest non-empty FIFO. When that head is input or control, the

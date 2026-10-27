@@ -361,7 +361,7 @@ fn lane_writer_coalesce_hook_replaces_unsent_frame_in_place() {
     for message in 4..1000 {
         assert_eq!(
             writer.push_control_coalescing(event(message), key, keep_newer),
-            Ok(Pushed::Coalesced)
+            Ok(Pushed::Coalesced { retired: None })
         );
     }
     let ids: Vec<u32> = std::iter::from_fn(|| writer.pop())
@@ -529,7 +529,11 @@ fn lane_writer_coalescing_keeps_emit_order() {
                     let run = fifo.iter_mut().rev().take_while(|item| item.1.is_some());
                     match run.into_iter().find(|item| item.1 == Some(key)) {
                         Some(queued) => {
-                            assert_eq!(pushed, Ok(Pushed::Coalesced), "seed {seed}");
+                            assert_eq!(
+                                pushed,
+                                Ok(Pushed::Coalesced { retired: None }),
+                                "seed {seed}"
+                            );
                             queued.0 = message;
                         }
                         None => {

@@ -75,7 +75,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
-use crate::frame::{BadMessage, Frame, PriorityHint};
+use crate::frame::{BadMessage, Frame, FrameKind, PriorityHint};
 
 mod fifo;
 use fifo::{Fifo, Queued, frame_cost};
@@ -188,8 +188,13 @@ impl CoalesceKey {
 pub enum Pushed {
     /// The frame joined the back of its FIFO.
     Queued,
-    /// The frame was merged into the FIFO's unsent tail, which had its key.
-    Coalesced,
+    /// The frame was merged into an unsent queued frame with its key.
+    /// `retired` is the request id of a replaced request that will now never
+    /// be written (the merge kept another id): the producer drops what waits
+    /// for its reply, as Blink keeps the callbacks of a coalesced event
+    /// (main_thread_event_queue.cc). `None` when the replaced frame was not a
+    /// request or the merged frame kept its id.
+    Coalesced { retired: Option<u32> },
 }
 
 /// Why the policy ended a stream on its own.
@@ -474,12 +479,12 @@ impl LaneWriter {
             self.queue_control(frame, Some(key));
             return Ok(Pushed::Queued);
         };
-        let merged = Self::merged(&self.control, index, frame, merge)?;
+        let (merged, retired) = Self::merged(&self.control, index, frame, merge)?;
         self.make_room(Self::growth(&self.control, index, &merged), None)?;
         let before = self.control.bytes;
         self.control.replace(index, merged, self.config.chunk_bytes);
         self.account_change(before, self.control.bytes);
-        Ok(Pushed::Coalesced)
+        Ok(Pushed::Coalesced { retired })
     }
 
     /// Queues a frame on its stream's FIFO.
@@ -506,7 +511,7 @@ impl LaneWriter {
             self.queue_stream(frame, Some(key))?;
             return Ok(Pushed::Queued);
         };
-        let merged = Self::merged(&queue.fifo, index, frame, merge)?;
+        let (merged, retired) = Self::merged(&queue.fifo, index, frame, merge)?;
         let growth = Self::growth(&queue.fifo, index, &merged);
         self.make_room(growth, Some(stream))?;
         let chunk_bytes = self.config.chunk_bytes;
@@ -515,7 +520,7 @@ impl LaneWriter {
         queue.fifo.replace(index, merged, chunk_bytes);
         let after = queue.fifo.bytes;
         self.account_change(before, after);
-        Ok(Pushed::Coalesced)
+        Ok(Pushed::Coalesced { retired })
     }
 
     /// The next frame to write, or `None` when nothing is queued. Allocates
@@ -752,16 +757,17 @@ impl LaneWriter {
         index: usize,
         frame: Frame,
         merge: impl FnOnce(&Frame, Frame) -> Frame,
-    ) -> Result<Frame, LaneError> {
+    ) -> Result<(Frame, Option<u32>), LaneError> {
         let stream = frame.header().stream();
         let Some(queued) = fifo.items.get(index) else {
-            return Ok(frame);
+            return Ok((frame, None));
         };
         let merged = merge(&queued.frame, frame);
         if merged.header().stream() != queued.frame.header().stream() {
             return Err(LaneError::CoalesceChangedStream { stream });
         }
-        Ok(merged)
+        let retired = retired_request(&queued.frame, &merged);
+        Ok((merged, retired))
     }
 
     /// Bytes the queue grows by when `merged` replaces the item at `index`.
@@ -825,4 +831,14 @@ impl LaneWriter {
         self.queued_bytes = self.queued_bytes.saturating_sub(dropped);
         self.ended.push_back(EndedStream { stream, dropped_bytes: dropped, reason });
     }
+}
+
+/// The request id of `queued`, a request a merge replaced, when `merged` does
+/// not carry it: nothing will ever answer that id.
+fn retired_request(queued: &Frame, merged: &Frame) -> Option<u32> {
+    if queued.header().kind() != FrameKind::Request {
+        return None;
+    }
+    let id = queued.header().call()?.request_id;
+    (merged.header().call().map(|call| call.request_id) != Some(id)).then_some(id)
 }

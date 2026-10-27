@@ -6,7 +6,7 @@ public import Foundation
 /// Writes whole wire messages (JSON lines and 0xFF frames) to the daemon socket in priority order without ever
 /// blocking the caller (plans/cmux-next/chrome-parity/p05-ipc.md, section 3.4 and task 055).
 ///
-/// ``enqueue(_:priority:fds:coalesce:)`` appends to one FIFO per ``MethodPriority`` and returns at once; one private
+/// ``enqueue(_:priority:fds:)`` appends to one FIFO per ``MethodPriority`` and returns at once; one private
 /// serial queue (`com.cmuxterm.next.daemon.write`, at the QoS the owner picks from the connection's role) drains
 /// them. Each drain step takes the head of the highest non-empty FIFO, so a message never waits for more than the
 /// step in flight: an input frame enqueued behind 8 MiB of bulk frames is the next message on the wire. Within one
@@ -21,16 +21,21 @@ public import Foundation
 /// order. A bulk or background message is always a drain step of its own, so the step in flight is never more than
 /// one BULK_FRAME_MAX chunk of bulk.
 ///
-/// Continuous messages (a resize, a scroll) carry a ``CoalesceKey`` (p05-ipc-141): a newer one replaces the unsent
-/// one with its key in place when only keyed messages were queued after it, so a writer whose peer does not read
-/// holds one per key. With a ``FrameRefreshSource`` they also wait for the next display refresh, as Blink holds
-/// rAF-aligned input for the frame (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc);
-/// a message without a key releases the held ones before it, so the order within a FIFO never changes.
+/// Continuous messages (a resize, a scroll) go through ``enqueue(_:priority:continuous:)`` (p05-ipc-141): a newer one
+/// merges into the unsent one with its ``CoalesceKey`` in place when only keyed messages were queued after it, so a
+/// writer whose peer does not read holds one per key, and the merge sums additive fields. The walk back is Blink's
+/// `MainThreadEventQueueTaskList::Enqueue`
+/// (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc); it never passes a message without
+/// a key, so the order of those never changes. A merged message's identity (the request id it carries) comes back
+/// in ``Coalesced/replaced(identity:)``, so the caller retires what waited for it, as Blink keeps the callbacks of a
+/// coalesced event. Nothing is held for a display refresh here: the app aligns continuous input to the frame where
+/// it is made (CmuxNextBridge's `ResizeCoordinator` sends the newest grid once a frame), and a second hold would
+/// add a frame.
 ///
-/// Only the drain queue's thread waits on the socket. Past ``limit`` queued bytes
-/// ``enqueue(_:priority:fds:coalesce:)`` fails with ``Failure/backlog(queued:)`` instead of buffering without bound.
+/// Only the drain queue's thread waits on the socket. Past ``limit`` queued bytes an enqueue fails with
+/// ``Failure/backlog(queued:)`` instead of buffering without bound.
 public final class FrameWriter: Sendable {
-    /// Why ``FrameWriter/enqueue(_:priority:fds:coalesce:)`` refused a message.
+    /// Why a ``FrameWriter`` enqueue refused a message.
     public enum Failure: Error, Equatable, Sendable, CustomStringConvertible {
         /// The other end closed the connection (EPIPE, ECONNRESET).
         case peerClosed
@@ -59,16 +64,49 @@ public final class FrameWriter: Sendable {
         }
     }
 
-    /// Identifies continuous messages that replace each other while unsent: the method, and what the schema
-    /// `coalesce` key fields of the message name (a surface).
+    /// Identifies continuous messages that replace each other while unsent: the method, what the schema
+    /// `coalesce` key fields of the message name (a surface), and the stream or view on the connection it belongs
+    /// to, so two views of one surface never replace each other's messages.
     public struct CoalesceKey: Hashable, Sendable {
         public let method: MethodID
         public let target: UInt64
+        public let stream: UInt64
 
-        public init(method: MethodID, target: UInt64) {
+        public init(method: MethodID, target: UInt64, stream: UInt64) {
             self.method = method
             self.target = target
+            self.stream = stream
         }
+    }
+
+    /// A continuous message's key, its identity, and how it merges into a queued one with its key.
+    public struct Continuous: Sendable {
+        public typealias Merge = @Sendable (_ queued: Data, _ newer: Data) -> Data
+
+        public let key: CoalesceKey
+        /// The caller's name for the message (the request id it carries), handed back when a newer one replaces it.
+        public let identity: UInt64
+        /// The message that takes the queued one's place: the newer one with the additive fields summed. It must
+        /// carry the newer one's identity. It runs inside the writer's lock, so it only computes bytes. nil keeps
+        /// the newer message as it is.
+        public let merge: Merge?
+
+        public init(key: CoalesceKey, identity: UInt64, merge: Merge? = nil) {
+            self.key = key
+            self.identity = identity
+            self.merge = merge
+        }
+    }
+
+    /// What ``FrameWriter/enqueue(_:priority:continuous:)`` did.
+    public enum Coalesced: Equatable, Sendable {
+        /// The message joined the back of its FIFO.
+        case queued
+        /// The message merged into the unsent one named `identity`, which will never be written: what waits for
+        /// it (a reply waiter) must be retired.
+        case replaced(identity: UInt64)
+        /// The message was refused and nothing changed.
+        case refused(Failure)
     }
 
     /// Descriptors one message may carry (cmux-ipc fds.rs `MAX_FDS_PER_FRAME`; Chromium's
@@ -89,7 +127,6 @@ public final class FrameWriter: Sendable {
     private let queue: DispatchQueue
     private let state = Mutex(State())
     private let runStep: StepRunner?
-    private let refresh: (any FrameRefreshSource)?
 
     /// - Parameters:
     ///   - sink: Where the bytes go: ``SocketFrameSink`` for a socket, a recorder in tests.
@@ -97,29 +134,22 @@ public final class FrameWriter: Sendable {
     ///   - qos: The drain queue's class, chosen by the owner from what the connection carries.
     ///   - target: A serial queue the drain runs on (its target), nil for none (p04-input-058).
     ///   - limit: The most bytes that may wait (not counting the step in flight).
-    ///   - refresh: The display refresh continuous messages wait for; nil sends them at once.
     ///   - runStep: Runs each drain step, once per step (a hang scope); nil runs it bare.
     public init(sink: any FrameSink, label: String, qos: DispatchQoS, target: DispatchQueue? = nil,
-                limit: Int = FrameWriter.defaultLimit, refresh: (any FrameRefreshSource)? = nil,
-                runStep: StepRunner? = nil) {
+                limit: Int = FrameWriter.defaultLimit, runStep: StepRunner? = nil) {
         self.sink = sink
         self.limit = limit
-        self.refresh = refresh
         self.runStep = runStep
         queue = DispatchQueue(label: label, qos: qos, target: target)
     }
 
     /// Appends `bytes` after every message of the same priority written before, ahead of every lower priority.
-    /// With a `key` it is a continuous message: it replaces the unsent one with that key (see the type) and, when
-    /// the writer has a ``FrameRefreshSource``, waits for the next display refresh. A message with descriptors is
-    /// never replaced.
     ///
     /// The writer owns `fds` from this call on, also when it refuses the message: it closes them once they are
     /// sent, dropped or refused. Never blocks.
     /// - Returns: nil, or why the message was refused (the socket failed, the writer closed, the backlog passed
     ///   the limit, or the descriptors are malformed).
-    public func enqueue(_ bytes: Data, priority: MethodPriority, fds: [Int32] = [],
-                        coalesce key: CoalesceKey? = nil) -> Failure? {
+    public func enqueue(_ bytes: Data, priority: MethodPriority, fds: [Int32] = []) -> Failure? {
         guard fds.count <= Self.maxFdsPerMessage else {
             Self.closeDescriptors(fds)
             return .tooManyFds(count: fds.count)
@@ -131,30 +161,40 @@ public final class FrameWriter: Sendable {
             }
             return nil
         }
-        let limit = limit
-        let key = fds.isEmpty ? key : nil
-        let held = key != nil && refresh != nil
-        let (failure, startDrain, askRefresh) = state.withLock { state -> (Failure?, Bool, Bool) in
-            if let failure = state.failure { return (failure, false, false) }
-            guard !state.closed else { return (.closed, false, false) }
-            if let key, let replaced = state.replace(bytes, key: key, priority: priority, limit: limit) {
-                // The replaced message keeps its place, its hold, and the drain or refresh already due for it.
-                return (replaced ? nil : .backlog(queued: state.queuedBytes), false, false)
-            }
-            guard state.queuedBytes + bytes.count <= limit else {
-                return (.backlog(queued: state.queuedBytes), false, false)
-            }
-            state.append(Message(bytes: bytes, fds: fds, key: key), priority: priority, held: held)
-            let askRefresh = held && !state.refreshRequested
-            if askRefresh { state.refreshRequested = true }
-            guard !state.draining, state.hasReady else { return (nil, false, askRefresh) }
-            state.draining = true
-            return (nil, true, askRefresh)
-        }
-        if failure != nil { Self.closeDescriptors(fds) }
-        if askRefresh { refresh?.requestRefresh { [weak self] in self?.refreshed() } }
-        if startDrain { queue.async { [self] in drain() } }
+        let outcome = admit(Message(bytes: bytes, fds: fds, key: nil, identity: 0), priority: priority, merge: nil)
+        guard case .refused(let failure) = outcome else { return nil }
+        Self.closeDescriptors(fds)
         return failure
+    }
+
+    /// Appends a continuous message, or merges it into the unsent one of `priority` with its key (see the type).
+    /// A continuous message carries no descriptors. Never blocks.
+    /// - Returns: whether it was queued, which message it replaced, or why it was refused.
+    public func enqueue(_ bytes: Data, priority: MethodPriority, continuous: Continuous) -> Coalesced {
+        guard !bytes.isEmpty else { return .queued }
+        let message = Message(bytes: bytes, fds: [], key: continuous.key, identity: continuous.identity)
+        return admit(message, priority: priority, merge: continuous.merge)
+    }
+
+    private func admit(_ message: Message, priority: MethodPriority, merge: Continuous.Merge?) -> Coalesced {
+        let limit = limit
+        let (outcome, startDrain) = state.withLock { state -> (Coalesced, Bool) in
+            if let failure = state.failure { return (.refused(failure), false) }
+            guard !state.closed else { return (.refused(.closed), false) }
+            if let replaced = state.merge(message, priority: priority, merge: merge, limit: limit) {
+                // The merged message keeps its place and the drain already due for it.
+                return (replaced, false)
+            }
+            guard state.queuedBytes + message.bytes.count <= limit else {
+                return (.refused(.backlog(queued: state.queuedBytes)), false)
+            }
+            state.append(message, priority: priority)
+            guard !state.draining else { return (.queued, false) }
+            state.draining = true
+            return (.queued, true)
+        }
+        if startDrain { queue.async { [self] in drain() } }
+        return outcome
     }
 
     /// The drain queue's QoS (tests).
@@ -171,18 +211,6 @@ public final class FrameWriter: Sendable {
             return state.removeAll()
         }
         Self.closeDescriptors(dropped)
-    }
-
-    /// The display refresh came: the held continuous messages may go.
-    private func refreshed() {
-        let startDrain = state.withLock { state -> Bool in
-            state.refreshRequested = false
-            state.releaseHeld()
-            guard !state.draining, !state.closed, state.failure == nil, state.hasReady else { return false }
-            state.draining = true
-            return true
-        }
-        if startDrain { queue.async { [self] in drain() } }
     }
 
     // MARK: - Drain (serial queue)
@@ -235,12 +263,4 @@ public final class FrameWriter: Sendable {
     private static func closeDescriptors(_ fds: [Int32]) {
         for fd in fds { Darwin.close(fd) }
     }
-}
-
-/// The display refresh a ``FrameWriter`` holds continuous messages for (Chromium's begin-frame source, which
-/// Blink's input queue waits on for rAF-aligned input).
-public protocol FrameRefreshSource: Sendable {
-    /// Calls `fire` once, at the next display refresh, on any thread. The writer asks again for each refresh it
-    /// needs.
-    func requestRefresh(_ fire: @escaping @Sendable () -> Void)
 }

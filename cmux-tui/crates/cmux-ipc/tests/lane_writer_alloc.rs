@@ -70,14 +70,20 @@ fn lane_writer_pops_do_not_allocate() {
     };
     let keep_newer = |_: &Frame, newer: Frame| newer;
     assert_eq!(writer.push_control_coalescing(event(1), key, keep_newer), Ok(Pushed::Queued));
-    assert_eq!(writer.push_control_coalescing(event(2), key, keep_newer), Ok(Pushed::Coalesced));
+    assert_eq!(
+        writer.push_control_coalescing(event(2), key, keep_newer),
+        Ok(Pushed::Coalesced { retired: None })
+    );
     writer.open_stream(5, StreamLane::Bulk).unwrap();
     let output = |fill: u8| {
         let bytes = Bytes::from(vec![fill; 1 << 20]);
         Frame::new(FrameKind::Output, 5, Aux::Offset(0), bytes).unwrap()
     };
     assert_eq!(writer.push_stream_coalescing(output(1), key, keep_newer), Ok(Pushed::Queued));
-    assert_eq!(writer.push_stream_coalescing(output(2), key, keep_newer), Ok(Pushed::Coalesced));
+    assert_eq!(
+        writer.push_stream_coalescing(output(2), key, keep_newer),
+        Ok(Pushed::Coalesced { retired: None })
+    );
     for flow in 0..1000 {
         let input = Frame::new(FrameKind::Input, 3, Aux::FlowId(flow), Bytes::from(vec![1; 8]));
         writer.push_stream(input.unwrap()).unwrap();

@@ -1,5 +1,6 @@
 public import Foundation
 import CmuxNextCompat
+public import CmuxNextIPC
 public import CmuxNextTrace
 import CmuxNextWakeups
 import os
@@ -55,6 +56,8 @@ public actor TerminalAttachment: TerminalByteChannel {
     }
 
     private nonisolated let transport: LineTransport
+    /// `resize-attached-view`'s wire id when grid reports coalesce on the socket, nil otherwise.
+    private nonisolated let coalescedResize: MethodID?
     private nonisolated let queue: TerminalEventQueue
     /// Snapshot order, and whether live output goes straight to the view's lane.
     private nonisolated let router: TerminalEchoRouter
@@ -102,6 +105,8 @@ public actor TerminalAttachment: TerminalByteChannel {
     ///   shows (``NewTerminalTrace/FirstAttach``): its stages are that create's instants. 0: a restore or a
     ///   reattach, which writes none.
     /// - Parameter inputQueue: the view's serial input queue; the socket writer drains on it (nil: its own queue).
+    /// - Parameter coalescedResize: `resize-attached-view`'s wire id when an unsent grid report is replaced by a newer
+    ///   one (feature `attachResizeCoalescing`); nil sends every report.
     public static func attach(
         endpoint: DaemonEndpoint,
         target: Target,
@@ -114,13 +119,14 @@ public actor TerminalAttachment: TerminalByteChannel {
         device: TerminalSizingDevice? = nil,
         hangs: (any HangWatchScoping)? = nil,
         createIntent: UInt64 = 0,
-        inputQueue: DispatchQueue? = nil
+        inputQueue: DispatchQueue? = nil,
+        coalescedResize: MethodID? = nil
     ) async throws -> TerminalAttachment {
         DaemonLaunchTimings.shared.mark("terminal.attach_start")
         NewTerminalTrace.shared.attachEvent(.attachStart, surface: target.surface.rawValue, intent: createIntent)
         let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .terminalAttach,
                                                      stats: endpoint.wireStats, hangs: hangs, writerTarget: inputQueue)
-        let attachment = TerminalAttachment(transport: transport, surface: target.surface)
+        let attachment = TerminalAttachment(transport: transport, surface: target.surface, coalescedResize: coalescedResize)
         do {
             try await attachment.open(target: target, size: size, claimGeometry: claimGeometry,
                                       snapshotVersion: snapshotVersion, localHistory: localHistory,
@@ -132,8 +138,9 @@ public actor TerminalAttachment: TerminalByteChannel {
         return attachment
     }
 
-    private init(transport: LineTransport, surface: SurfaceID) {
+    private init(transport: LineTransport, surface: SurfaceID, coalescedResize: MethodID?) {
         self.transport = transport
+        self.coalescedResize = coalescedResize
         resolvedSurface = SurfaceBox(surface)
         let queue = TerminalEventQueue(recorder: transport.recorder)
         self.queue = queue
@@ -317,7 +324,10 @@ public actor TerminalAttachment: TerminalByteChannel {
         }
         guard case .some(let lease) = lease else { return }
         if let lease {
-            fireAndForget(ResizeAttachedViewRequest(surface: surface, lease: lease, cols: size.cols, rows: size.rows))
+            // This connection carries one view, so the surface and stream 0 name its grid reports.
+            let key = coalescedResize.map { FrameWriter.CoalesceKey(method: $0, target: surface.rawValue, stream: 0) }
+            fireAndForget(ResizeAttachedViewRequest(surface: surface, lease: lease, cols: size.cols, rows: size.rows),
+                          coalescing: key)
         } else {
             fireAndForget(ResizeSurfaceRequest(surface: surface, cols: size.cols, rows: size.rows))
         }
@@ -393,13 +403,18 @@ public actor TerminalAttachment: TerminalByteChannel {
         transport.close()
     }
 
-    private nonisolated func fireAndForget<R: DaemonRequest>(_ request: R) {
+    /// Sends `request` without waiting; with a `key`, as a continuous request a newer one replaces while unsent.
+    private nonisolated func fireAndForget<R: DaemonRequest>(_ request: R, coalescing key: FrameWriter.CoalesceKey? = nil) {
         let logger = logger
+        let onError: @Sendable (DaemonError) -> Void = { error in
+            logger.error("\(R.command, privacy: .public) failed: \(error.description, privacy: .public)")
+        }
+        let body: (UInt64) throws -> Data = { id in try WireCoding.encodeRequest(request, id: id) }
         do {
-            try transport.sendNoReply(cmd: R.command, onError: { error in
-                logger.error("\(R.command, privacy: .public) failed: \(error.description, privacy: .public)")
-            }) { id in
-                try WireCoding.encodeRequest(request, id: id)
+            if let key {
+                try transport.sendNoReply(cmd: R.command, coalescing: key, onError: onError, body)
+            } else {
+                try transport.sendNoReply(cmd: R.command, onError: onError, body)
             }
         } catch {
             logger.debug("\(R.command, privacy: .public) dropped after close")

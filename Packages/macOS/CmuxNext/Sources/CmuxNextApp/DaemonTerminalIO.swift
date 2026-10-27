@@ -3,6 +3,7 @@ import CmuxNextBridge
 import CmuxNextCompat
 import CmuxNextControl
 import CmuxNextDaemon
+import CmuxNextIPC
 import CmuxNextTerminal
 import CmuxNextTrace
 import CmuxNextWakeups
@@ -75,12 +76,14 @@ nonisolated final class DaemonTerminalIO: TerminalIO {
     /// `hangWatch`: watches each line the attachment's reader handles (`DaemonService.hangWatch`).
     /// `screenChanged`: told after each step this view maps (output, replay, grid, link status), so the oracle's
     /// `terminals` facet waits wake (`AppServices.terminalScreenChanged`; nil in Release).
+    /// `coalescesResizes`: an unsent grid report is replaced by a newer one (feature `attachResizeCoalescing`).
     init(target: Target, resizes: ResizeCoordinator, visible: Bool = true, gate: TerminalTargetGate? = nil,
          createIntent: UInt64 = 0, creatingInput: CreatingTerminalInput? = nil,
          burstTrace: BurstTrace? = nil, policyBlocked: @escaping @Sendable () -> Bool = { false },
          hangWatch: (any HangWatchScoping)? = nil, screenChanged: (@Sendable () -> Void)? = nil,
-         endpoint: @escaping @Sendable () async throws -> DaemonEndpoint) {
+         coalescesResizes: Bool = false, endpoint: @escaping @Sendable () async throws -> DaemonEndpoint) {
         self.resizes = resizes
+        let coalescedResize = coalescesResizes ? MethodTable.schema.v12ID(named: ResizeAttachedViewRequest.command) : nil
         let logger = Logger(subsystem: "com.cmuxterm.app.next", category: "app.terminal")
         let surface = target.attachment.surface.rawValue
         let firstAttach = NewTerminalTrace.FirstAttach(intent: createIntent)
@@ -107,7 +110,7 @@ nonisolated final class DaemonTerminalIO: TerminalIO {
                                                     images: Self.attachImages,
                                                     device: await Self.sizingDevice.value,
                                                     hangs: hangWatch, createIntent: firstAttach.take(),
-                                                    inputQueue: inputQueue)
+                                                    inputQueue: inputQueue, coalescedResize: coalescedResize)
             },
             onFailure: { error in
                 logger.error("attach \(surface) failed: \(String(describing: error), privacy: .public)")

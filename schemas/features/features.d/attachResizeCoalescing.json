@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "attachResizeCoalescing",
+  "owner": "Performance Lead",
+  "description": "A terminal view's grid report that still waits in its socket writer is replaced by the newer one, so a daemon that is slow to read gets the newest size once instead of every stale size in turn.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "app",
+  "params": [],
+  "stories": ["terminal-resize", "terminal-resize-stress"],
+  "sticky": false,
+  "runtimeMutable": false
+}

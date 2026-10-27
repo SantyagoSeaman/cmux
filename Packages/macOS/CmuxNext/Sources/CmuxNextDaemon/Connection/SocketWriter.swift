@@ -56,9 +56,15 @@ final class SocketWriter: Sendable {
 
     /// Appends one message at `priority`, ahead of every lower priority and after
     /// every earlier message of its own; `fds` ride its first byte and the writer
-    /// owns them from this call on (``FrameWriter/enqueue(_:priority:fds:coalesce:)``).
+    /// owns them from this call on (``FrameWriter/enqueue(_:priority:fds:)``).
     func write(_ bytes: Data, priority: MethodPriority, fds: [Int32] = []) -> SocketWriteFailure? {
         writer.enqueue(bytes, priority: priority, fds: fds)
+    }
+
+    /// Appends a continuous message at control priority, in the FIFO of every other line, or merges it into the
+    /// unsent one with its key (``FrameWriter/enqueue(_:priority:continuous:)``).
+    func write(_ bytes: Data, continuous: FrameWriter.Continuous) -> FrameWriter.Coalesced {
+        writer.enqueue(bytes, priority: .control, continuous: continuous)
     }
 
     /// The drain queue's QoS (tests).
