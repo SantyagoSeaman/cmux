@@ -91,6 +91,7 @@ public nonisolated struct FeatureDogfoodSet: Sendable, Equatable {
         "pageTabsShareChromiumWindow",
         "pagesSpareWindow",
         "paneHoldsContentInMotion",
+        "phoneEndpointOnDemand",
         "pointerFrameDrags",
         "pointerFrameHover",
         "pointerFrameRemoteInput",

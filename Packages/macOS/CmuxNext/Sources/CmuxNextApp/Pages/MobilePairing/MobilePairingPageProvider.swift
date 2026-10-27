@@ -60,6 +60,9 @@ final class MobilePairingPageProvider: PageProvider {
                    onEvent: @escaping @MainActor (JSONValue) -> Void) async throws -> PageSubscription {
         guard stream == Self.changesStream else { throw PageError.unknownOp(stream) }
         guard let services else { throw PageError.closed }
+        // An open page binds the phone endpoint so a new phone can pair (`phoneEndpointOnDemand`).
+        let mobile = services.mobile
+        mobile.pairingPageOpened()
         // task-owner: lives as long as the page's subscription; event-driven (Observation)
         let task = Task { @MainActor in
             var last: String?
@@ -73,7 +76,10 @@ final class MobilePairingPageProvider: PageProvider {
         }
         // Each event is an empty "status changed" signal the page answers with one `status` read:
         // the newest one says all the dropped ones did.
-        return PageSubscription(frozenDelivery: .latest) { task.cancel() }
+        return PageSubscription(frozenDelivery: .latest) {
+            task.cancel()
+            mobile.pairingPageClosed()
+        }
     }
 
     /// Everything `status` reads that can change while the page is open.

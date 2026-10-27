@@ -13,6 +13,8 @@ extension MobileIrxHost {
     /// the endpoint listens on a relay and the v2 device is provisioned.
     public func attachTicket(ttl: TimeInterval, target: MobileAttachTicket.Target,
                              scheme: CmxPairingURLScheme?) throws -> MobileAttachTicket.Payload {
+        // Asked for before the endpoint listens too: the hold binds it, and the launcher retries.
+        holdEndpoint(forTicketLifetime: ttl)
         guard case .listening = phase, let macDeviceID, let identity else { throw TicketFailure.routesUnavailable }
         let host = MobileAttachTicket.HostIdentity(
             macDeviceID: macDeviceID, endpointID: identity.endpointIDHex, displayName: configuration.displayName,

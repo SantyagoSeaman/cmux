@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "phoneEndpointOnDemand",
+  "owner": "Performance Lead",
+  "description": "With Phone Access on, this Mac binds its phone connection endpoint only while a phone on the account can use it, the Mobile Pairing page is open or an attach ticket is live; with no phone it keeps no relay connection.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "app",
+  "params": [],
+  "stories": ["idle-budget"],
+  "sticky": false,
+  "runtimeMutable": false
+}

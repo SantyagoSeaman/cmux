@@ -27,8 +27,9 @@ public nonisolated enum MobilePairingState: Sendable, Equatable {
         switch phase {
         case .listening: return .ready
         case .failed(let reason): return .failed(reason)
-        // A restart (new account, phone access toggled) passes through stopped and idle.
-        case nil, .idle, .provisioning, .waitingForRelay, .stopped: return .preparing
+        // A restart (new account, phone access toggled) passes through stopped and idle;
+        // an open page binds a standing-by endpoint (`phoneEndpointOnDemand`).
+        case nil, .idle, .provisioning, .waitingForRelay, .standby, .stopped: return .preparing
         }
     }
 

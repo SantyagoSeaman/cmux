@@ -1,4 +1,4 @@
-import CmuxIrxTransport
+public import CmuxIrxTransport
 import CmuxNextDaemon
 import CmuxNextWakeups
 import Foundation
@@ -13,9 +13,86 @@ extension MobileIrxHost {
     /// 10 timed cycles, then the next relay-state change.
     static let acceptRetry = RetryPolicy(initial: .milliseconds(250), maximum: .seconds(60), timedRetries: 10)
 
+    /// Phones on the account that may dial this Mac: the directory's inbound peers
+    /// that are not Macs (``supervise(_:judgment:admission:registry:)`` refuses Macs) and not revoked.
+    /// Admission needs a peer in this list, so a phone is here before its first connection.
+    public static func pairedPhones(in directory: V2Directory?) -> Int {
+        directory?.inboundPeers?.count(where: { !$0.device.revoked && $0.device.descriptor.metadata.platform != .mac }) ?? 0
+    }
+
+    /// Whether the endpoint should be bound (p14-energy-122). Off on demand, it always is
+    /// (once relay credentials allow); on demand, only while a phone can use it: one is paired,
+    /// the pairing page is open (a new phone pairs through it), or an attach ticket is live.
+    public static func wantsEndpoint(onDemand: Bool, pairedPhones: Int, pairingOpen: Bool, ticketHeld: Bool) -> Bool {
+        !onDemand || pairedPhones > 0 || pairingOpen || ticketHeld
+    }
+
+    var endpointWanted: Bool {
+        Self.wantsEndpoint(onDemand: endpointOnDemand, pairedPhones: Self.pairedPhones(in: cachedState?.directory),
+                           pairingOpen: pairing.open, ticketHeld: ticketHold != nil)
+    }
+
+    /// The Mobile Pairing page opened or closed. `revision` orders the service's hops:
+    /// an older one that arrives late is dropped.
+    public func setPairingOpen(_ open: Bool, revision: UInt64) async {
+        guard revision > pairing.revision else { return }
+        pairing = (open, revision)
+        await reconcileEndpoint()
+    }
+
+    /// The longest a ticket holds the endpoint (a caller's ttl is any positive number).
+    static let longestTicketHold: TimeInterval = 24 * 60 * 60
+
+    /// A minted attach ticket keeps the endpoint until it expires, so the phone given it
+    /// finds this Mac listening (`mobile.attach_ticket.create`, the pairing page's QR code).
+    func holdEndpoint(forTicketLifetime ttl: TimeInterval) {
+        guard endpointOnDemand else { return }
+        let timer = DemandTimer(owner: "MobileIrxHost.ticketHold", clock: clock)
+        ticketHold?.cancel()
+        ticketHold = timer
+        timer.schedule(after: .seconds(min(max(0, ttl), Self.longestTicketHold))) { [weak self] in await self?.ticketHoldEnded(timer) }
+        requestEndpointReady()
+    }
+
+    private func ticketHoldEnded(_ timer: DemandTimer) async {
+        guard ticketHold === timer else { return }
+        ticketHold = nil
+        await reconcileEndpoint()
+    }
+
+    /// Binds the endpoint while it is wanted and releases it once it is not.
+    func reconcileEndpoint() async {
+        guard supervisor != nil else { return }
+        if endpointWanted {
+            requestEndpointReady()
+        } else {
+            await releaseEndpoint()
+        }
+    }
+
+    /// Closes the bound endpoint (the relay connection and its keepalive) and stands by.
+    /// Phone sessions closed already: no paired phone means ``enforcePermissions()`` revoked them.
+    private func releaseEndpoint() async {
+        endpointTask?.cancel(); endpointTask = nil
+        endpointRefreshPending = false
+        acceptTask?.cancel(); acceptTask = nil
+        acceptRestart?.cancel(); acceptRestart = nil
+        endpointPacer.reset()
+        acceptPacer.reset()
+        guard phase != .standby, let supervisor else { return }
+        phase = .standby
+        journal.record("next-host", "endpoint-standby", [:])
+        await supervisor.close()
+    }
+
     /// Binds (or re-binds) the endpoint once a usable relay credential exists,
     /// then starts accepting. Coalesces concurrent requests into one task.
     func requestEndpointReady() {
+        guard endpointWanted else {
+            if phase == .waitingForRelay { phase = .standby }
+            journal.record("next-host", "endpoint-not-wanted", [:])
+            return
+        }
         guard endpointTask == nil else {
             endpointRefreshPending = true
             endpointWake.fire()
@@ -26,6 +103,7 @@ extension MobileIrxHost {
             journal.record("next-host", "endpoint-ready-skipped", [:])
             return
         }
+        if phase == .standby { phase = .waitingForRelay }
         let wake = endpointWake
         let clock = clock
         endpointTask = Task { [weak self] in
@@ -40,7 +118,8 @@ extension MobileIrxHost {
                     await self.endpointBecameReady(supervisor)
                     return
                 } catch {
-                    guard let delay = await self.recordEndpointFailure(error) else { return }
+                    // A release or teardown closed the bind; it is not a failure.
+                    guard !Task.isCancelled, let delay = await self.recordEndpointFailure(error) else { return }
                     wake.rebaseline()
                     guard await wake.awaitWake(delay: delay, clock: clock) != .cancelled else { return }
                 }

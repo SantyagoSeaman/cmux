@@ -1049,7 +1049,8 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
         ),
         .testTarget(
             name: "CmuxNextPhoneAccessTests",
-            dependencies: ["CmuxNextPhoneAccess"],
+            dependencies: ["CmuxNextPhoneAccess", "CmuxNextMobile", "CmuxNextWakeups",
+                           .product(name: "CmuxIrxTransport", package: "CmuxIrxTransport")],
             swiftSettings: uiSwiftSettings
         ),
         // Browser popup panels: sized `window.open` popups (OAuth, payment) and

@@ -16,7 +16,7 @@ struct MobilePairingStateTests {
         #expect(MobilePairingState.resolve(signedIn: true, allowed: false, phase: .listening(relayURL: "https://r")) == .accessOff)
     }
 
-    @Test(arguments: [nil, MobileIrxHost.Phase.idle, .provisioning, .waitingForRelay, .stopped])
+    @Test(arguments: [nil, MobileIrxHost.Phase.idle, .provisioning, .waitingForRelay, .standby, .stopped])
     func aListenerOnItsWayIsPreparing(phase: MobileIrxHost.Phase?) {
         #expect(MobilePairingState.resolve(signedIn: true, allowed: true, phase: phase) == .preparing)
     }

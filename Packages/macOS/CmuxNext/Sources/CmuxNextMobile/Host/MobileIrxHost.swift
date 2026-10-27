@@ -16,6 +16,9 @@ public actor MobileIrxHost {
         case idle
         case provisioning
         case waitingForRelay
+        /// Provisioned and registered, with no endpoint bound: no phone can use one yet
+        /// (`phoneEndpointOnDemand`). A phone on the account, the pairing page or an attach ticket binds it.
+        case standby
         case listening(relayURL: String?)
         case failed(String)
         case stopped
@@ -64,6 +67,12 @@ public actor MobileIrxHost {
     /// A relay-state change cuts the activation backoff short.
     let endpointWake = RetryWake(owner: "MobileIrxHost.endpoint")
     var acceptRestart: DemandTimer?
+    /// `phoneEndpointOnDemand`: bind only while ``endpointWanted``; off binds whenever relay credentials allow.
+    let endpointOnDemand: Bool
+    /// Whether the Mobile Pairing page is open, with the service's revision of that fact (hops may arrive out of order).
+    var pairing: (open: Bool, revision: UInt64)
+    /// Keeps the endpoint while a minted attach ticket is live: the phone that holds it dials this Mac.
+    var ticketHold: DemandTimer?
     /// Bumped by every `start()` and `stop()`. A provisioning run checks it
     /// after each await and abandons itself once stale, so a stop that lands
     /// mid-provisioning cannot be undone by the start resuming afterwards.
@@ -75,8 +84,11 @@ public actor MobileIrxHost {
     public init(configuration: MobileHostConfiguration, auth: any MobileHostAuth, work: BackgroundWork,
                 makeBackend: @escaping @Sendable () async throws -> any MobileCompatBackend,
                 clock: any Clock<Duration> = ContinuousClock(), access: PhoneAccessGate = PhoneAccessGate(),
+                endpointOnDemand: Bool = false, pairingOpen: Bool = false,
                 onUsable: (@Sendable (MobileUsableSession) -> Void)? = nil) {
         self.work = work
+        self.endpointOnDemand = endpointOnDemand
+        pairing = (pairingOpen, 0)
         self.onUsable = onUsable
         self.access = access
         self.configuration = configuration
@@ -91,7 +103,7 @@ public actor MobileIrxHost {
     public func start() async {
         switch phase {
         case .idle, .stopped, .failed: break
-        case .provisioning, .waitingForRelay, .listening: return
+        case .provisioning, .waitingForRelay, .standby, .listening: return
         }
         lifetime += 1
         let run = lifetime
@@ -240,7 +252,7 @@ public actor MobileIrxHost {
         if previousCredentials != snapshot.cache.relayCredentials, let supervisor {
             await supervisor.rotateCredentials(Self.credentials(snapshot.cache))
         }
-        requestEndpointReady()
+        await reconcileEndpoint()
     }
 
     func teardown() async {
@@ -249,6 +261,7 @@ public actor MobileIrxHost {
         acceptTask?.cancel(); acceptTask = nil
         expiryTimer?.cancel(); expiryTimer = nil
         acceptRestart?.cancel(); acceptRestart = nil
+        ticketHold?.cancel(); ticketHold = nil
         endpointPacer.reset()
         acceptPacer.reset()
         admission?.invalidate()

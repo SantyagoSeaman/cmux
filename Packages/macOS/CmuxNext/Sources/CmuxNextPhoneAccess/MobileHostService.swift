@@ -45,10 +45,42 @@ public final class MobileHostService {
 
     /// The app's lanes, for the listener's key files (``MobileIrxHost``).
     private let work: BackgroundWork
+    /// `phoneEndpointOnDemand` (p14-energy-122): the listener binds its endpoint only while a
+    /// phone can use it (``MobileIrxHost/wantsEndpoint(onDemand:pairedPhones:pairingOpen:ticketHeld:)``).
+    private let endpointOnDemand: Bool
+    /// Open Mobile Pairing pages (their `changes` subscriptions).
+    private var pairingViewers = 0
+    /// Bumped by each open or close of the last pairing page; orders the hops to the listener.
+    private var pairingRevision: UInt64 = 0
+    /// A Mobile Pairing page is open: a new phone may pair, so the endpoint is bound.
+    public var pairingOpen: Bool { pairingViewers > 0 }
 
-    public init(displayName: @escaping @Sendable () async -> String, work: BackgroundWork) {
+    public init(displayName: @escaping @Sendable () async -> String, work: BackgroundWork, endpointOnDemand: Bool = false) {
         self.displayName = displayName
         self.work = work
+        self.endpointOnDemand = endpointOnDemand
+    }
+
+    /// A Mobile Pairing page opened (it follows `cmux.mobilePairing.changes`).
+    public func pairingPageOpened() {
+        pairingViewers += 1
+        if pairingViewers == 1 { pairingChanged() }
+    }
+
+    /// A Mobile Pairing page closed (its subscription ended).
+    public func pairingPageClosed() {
+        guard pairingViewers > 0 else { return }
+        pairingViewers -= 1
+        if pairingViewers == 0 { pairingChanged() }
+    }
+
+    private func pairingChanged() {
+        pairingRevision &+= 1
+        guard let host else { return }
+        let open = pairingOpen
+        let revision = pairingRevision
+        // task-owner: one call per first open or last close of the pairing page, off main; the revision drops a late one
+        Task { @concurrent in await host.setPairingOpen(open, revision: revision) }
     }
 
     /// The account to serve phones for (sign-in, or a user or team switch). The
@@ -111,10 +143,11 @@ public final class MobileHostService {
                 return
             }
             let readiness = self.readiness
+            // The page's state now; later changes reach this listener through `pairingChanged`.
             let host = MobileIrxHost(configuration: configuration, auth: auth, work: self.work, makeBackend: { @MainActor in
                 let endpoint = try await daemon.endpoint()
                 return try await DaemonCompatBackend.connect(endpointProvider: { endpoint })
-            }, access: access, onUsable: { session in
+            }, access: access, endpointOnDemand: self.endpointOnDemand, pairingOpen: self.pairingOpen, onUsable: { session in
                 readiness.report(session)
                 let now = Date()
                 // task-owner: one main-actor hop per usable phone connection; ends at once
