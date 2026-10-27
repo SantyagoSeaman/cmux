@@ -71,6 +71,9 @@ const CANCEL: &[u8] = b"\x18";
 const CRASH_MARK: &[u8] = b"\x1b]9999;crash=";
 /// The largest bystander ring built from ghostty's fuzz corpus.
 const CORPUS_RING: usize = 256 * 1024;
+/// The file a worker writes in its digest directory when a crash that must
+/// end it returned instead.
+const SURVIVED: &str = "survived";
 
 // The worker.
 
@@ -136,7 +139,7 @@ fn serve(stream: UnixStream, dir: &Path) -> io::Result<()> {
                 let mut screen =
                     Screen::seeded(terminal.cols, terminal.rows, seed.prologue, seed.skipped);
                 let bytes = read_ring(&terminal.ring, seed.replay_from, seed.end)?;
-                crash_if_marked(&bytes, &mut out)?;
+                crash_if_marked(&bytes, &mut out, dir)?;
                 screen.write(&bytes);
                 terminal.screen = Some(screen);
                 terminal.parsed = seed.end;
@@ -147,7 +150,7 @@ fn serve(stream: UnixStream, dir: &Path) -> io::Result<()> {
                 let Some(terminal) = terminals.get_mut(&key) else { continue };
                 if end > terminal.parsed {
                     let bytes = read_ring(&terminal.ring, terminal.parsed, end)?;
-                    crash_if_marked(&bytes, &mut out)?;
+                    crash_if_marked(&bytes, &mut out, dir)?;
                     if let Some(screen) = &mut terminal.screen {
                         screen.write(&bytes);
                     }
@@ -204,21 +207,21 @@ fn crash_marker(kind: &str) -> Vec<u8> {
     [CRASH_MARK, kind.as_bytes(), b"\x07"].concat()
 }
 
-/// Crash as the first marker in `bytes` names, if there is one.
-fn crash_if_marked(bytes: &[u8], out: &mut UnixStream) -> io::Result<()> {
+/// Crash as the first marker in `bytes` names, if there is one. A crash
+/// that returns leaves [`SURVIVED`] in `dir`, which the test refuses.
+fn crash_if_marked(bytes: &[u8], out: &mut UnixStream, dir: &Path) -> io::Result<()> {
     let Some(at) = bytes.windows(CRASH_MARK.len()).position(|window| window == CRASH_MARK) else {
         return Ok(());
     };
     let rest = bytes.get(at + CRASH_MARK.len()..).unwrap_or_default();
     let kind = rest.split(|&byte| byte == 0x07).next().unwrap_or_default();
     match kind {
-        // SAFETY: raise(3) with a valid signal number; its default action
-        // ends this process, which is the point.
-        b"segv" => unsafe { libc::raise(libc::SIGSEGV) },
+        b"segv" => die_of(libc::SIGSEGV),
         b"abort" => std::process::abort(),
-        // SAFETY: as above.
-        b"bus" => unsafe { libc::raise(libc::SIGBUS) },
-        b"stack-overflow" => return Err(io::Error::other(overflow(0).to_string())),
+        b"bus" => die_of(libc::SIGBUS),
+        b"stack-overflow" => {
+            std::hint::black_box(overflow(0));
+        }
         b"exit" => std::process::exit(3),
         b"cut-frame" => {
             let parsed = Frame::parsed(1, 1).encode();
@@ -232,9 +235,23 @@ fn crash_if_marked(bytes: &[u8], out: &mut UnixStream) -> io::Result<()> {
             out.write_all(&garbage)?;
             return Ok(());
         }
-        _ => return Err(io::Error::other("unknown crash kind")),
-    };
+        _ => {}
+    }
+    std::fs::write(dir.join(SURVIVED), kind)?;
     Err(io::Error::other("the crash did not end the worker"))
+}
+
+/// End this process by `signal`'s default action, as a memory fault in the
+/// parser does. std's stack-overflow handler takes SIGSEGV and SIGBUS and,
+/// for a fault outside the guard page, only restores the default action and
+/// returns, so a bare raise(3) returns here.
+fn die_of(signal: libc::c_int) {
+    // SAFETY: signal(2) and raise(3) with a valid signal number; nothing in
+    // this process needs std's handler after a crash marker.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
 }
 
 /// Recurses until the stack's guard page ends the process.
@@ -354,6 +371,8 @@ struct Fixture {
     broker: Option<VtWorkerBroker>,
     events: Receiver<WorkerLifecycle>,
     parsed: Receiver<(VtTerminalKey, u64)>,
+    /// The highest offset the broker confirmed for each terminal.
+    reached: HashMap<VtTerminalKey, u64>,
     shared: Arc<Shared>,
     rings: Vec<(File, Vec<u8>)>,
     digests: tempfile::TempDir,
@@ -409,6 +428,7 @@ impl Fixture {
             broker: Some(broker),
             events,
             parsed,
+            reached: HashMap::new(),
             shared,
             rings,
             digests,
@@ -441,15 +461,19 @@ impl Fixture {
         end
     }
 
-    /// Wait until the broker confirms `key` parsed up to `offset`.
-    fn wait_parsed(&self, key: VtTerminalKey, offset: u64) {
+    /// Wait until the broker confirms `key` parsed up to `offset`. Every
+    /// confirmation goes to `reached`, so one for another key that arrives
+    /// first is still there when that key is waited for.
+    fn wait_parsed(&mut self, key: VtTerminalKey, offset: u64) {
         let deadline = Instant::now() + PATIENCE;
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            match self.parsed.recv_timeout(left) {
-                Ok((got, reached)) if got == key && reached >= offset => return,
-                Ok(_) => {}
-                Err(_) => break,
+        loop {
+            if self.reached.get(&key).is_some_and(|&reached| reached >= offset) {
+                return;
             }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
+            let Ok((got, reached)) = self.parsed.recv_timeout(left) else { break };
+            let highest = self.reached.entry(got).or_default();
+            *highest = (*highest).max(reached);
         }
         panic!("{key:?} not parsed to {offset} within {PATIENCE:?}");
     }
@@ -703,7 +727,8 @@ fn a_sigkilled_worker_restores_its_16_terminals_with_equal_digests_within_100_ms
     assert!(elapsed < RESTORE_BOUND, "16 terminals restored {elapsed:?} after the SIGKILL");
     assert_ne!(first, second);
     for &key in &moved {
-        fixture.wait_parsed(key, fixture.end(key));
+        let end = fixture.end(key);
+        fixture.wait_parsed(key, end);
     }
     for (key, before) in fixture.keys().zip(&before) {
         let digest = fixture.full_digest(key);
@@ -858,6 +883,8 @@ fn each_entry_of_the_crash_corpus_kills_only_its_own_shard() {
         fixture.lost(victim);
         let (mode, _) = fixture.restored(victim, 4);
         assert_eq!(mode, ReseedMode::PrologueOnly, "{kind}");
+        let survived = fixture.digests.path().join(SURVIVED);
+        assert!(!survived.exists(), "{kind} returned instead of ending its worker");
         let replaced = fixture.worker_pid(victim);
         let digest = fixture.prologue_digest(VtTerminalKey(1));
         fixture.assert_record(VtTerminalKey(1), replaced, &digest);
