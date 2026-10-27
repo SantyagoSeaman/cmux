@@ -165,10 +165,10 @@ fn local_surface(mux: Weak<Mux>, id: SurfaceId) -> (Arc<Surface>, UnixStream, im
             reader: Box::new(reader),
             writer: Box::new(std::io::sink()),
             killer: Box::new(TestChildKiller),
-            wait: Box::new(move || {
+            end: LocalEnd::Wait(Box::new(move || {
                 let _ = end_rx.recv();
                 TerminalEnd::ProcessEnded(TerminalExit::unknown("test ended"))
-            }),
+            })),
             pid: None,
             command: Vec::new(),
             cwd: None,

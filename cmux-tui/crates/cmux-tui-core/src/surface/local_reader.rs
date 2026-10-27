@@ -46,9 +46,11 @@ impl LocalReader {
         surface: Arc<Surface>,
         output: Arc<Mutex<LocalOutput>>,
         reader: Box<dyn Read + Send>,
+        reader_completion: Arc<ReaderCompletion>,
     ) -> Self {
-        let pty = surface.as_pty().expect("a local reader reads a PTY surface");
-        let completion = ReaderCompletionGuard(pty.reader_completion.clone());
+        // The caller hands over its runtime's completion, so the reader
+        // needs no `as_pty` lookup that could fail.
+        let completion = ReaderCompletionGuard(reader_completion);
         let parser = output.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let publisher = parser.publisher();
         #[cfg(unix)]
@@ -161,8 +163,10 @@ impl LocalReader {
         if let Some(pty) = self.surface.as_pty() {
             pty.publish_final_frame();
             pty.local_pty_drained.store(true, Ordering::Release);
+            // No output follows: hidden views get what they hold now.
+            pty.flush_held_attach_output();
         }
-        publish_local_exit_if_ready(&self.surface);
+        post_local_exit_if_ready(&self.surface);
     }
 }
 

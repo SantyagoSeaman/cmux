@@ -19,8 +19,10 @@
 //! `SetVisible(false)` stops BeginFrames); the work it skipped runs once at
 //! show.
 
-use super::{AttachTapQueue, AttachTapState};
+use super::{AttachFrame, AttachFrameReceiver, AttachTap, AttachTapQueue, AttachTapState};
+use crate::panic_free::RecoverPoison;
 use crate::wake::EnergyMode;
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -125,7 +127,7 @@ impl HiddenOutput {
     /// keeps its batch.
     pub(crate) fn hide(&self, energy: &Arc<EnergyMode>) {
         let Some(state) = self.state.upgrade() else { return };
-        let mut queue = state.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = state.queue.lock().recover_poison();
         if queue.hidden.is_some() {
             return;
         }
@@ -136,17 +138,77 @@ impl HiddenOutput {
     /// Send what is held now and stop holding: the worker wakes in this turn.
     pub(crate) fn show(&self) {
         let Some(state) = self.state.upgrade() else { return };
-        let mut queue = state.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = state.queue.lock().recover_poison();
         if queue.hidden.take().is_none() {
             return;
         }
         drop(queue);
-        state.ready.notify_all();
+        state.wake_all();
     }
 
     /// Whether this viewer's output is held (tests).
     #[cfg(test)]
     pub(crate) fn is_hidden(&self) -> bool {
-        self.state.upgrade().is_some_and(|state| state.queue.lock().unwrap().hidden.is_some())
+        self.state
+            .upgrade()
+            .is_some_and(|state| state.queue.lock().recover_poison().hidden.is_some())
+    }
+}
+
+impl AttachFrameReceiver {
+    /// The handle that hides and shows this viewer's output.
+    pub(crate) fn hidden_output(&self) -> HiddenOutput {
+        HiddenOutput::new(&self.state)
+    }
+
+    /// The next frame as of `at`, the batch clock, waiting up to `wait` of
+    /// real time for one to become takeable (an urgent flush, a show).
+    #[cfg(test)]
+    pub(crate) fn recv_at(
+        &self,
+        at: Instant,
+        wait: Duration,
+    ) -> Result<AttachFrame, std::sync::mpsc::RecvTimeoutError> {
+        let deadline = Instant::now() + wait;
+        let mut queue = self.state.queue.lock().recover_poison();
+        loop {
+            if let Some(frame) = Self::pop(&mut queue, at) {
+                drop(queue);
+                return Ok(frame.into_frame());
+            }
+            if !queue.sender_alive {
+                return Err(std::sync::mpsc::RecvTimeoutError::Disconnected);
+            }
+            if Instant::now() >= deadline {
+                return Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+            }
+            queue = self.wait(queue, Some(deadline));
+        }
+    }
+
+    /// [`Self::try_recv`] as of `now`, the time a hidden viewer's batch is
+    /// judged due by.
+    pub(crate) fn try_recv_at(&self, now: Instant) -> Result<AttachFrame, TryRecvError> {
+        let mut queue = self.state.queue.lock().recover_poison();
+        if let Some(frame) = Self::pop(&mut queue, now) {
+            drop(queue);
+            Ok(frame.into_frame())
+        } else if queue.sender_alive {
+            Err(TryRecvError::Empty)
+        } else {
+            Err(TryRecvError::Disconnected)
+        }
+    }
+}
+
+impl AttachTap {
+    /// Send a hidden viewer's held output now: it rang a bell, asked for a
+    /// desktop notification or changed the title.
+    pub(in crate::surface) fn flush_held(&self) {
+        let mut queue = self.state.queue.lock().recover_poison();
+        if queue.flush_held() {
+            drop(queue);
+            self.state.wake_one();
+        }
     }
 }
