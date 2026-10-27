@@ -87,6 +87,9 @@ import CmuxNextWakeups
     private var lastCall: TimeInterval = -.infinity
     /// Calls made (tests).
     private(set) var calls = 0
+    /// Hears whether the pane is seen after each flip of its probe's node, once the pacer handled it (the
+    /// pane tells acpmux the edge, ``AgentPaneView/paneSeenChanged(_:)``).
+    var onSeenChange: (@MainActor (_ seen: Bool) -> Void)?
 
     /// - Parameters:
     ///   - nextTurn: Runs a delivery on a later turn (the pane's: a `visible` task on the app's scheduler).
@@ -111,7 +114,11 @@ import CmuxNextWakeups
         self.init(frames: AgentPaneWindowFrames(view: view), fallback: AgentPaneMainDeadline(deadlines: mainThread.deadlines),
                   nextTurn: { work in mainWork.post(.visible, owner: owner, work) },
                   isHidden: { [weak probe] in !(probe?.isSeen ?? false) })
-        probe.onChange = { [weak self] in self?.visibilityChanged() }
+        probe.onChange = { [weak self] in
+            guard let self else { return }
+            visibilityChanged()
+            onSeenChange?(!isHidden())
+        }
         view.addSubview(probe)
         self.probe = probe
     }

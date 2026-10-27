@@ -39,11 +39,19 @@ nonisolated final class AcpmuxPaneSocket: NSObject, URLSessionWebSocketDelegate,
         var challengeRead = false
         var challenge: AcpmuxPersonChallenge?
         var challengeWaiters: [OnceContinuation<AcpmuxPersonChallenge?, OnceContinuationError>] = []
+        /// The last `_acpmux/visibility` handed to the outbound queue (``visibilityChanged(session:visible:)``).
+        var visibility: Visibility?
 
         /// A full flush waits: it goes even to a pane nobody can see (``pageWaits``).
         func backlogged(_ limits: AgentPaneTransport.Limits) -> Bool {
             inbox.count >= limits.maximumFramesPerFlush || inboxBytes >= limits.maximumBytesPerFlush
         }
+    }
+
+    /// Whether the pane shows a session, as acpmux last heard it on this connection.
+    private struct Visibility: Equatable, Sendable {
+        var session: String
+        var visible: Bool
     }
 
     private let request: URLRequest
@@ -60,6 +68,8 @@ nonisolated final class AcpmuxPaneSocket: NSObject, URLSessionWebSocketDelegate,
     private let state = Mutex(State())
     /// Checks the daemon's frames in passes, in order, while the receive loop goes on.
     private let inbound = DispatchQueue(label: "com.cmuxterm.app.next.agent-pane.inbound", qos: .userInitiated)
+    /// Makes and sends the host's own notifications after the caller's turn, in order. Nobody waits for them.
+    private let outbound = DispatchQueue(label: "com.cmuxterm.app.next.agent-pane.outbound", qos: .utility)
 
     init(request: URLRequest, wire: (any AcpmuxPaneWire)? = nil, limits: AgentPaneTransport.Limits,
          options: AcpmuxPermissionOptions, sessions: AcpmuxPaneSessions, decisions: AcpmuxDecisionContexts = AcpmuxDecisionContexts(),
@@ -332,6 +342,39 @@ nonisolated final class AcpmuxPaneSocket: NSObject, URLSessionWebSocketDelegate,
             }
             return nil
         }
+    }
+
+    /// The pane became seen or unseen while it shows `session` (p14-energy-118): one
+    /// `_acpmux/visibility {sessionId, visible}` notification per edge, so acpmux can stop a hidden
+    /// idle harness and wake it first when it shows (p14-energy-117). Fire and forget: the caller's
+    /// turn only compares with the last edge sent; the frame is made and sent on ``outbound`` after
+    /// it, and a repeat of the same state sends nothing. Chrome's `RenderWidgetHostImpl::WasHidden`
+    /// and `WasShown` tell the renderer each edge once, by a one-way IPC
+    /// (content/browser/renderer_host/render_widget_host_impl.cc). Call it only after the page's
+    /// first frame went: its LocalApp token opens the connection.
+    func visibilityChanged(session: String, visible: Bool) {
+        let edge = Visibility(session: session, visible: visible)
+        let sends = state.withLock { state -> Bool in
+            guard state.closed == nil, state.opened, state.visibility != edge else { return false }
+            state.visibility = edge
+            return true
+        }
+        guard sends else { return }
+        outbound.async { [self] in
+            guard let text = Self.visibilityFrame(edge) else { return }
+            _ = send(text)
+        }
+    }
+
+    /// The host's own visibility notification; never a page method (``AcpmuxPaneMethods`` does not list it).
+    static let visibilityMethod = "_acpmux/visibility"
+
+    /// The JSON-RPC notification for `edge` (no id: acpmux sends no reply).
+    private static func visibilityFrame(_ edge: Visibility) -> String? {
+        let frame: [String: Any] = ["jsonrpc": "2.0", "method": Self.visibilityMethod,
+                                    "params": ["sessionId": edge.session, "visible": edge.visible]]
+        guard let data = try? JSONSerialization.data(withJSONObject: frame) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// The wire's send, under the same outstanding bounds as the WebSocket's.

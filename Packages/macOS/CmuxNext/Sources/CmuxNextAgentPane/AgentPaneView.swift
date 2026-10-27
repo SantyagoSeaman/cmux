@@ -195,6 +195,7 @@ public final class AgentPaneView: NSView {
         }
         model.onDictation = { [weak self] command in self?.dictation.handle(command) }
         installTransport()
+        transportPacer?.onSeenChange = { [weak self] seen in self?.paneSeenChanged(seen) }
         installContextMenu()
         beginLoadingState()
         Self.logger.info("agent pane webview loading source=\(Self.sourceDescription(source), privacy: .public) bundled=\(Self.bundledPage != nil, privacy: .public)")
@@ -324,6 +325,14 @@ public final class AgentPaneView: NSView {
         page.close()
         page.endPageDocument()
         removeFromSuperview()
+    }
+
+    /// The pane became seen or unseen (its probe's node flipped): acpmux hears the edge for the chat it
+    /// shows, once, after this turn (``AcpmuxPaneSocket/visibilityChanged(session:visible:)``), never
+    /// before the page's first frame opened the connection. Nothing here waits.
+    func paneSeenChanged(_ seen: Bool) {
+        guard let session = model.sessionId, model.transport.sentFirst, let socket = model.transport.socket else { return }
+        socket.visibilityChanged(session: session, visible: seen)
     }
 
     /// Another tab took the pane: stop listening, keep the words.
