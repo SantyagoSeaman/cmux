@@ -24,13 +24,17 @@ import Foundation
 /// Nothing merges across a grid replacement or any other event.
 ///
 /// Ring output (``TerminalRingSpan``, p05-ipc-113) is queued as ranges of the
-/// mapping, not bytes: spans of one mapping and screen that continue each other
-/// in the PTY stream and in memory merge into one wider range, never across the
-/// wrap, and each reaches the consumer as `Data` that points into the mapping.
-/// Its bound is the ring itself, so it never parks the reader: a consumer more
-/// than the ring behind finds its spans lapped. A span lapped before the
-/// consumer takes it is dropped and marks its screen, and the stream resyncs
-/// (app-daemon-connection-DESIGN.md sections 3.3 and 4.4).
+/// mapping, not bytes (``TerminalRingRun``): a span that continues the queue's
+/// last run in the PTY stream and in memory (one mapping and screen, never
+/// across the wrap) widens it, and the consumer's step merges runs the same way.
+/// Each run is cut again from the ring when the consumer takes it, as `Data`
+/// that points into the mapping. Its bound is the ring itself, so it never parks
+/// the reader: each push checks the oldest queued run of its ring, and once the
+/// writer laps it the screen is claimed lapped, its queued runs are dropped and
+/// the fresh screen is asked for at once; a run the ring refuses at pop does the
+/// same. Ring runs therefore never hold more than one ring of bytes. A lap during
+/// the parse is claimed by the span's own release check
+/// (app-daemon-connection-DESIGN.md sections 3.3, 3.4 and 4.4).
 final class TerminalEventQueue: Sendable {
     let highWater: Int
     let lowWater: Int
@@ -47,19 +51,22 @@ final class TerminalEventQueue: Sendable {
     // connection's dedicated reader thread (LineTransport) waits on it, never the main thread or a pool thread.
     private let readerWake = DispatchSemaphore(value: 0)
 
+    typealias Waiter = OnceContinuation<TerminalChannelEvent?, OnceContinuationError>
+
     /// One queued item: an event, live output still in its read buffer (attach frames), or live output still
     /// in the stream's output ring.
-    private enum Item {
+    enum Item {
         case event(TerminalChannelEvent)
         case span(TerminalOutputSpan)
-        case ring(TerminalRingSpan)
+        case ring(TerminalRingRun)
 
-        /// The event the consumer gets; nil for a ring span the writer lapped before the consumer took it.
-        var event: TerminalChannelEvent? {
+        /// The event a waiting consumer takes at once; nil for ring output, which ``State/enqueue(ring:mergeLimit:)``
+        /// hands over as it was cut.
+        var handoffEvent: TerminalChannelEvent? {
             switch self {
             case .event(let event): event
             case .span(let span): .output(span.bytes.data, colors: nil)
-            case .ring(let span): span.dataUnlessLapped().map { .output($0, colors: nil) }
+            case .ring: nil
             }
         }
 
@@ -73,15 +80,18 @@ final class TerminalEventQueue: Sendable {
         }
     }
 
-    private struct State {
+    /// The queue under its lock; the ring output part is in TerminalEventQueue+Ring.swift.
+    struct State {
         var items: [Item] = []
         var head = 0
         var outputBytes = 0
-        var waiter: OnceContinuation<TerminalChannelEvent?, OnceContinuationError>?
+        var waiter: Waiter?
         var finished = false
         var armed = false
         /// The reader waits on `readerWake`; whoever clears this signals it exactly once.
         var readerParked = false
+        /// Screens claimed lapped under the lock; their repair runs after it (``takeRepairs()``).
+        var repairs: [TerminalRingLaps] = []
 
         /// Whether the reader must wait now (armed, not finished, above `highWater`); marks it parked if so.
         mutating func parkReader(above highWater: Int) -> Bool {
@@ -96,7 +106,7 @@ final class TerminalEventQueue: Sendable {
         }
 
         /// Next event, merging consecutive plain output chunks up to `mergeLimit`; nil when none is queued.
-        /// Lapped ring spans are skipped.
+        /// Ring runs the ring refuses (lapped while they waited) are dropped and claim their screen.
         mutating func popMerged(mergeLimit: Int, recorder: DaemonWireStats.Recorder?) -> TerminalChannelEvent? {
             while let item = items[checked: head] {
                 head += 1
@@ -109,19 +119,13 @@ final class TerminalEventQueue: Sendable {
             return nil
         }
 
-        /// The event `item` (just popped) gives, merged with the items after it; nil for a lapped ring span.
+        /// The event `item` (just popped) gives, merged with the items after it; nil for a dropped ring run.
         private mutating func take(_ item: Item, mergeLimit: Int,
                                    recorder: DaemonWireStats.Recorder?) -> TerminalChannelEvent? {
             let event: TerminalChannelEvent
             switch item {
             case .ring(let first):
-                var joined = first  // one range of one mapping: merging copies nothing
-                while joined.count < mergeLimit, case .ring(let next)? = items[checked: head],
-                      let wider = joined.joined(with: next) {
-                    joined = wider
-                    head += 1
-                }
-                return Item.ring(joined).event
+                return take(ring: first, mergeLimit: mergeLimit)
             case .span(let first):
                 var joined: TerminalOutputSpan? = first  // the merged bytes while they are one slice of one buffer
                 var copied = Data()  // the merged bytes once they are not
@@ -196,18 +200,22 @@ final class TerminalEventQueue: Sendable {
     }
 
     /// Reader thread. Live output still in the stream's output ring; it reaches the consumer as `Data` that
-    /// points into the mapping. It adds nothing toward `highWater`: the ring bounds it.
-    func push(_ span: TerminalRingSpan) {
-        enqueue(.ring(span))
+    /// points into the mapping. It never waits: the ring bounds it (see the type's notes).
+    func push(ring span: TerminalRingSpan) {
+        let (handoff, repairs) = state.withLock { state in
+            (state.enqueue(ring: span, mergeLimit: mergeLimit), state.takeRepairs())
+        }
+        if let handoff { handoff.0.resume(returning: handoff.1) }
+        for laps in repairs { laps.requestRepair() }
     }
 
     private func enqueue(_ item: Item) {
-        typealias Handoff = (waiter: OnceContinuation<TerminalChannelEvent?, OnceContinuationError>, event: TerminalChannelEvent)
+        typealias Handoff = (waiter: Waiter, event: TerminalChannelEvent)
         let (handoff, blocked) = state.withLock { state -> (Handoff?, Bool) in
             guard !state.finished else { return (nil, false) }
             if state.waiter != nil {
-                // The consumer waits, so nothing is queued: it takes this item now (a lapped ring span is dropped).
-                guard let event = item.event, let waiter = state.waiter.take() else { return (nil, false) }
+                // The consumer waits, so nothing is queued: it takes this item now.
+                guard let event = item.handoffEvent, let waiter = state.waiter.take() else { return (nil, false) }
                 return ((waiter, event), false)
             }
             state.items.append(item)
@@ -278,22 +286,33 @@ final class TerminalEventQueue: Sendable {
     /// Resumes at once when an event is queued or the stream ended;
     /// otherwise parks the continuation for the next `push`/`finish`.
     private func takeOrWait(_ continuation: OnceContinuation<TerminalChannelEvent?, OnceContinuationError>) {
-        let (ready, release) = state.withLock { state -> (TerminalChannelEvent??, Bool) in
+        let (ready, release, repairs) = state.withLock { state -> (TerminalChannelEvent??, Bool, [TerminalRingLaps]) in
+            let ready: TerminalChannelEvent??
+            var release = false
             if let event = state.popMerged(mergeLimit: mergeLimit, recorder: recorder) {
+                ready = .some(event)
                 // At or below `lowWater` the reader reads again.
-                guard state.outputBytes <= lowWater else { return (.some(event), false) }
-                return (.some(event), state.releaseReader())
+                release = state.outputBytes <= lowWater && state.releaseReader()
+            } else if state.finished {
+                ready = .some(nil)
+            } else {
+                state.waiter = continuation
+                ready = nil
             }
-            if state.finished { return (.some(nil), false) }
-            state.waiter = continuation
-            return (nil, false)
+            return (ready, release, state.takeRepairs())
         }
         if release { readerWake.signal() }
+        for laps in repairs { laps.requestRepair() }
         if let ready { continuation.resume(returning: ready) }
     }
 
     var bufferedOutputBytes: Int {
         state.withLock { $0.outputBytes }
+    }
+
+    /// Items waiting for the consumer: the bound tests check.
+    var queuedItemCount: Int {
+        state.withLock { $0.items.count - $0.head }
     }
 
     /// Bulk bytes: output and snapshot history. A READY, like a replay,

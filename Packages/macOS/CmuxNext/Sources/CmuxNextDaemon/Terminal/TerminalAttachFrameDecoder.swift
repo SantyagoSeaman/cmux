@@ -20,10 +20,12 @@ import Foundation
 ///   whose raw bytes all came in one frame is a slice too.
 /// - A RING maps the terminal's output ring (terminal-output-ring-v1, p05-ipc-113); a RING_ADVANCE then
 ///   publishes ring bytes up to its aux, which continue the stream like OUTPUT and reach the view as at most
-///   two spans of the mapping (two when they wrap), never copied. A range more than the ring behind, or one the
-///   writer has started to overwrite, is a gap; so is a span the writer lapped while the view parsed it
-///   (``TerminalRingLaps``), seen at the next screen frame. A RING or RING_ADVANCE the stream cannot use is a
-///   protocol error (app-daemon-connection-DESIGN.md sections 4.3 and 4.4).
+///   two spans of the mapping (two when they wrap), never copied. The ring cuts them and checks the seqlock
+///   rule: a range more than the ring behind, or one the writer has started to overwrite, is a gap. A lap
+///   found later, while a span waits in the queue or while the view parses it, claims the screen's
+///   ``TerminalRingLaps``, which asks for the fresh screen at once; the decoder then drops ring bytes as in
+///   any resync. A RING or RING_ADVANCE the stream cannot use, or an advance past the ring's published end,
+///   is a protocol error (app-daemon-connection-DESIGN.md sections 3.4, 4.3 and 4.4).
 ///
 /// JSON lines of the same stream go through ``admit(line:named:decoder:)``, so one ``TerminalSnapshotSequencer``
 /// orders both and one surface scopes both.
@@ -46,14 +48,14 @@ struct TerminalAttachFrameDecoder: Sendable {
     private var outputRun: OutputRun?
     private var sequencer = TerminalSnapshotSequencer()
     private var bulk: PendingBulk?
-    /// Maps a RING's descriptor; nil when this view asked for no rings, so a RING is refused.
-    private let ringMapper: TerminalRingMapper?
+    /// Maps a RING's descriptor and repairs a lap; nil when this view asked for no rings, so a RING is refused.
+    private let rings: RingStreams?
     /// The stream's mapped output ring, once a RING came.
     private var ring: RingReader?
 
-    init(surface: SurfaceID, ringMapper: TerminalRingMapper? = nil) {
+    init(surface: SurfaceID, rings: RingStreams? = nil) {
         self.surface = surface
-        self.ringMapper = ringMapper
+        self.rings = rings
     }
 
     /// What `frame` gives the view. `decoder` is the connection's (it counts each meta decode).
@@ -61,6 +63,7 @@ struct TerminalAttachFrameDecoder: Sendable {
         // A sidecar follows the last chunk of its OUTPUT at once; any other frame in between ends that chance.
         let precedingRun = outputRun
         outputRun = nil
+        noteRingLap()
         if let pending = bulk {
             // A stream's frames never interleave (one FIFO per stream), so another frame here is a broken stream.
             guard pending.continues(with: frame) else { return lost() }
@@ -92,6 +95,7 @@ struct TerminalAttachFrameDecoder: Sendable {
     /// ends a resync, as a refused READY frame does.
     mutating func admit(line: Data, named name: String, decoder: WireDecoder) -> TerminalFrameAdmission {
         outputRun = nil
+        noteRingLap()
         if surface == TerminalAttachment.unresolvedSurface,
            let named = TerminalAttachment.initialSurface(name: name, line: line, decoder: decoder) {
             surface = named
@@ -117,7 +121,6 @@ struct TerminalAttachFrameDecoder: Sendable {
     /// first byte (cmux-ipc `lane_writer.rs` `chunk_frame`), so `run` is the output this chunk may continue.
     private mutating func output(_ span: TerminalOutputSpan, after run: OutputRun?) -> TerminalFrameAdmission {
         guard !resyncing else { return .nothing }
-        guard !ringLapped else { return lost() }
         var current = run.flatMap { $0.end == span.offset ? $0 : nil }
             ?? OutputRun(start: span.offset, end: span.offset)
         current.end = span.end
@@ -142,7 +145,6 @@ struct TerminalAttachFrameDecoder: Sendable {
     /// `meta_len | meta | replay | pending`: the `resized` event without `replay` and `pending`.
     private mutating func grid(_ frame: TerminalAttachFrame, decoder: WireDecoder) -> TerminalFrameAdmission {
         guard !resyncing else { return .nothing }
-        guard !ringLapped else { return lost() }
         if let next = nextOffset {
             guard frame.offset <= next else { return lost() }
             // The screen that set `next` (a READY or REPLAY cut after this resize) already has it.
@@ -258,7 +260,9 @@ struct TerminalAttachFrameDecoder: Sendable {
         outputRun?.deliveredEnd = nil  // output before the cut is on the restored screen
         resyncing = false
         snapshots = snapshot
-        ring?.laps = TerminalRingLaps()  // a lap of the replaced screen's bytes no longer matters
+        guard let rings, let reader = ring else { return }
+        reader.laps.retire()  // a lap of the replaced screen's bytes no longer matters
+        ring?.laps = newLaps(rings)
     }
 
     /// Bytes were lost: a snapshot stream asks for a fresh READY once. A byte-replay stream cannot be repaired
@@ -267,19 +271,40 @@ struct TerminalAttachFrameDecoder: Sendable {
         bulk = nil
         guard snapshots, !resyncing else { return Self.reattach }
         resyncing = true
+        // A lap the queue found at the same moment claimed the screen first and asked already.
+        guard ring?.laps.claim() != false else { return .nothing }
         return .resync(.gap)
+    }
+
+    /// A lap found off the reader thread claimed the screen and asked for the fresh one: drop its screen bytes
+    /// until that comes, as after a gap seen here.
+    private mutating func noteRingLap() {
+        guard !resyncing, ring?.laps.isMarked == true else { return }
+        resyncing = true
+    }
+
+    /// The lap mark of a new screen, whose repair asks the way ``lost()`` does: a snapshot stream for a fresh
+    /// READY, a byte-replay stream for a reattach. It holds the queue weakly: the queue's own runs hold it.
+    private func newLaps(_ rings: RingStreams) -> TerminalRingLaps {
+        let repair = snapshots ? TerminalFrameAdmission.resync(.gap) : Self.reattach
+        let delivery = rings.delivery
+        return TerminalRingLaps { [weak queue = rings.queue] in
+            guard let queue else { return }
+            Self.deliver(repair, to: queue, delivery: delivery)
+        }
     }
 
     /// RING: decode its meta and map its descriptor. The mapping is kept even while a resync is due, since the
     /// READY that ends it is followed by RING_ADVANCEs. A second RING replaces the first (the stream's
-    /// reference to the old mapping goes; spans of it that the view still holds keep it mapped).
+    /// reference to the old mapping goes; spans of it that the view still holds keep it mapped). It is the same
+    /// screen, so it keeps the screen's lap mark: a lap of the old mapping's bytes still resyncs it.
     private mutating func mapRing(_ frame: TerminalAttachFrame, decoder: WireDecoder) -> TerminalFrameAdmission {
         do throws(TerminalRingRefusal) {
-            guard let ringMapper else { throw TerminalRingRefusal.unsupported }  // the frame's descriptor closes with it
+            guard let rings else { throw TerminalRingRefusal.unsupported }  // the frame's descriptor closes with it
             let grant = try TerminalAttachment.decodeRingGrant(frame.payload, decoder: decoder)
             guard let descriptor = frame.descriptor?.take() else { throw TerminalRingRefusal.noDescriptor }
-            let mapped = try ringMapper(descriptor, grant)
-            ring = RingReader(ring: mapped, base: grant.base, sentEnd: frame.offset, laps: TerminalRingLaps())
+            let mapped = try rings.mapper(descriptor, grant)
+            ring = RingReader(ring: mapped, sentEnd: frame.offset, laps: ring?.laps ?? newLaps(rings))
             return .nothing
         } catch {
             return .refused(error)
@@ -288,33 +313,31 @@ struct TerminalAttachFrameDecoder: Sendable {
 
     /// RING_ADVANCE to `end`: the ring bytes from the next output byte up to `end`, cut while they are still
     /// whole. Bytes before the next output byte are on the screen already; a READY-less stream starts at the
-    /// ring's end when it was sent. A sidecar after it may name any of the bytes it delivered.
+    /// ring's end when it was sent. Bytes before the ring's first one, or lapped, are a gap. A sidecar after it
+    /// may name any of the bytes it delivered.
     private mutating func advanceRing(to end: UInt64, payload: TerminalFrameBytes,
                                       after run: OutputRun?) -> TerminalFrameAdmission {
         guard let reader = ring, payload.count == 0 else { return .refused(.strayAdvance) }
         guard !resyncing else { return .nothing }
-        guard !reader.laps.isMarked else { return lost() }
         let start = nextOffset ?? reader.sentEnd
         var current = run.flatMap { $0.end == start ? $0 : nil } ?? OutputRun(start: start, end: start)
         guard end > start else {
             outputRun = current
             return .nothing
         }
-        // Bytes before the ring's first one were never in it.
-        guard start >= reader.base,
-              let cut = TerminalRingSpan.cut(reader.ring, laps: reader.laps, from: start, to: end,
-                                             reserve: reader.ring.reserveAfterReading())
-        else { return lost() }
+        let cut: (head: TerminalRingSpan, tail: TerminalRingSpan?)?
+        do throws(TerminalRingCutError) {
+            cut = try TerminalRingRun(ring: reader.ring, laps: reader.laps, range: start ..< end).cut()
+        } catch {
+            guard case .notPublished = error else { return lost() }
+            return .refused(.unpublishedAdvance)
+        }
+        guard let cut else { return lost() }  // `end > start`, so the ring broke its contract
         nextOffset = end
         current.end = end
         current.deliveredEnd = end
         outputRun = current
-        return .ringOutput(cut.head, wrapped: cut.wrapped)
-    }
-
-    /// The writer lapped ring bytes of this screen after they were cut: the screen may be torn.
-    private var ringLapped: Bool {
-        ring?.laps.isMarked == true
+        return .ringOutput(cut.head, wrapped: cut.tail)
     }
 
     /// A READY that does not decode or names another surface: the screen it should restore stays unknown.

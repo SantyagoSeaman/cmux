@@ -1,87 +1,145 @@
 import CmuxNextCompat
 import Foundation
 
-/// Whether the writer lapped a screen's ring bytes after they were cut: set by the release check of a span
-/// that was parsed while the writer overwrote it, and by the queue when a span was lapped before the view took
-/// it. The stream's next frame then asks for a fresh READY. One per screen: a READY starts a new one, so a late
-/// release of a span of the replaced screen never marks the new one.
+/// Whether the writer lapped ring bytes of one screen, and the one repair that answers it. One per screen: a
+/// READY starts a new one and retires the old, so a late lap of the replaced screen's bytes asks for nothing; a
+/// RING that replaces the mapping keeps it. Whoever finds a lap first (the queue at enqueue or pop, a span's
+/// release check, or the decoder's own gap) claims it, and only the first claim asks for the fresh screen, at
+/// once, without waiting for another frame (design section 3.4).
 final class TerminalRingLaps: Sendable {
-    private let marked = Atomic<Bool>(false)
+    private static let clean: UInt8 = 0
+    private static let lapped: UInt8 = 1
+    private static let retired: UInt8 = 2
 
-    init() {}
+    private let state = Atomic<UInt8>(TerminalRingLaps.clean)
+    /// Asks for the fresh screen: `snapshot-request` on a snapshot stream, a reattach on a byte-replay one.
+    private let repair: @Sendable () -> Void
 
-    func mark() {
-        marked.store(true, ordering: .releasing)
+    init(repair: @escaping @Sendable () -> Void) {
+        self.repair = repair
     }
 
+    /// Whether the screen was claimed lapped: its ring bytes are dropped until the fresh screen comes.
     var isMarked: Bool {
-        marked.load(ordering: .acquiring)
+        state.load(ordering: .acquiring) == Self.lapped
+    }
+
+    /// Marks the screen lapped. True for the first claim of a current screen: that caller owes the repair
+    /// (``requestRepair()``, run outside any lock it holds), or is the decoder, which asks itself.
+    func claim() -> Bool {
+        state.compareExchange(expected: Self.clean, desired: Self.lapped, ordering: .acquiringAndReleasing).exchanged
+    }
+
+    /// Claims the screen and, when this is the first claim, asks for the repair.
+    func mark() {
+        guard claim() else { return }
+        repair()
+    }
+
+    /// Runs the repair a successful ``claim()`` owes.
+    func requestRepair() {
+        repair()
+    }
+
+    /// A READY replaced this screen: a lap of its bytes found later claims nothing.
+    func retire() {
+        state.compareExchange(expected: Self.clean, desired: Self.retired, ordering: .acquiringAndReleasing)
     }
 }
 
-/// PTY output `offset ..< end` of a ring stream, still in the ring: one run of the data area, never across
-/// the wrap (design section 4.4).
+/// PTY output `range` of a ring stream, cut by the ring: one run of the data area, never across the wrap, with
+/// `bytes` pointing into the mapping (design section 4.4). The ring checked the reserve rule and the published
+/// end when it cut them; releasing `bytes` checks the rule again and claims `laps` on a lap.
 struct TerminalRingSpan: Sendable {
     let ring: any TerminalOutputRing
     /// The lap mark of the screen these bytes continue.
     let laps: TerminalRingLaps
-    let offset: UInt64
-    let count: Int
+    let range: Range<UInt64>
+    let bytes: Data
 
-    /// The offset just past the last byte.
-    var end: UInt64 { offset &+ UInt64(truncatingIfNeeded: count) }
-
-    /// The bytes of `[start, end)` cut from `ring` after `reserve` was loaded: one span, or two when the range
-    /// wraps. Nil when bytes of it are gone or may be being overwritten: more than the capacity behind, or the
-    /// writer started past `start + capacity` (the check at cut, design section 4.4).
-    static func cut(_ ring: any TerminalOutputRing, laps: TerminalRingLaps, from start: UInt64, to end: UInt64,
-                    reserve: UInt64) -> (head: TerminalRingSpan, wrapped: TerminalRingSpan?)? {
-        let capacity = ring.capacity
-        guard capacity > 0, end > start, end - start <= capacity,
-              !lapped(start: start, capacity: capacity, reserve: reserve),
-              let total = Int(exactly: end - start), let first = Int(exactly: min(end - start, capacity - start % capacity))
-        else { return nil }
-        let head = TerminalRingSpan(ring: ring, laps: laps, offset: start, count: first)
-        guard first < total else { return (head, nil) }
-        return (head, TerminalRingSpan(ring: ring, laps: laps, offset: head.end, count: total - first))
+    /// The span as a queued range: the queue cuts it again when the consumer takes it.
+    var run: TerminalRingRun {
+        TerminalRingRun(ring: ring, laps: laps, range: range)
     }
+}
 
-    /// The seqlock rule: the writer may have overwritten the byte at `start` once it started a byte past
-    /// `start + capacity`. A `reserve` behind `start` is a broken ring, so it counts as lapped too.
-    static func lapped(start: UInt64, capacity: UInt64, reserve: UInt64) -> Bool {
-        reserve < start || reserve - start > capacity
-    }
+/// Ring output as a range of the mapping, not bytes: what a view's queue holds. It is cut from the ring when
+/// the consumer takes it, so the ring checks the reserve rule again and a range lapped while it waited never
+/// reaches the parser.
+struct TerminalRingRun: Sendable {
+    let ring: any TerminalOutputRing
+    let laps: TerminalRingLaps
+    let range: Range<UInt64>
 
-    /// Whether the writer may have overwritten bytes of this span by now.
-    var isLapped: Bool {
-        laps.isMarked || Self.lapped(start: offset, capacity: ring.capacity, reserve: ring.reserveAfterReading())
-    }
+    var count: UInt64 { range.upperBound - range.lowerBound }
 
-    /// `self` and `next` as one span when `next` continues it in the PTY stream and in the mapping: the same
+    /// `self` and `next` as one run when `next` continues it in the PTY stream and in the mapping: the same
     /// ring and screen, and no wrap between them. Nil otherwise.
-    func joined(with next: TerminalRingSpan) -> TerminalRingSpan? {
-        guard next.ring === ring, next.laps === laps, next.offset == end, end % ring.capacity != 0 else { return nil }
-        return TerminalRingSpan(ring: ring, laps: laps, offset: offset, count: count + next.count)
+    func joined(with next: TerminalRingRun) -> TerminalRingRun? {
+        guard next.ring === ring, next.laps === laps, next.range.lowerBound == range.upperBound,
+              range.upperBound % ring.capacity != 0
+        else { return nil }
+        return TerminalRingRun(ring: ring, laps: laps, range: range.lowerBound ..< next.range.upperBound)
     }
 
-    /// ``data()``, unless the writer lapped the span before the view took it: then nil, and its screen is marked
-    /// lapped so the stream resyncs.
-    func dataUnlessLapped() -> Data? {
-        guard !isLapped else {
-            laps.mark()
-            return nil
+    /// Whether the writer has overwritten, or is overwriting, the run's first byte by now (the ring's rule).
+    var isLapped: Bool {
+        do throws(TerminalRingCutError) {
+            try Self.checkWhole(ring, from: range.lowerBound)
+            return false
+        } catch {
+            return true
         }
-        return data()
     }
 
-    /// The bytes for the view, pointing into the mapping. When the view drops them (Ghostty parsed them), the
-    /// rule is checked again: a writer that lapped them during the parse marks the screen lapped.
-    func data() -> Data {
-        let span = self
-        return ring.bytesNoCopy(from: offset, count: count) {
-            guard Self.lapped(start: span.offset, capacity: span.ring.capacity,
-                              reserve: span.ring.reserveAfterReading()) else { return }
-            span.laps.mark()
+    /// The run's bytes, cut from the ring now: one span, or two when the range crosses the wrap; nil for an
+    /// empty range. Each span's release checks the reserve rule again and claims `laps` on a lap, on whatever
+    /// thread drops it, so a lap during the parse asks for the fresh screen even when no frame follows.
+    func cut() throws(TerminalRingCutError) -> (head: TerminalRingSpan, tail: TerminalRingSpan?)? {
+        let cut = try ring.cut(from: range.lowerBound, to: range.upperBound)
+        guard let first = cut.head else { return nil }
+        let head = try span(first, from: range.lowerBound)
+        guard let rest = cut.tail else { return (head, nil) }
+        return (head, try span(rest, from: head.range.upperBound))
+    }
+
+    /// `bytes`, the ring's span from `start`, as `Data` at the same address in the mapping whose release checks
+    /// the rule for this span's screen. The closure holds the ring, which keeps the mapping.
+    private func span(_ bytes: Data, from start: UInt64) throws(TerminalRingCutError) -> TerminalRingSpan {
+        let ring = ring
+        let laps = laps
+        let range = start ..< start + UInt64(bytes.count)
+        // SAFETY: only the address is read, inside the closure that lends it.
+        let address = unsafe bytes.withUnsafeBytes { buffer in unsafe UInt(bitPattern: buffer.baseAddress) }
+        guard ring.dataAddresses.contains(address),
+              let pointer = unsafe UnsafeMutableRawPointer(bitPattern: address)
+        else {
+            // `Data` copied a span this small inline inside the cut: this check is the copy's release check.
+            try Self.checkWhole(ring, from: start)
+            return TerminalRingSpan(ring: ring, laps: laps, range: range, bytes: bytes)
+        }
+        // SAFETY: `bytes.count` bytes from `pointer` lie in the read-only mapping (the ring cut them there), and the
+        // deallocator holds `ring`, which keeps the mapping until it runs; nothing writes through the pointer.
+        let checked = unsafe Data(bytesNoCopy: pointer, count: bytes.count, deallocator: .custom { _, _ in
+            do throws(TerminalRingCutError) {
+                try Self.checkWhole(ring, from: start)
+            } catch {
+                laps.mark()
+            }
+        })
+        return TerminalRingSpan(ring: ring, laps: laps, range: range, bytes: checked)
+    }
+
+    /// The seqlock's second check, through the ring's own rule: an empty cut at `start` after every byte read
+    /// before it (acquire fence), refused as lapped once the writer reserved past `start + capacity`. Only
+    /// `.lapped` is thrown: the cut that made the span already passed the published-end and base checks.
+    private static func checkWhole(_ ring: any TerminalOutputRing, from start: UInt64) throws(TerminalRingCutError) {
+        atomicFence(ordering: .acquiring)
+        do throws(TerminalRingCutError) {
+            _ = try ring.cut(from: start, to: start)
+        } catch {
+            guard case .lapped = error else { return }
+            throw error
         }
     }
 }

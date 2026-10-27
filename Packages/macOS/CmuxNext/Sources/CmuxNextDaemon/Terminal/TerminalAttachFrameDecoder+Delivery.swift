@@ -4,12 +4,20 @@ extension TerminalAttachFrameDecoder {
     /// The stream's mapped output ring.
     struct RingReader: Sendable {
         let ring: any TerminalOutputRing
-        /// The PTY offset of the first byte the ring held.
-        let base: UInt64
         /// The ring's end when the RING was sent: where a stream with no screen offset yet starts.
         let sentEnd: UInt64
         /// The lap mark of the current screen.
         var laps: TerminalRingLaps
+    }
+
+    /// What a view that maps rings gives its decoder: the mapper, and the queue and delivery a ring lap's
+    /// repair goes to. A lap found off the reader thread (the queue at pop, a span's release check) asks for
+    /// the fresh screen from there at once, through the same delivery as a gap the decoder sees. Spans the view
+    /// holds keep `delivery` alive, so its closures hold the attachment weakly.
+    struct RingStreams: Sendable {
+        var mapper: TerminalRingMapper
+        var queue: TerminalEventQueue
+        var delivery: Delivery
     }
 
     /// Contiguous OUTPUT frames back to back: the chunks of one output, or outputs with no sidecar between.
@@ -56,9 +64,9 @@ extension TerminalAttachFrameDecoder {
             queue.push(span)
         case .ringOutput(let span, let wrapped):
             delivery.outputDecoded(nil)
-            queue.push(span)
+            queue.push(ring: span)
             guard let wrapped else { return }
-            queue.push(wrapped)
+            queue.push(ring: wrapped)
         case .event(.sizeState(let state, let participant), _):
             delivery.sizeState(state, participant)
         case .event(.closed(let reason), _):
