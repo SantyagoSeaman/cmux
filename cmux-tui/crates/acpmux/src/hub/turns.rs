@@ -438,6 +438,7 @@ impl Hub {
         }
         // The prompt is recorded and acknowledged above before the agent is started again (it
         // died, or the daemon restarted), so a client hears prompt_accepted at once.
+        self.wake_cause(session, "prompt");
         let started = match self.child_for_since(session, stops).await {
             Ok(child) => session
                 .meta()

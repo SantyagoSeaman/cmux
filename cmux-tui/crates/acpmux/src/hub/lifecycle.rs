@@ -459,7 +459,10 @@ impl Hub {
             return Err(stopped_while_starting());
         }
         // Boxed: a start is a deep future, and the stack a caller polls it on is not.
-        let child = Box::pin(self.reach_or_start(session, profile, stops)).await?;
+        let wake = self.wake_began(session);
+        let child = Box::pin(self.reach_or_start(session, profile, stops)).await;
+        self.wake_ended(session, wake, child.as_ref().err());
+        let child = child?;
         // Stopped while this agent started (no other start can run while this one holds the
         // spawn lock): the stop found no agent to end yet, or the start went on after it. The
         // agent is ended here and the session stays closed.

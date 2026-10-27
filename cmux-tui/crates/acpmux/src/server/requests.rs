@@ -1692,7 +1692,16 @@ async fn dispatch_request(
             Ok(json!({}))
         }
         method::MUX_VIEW => view::view(hub, conn, &params),
-        method::MUX_TYPING => view::typing(hub, conn, &params),
+        method::MUX_TYPING => {
+            let done = view::typing(hub, conn, &params)?;
+            // A person typing into a hibernated chat wakes its agent now (`hub/idle.rs`).
+            if params.get("on").and_then(Value::as_bool) == Some(true)
+                && let Ok(session) = hub.resolve(session_key(&params)?)
+            {
+                hub.wake_for_typing(&session, super::trust_gate::for_web(conn.origin, &params));
+            }
+            Ok(done)
+        }
         method::MUX_MARK_UNREAD => view::mark_unread(hub, &params),
         method::MUX_APP_REPLY => super::app_reply::check(hub, conn, &params),
         method::MUX_HARNESS_INVENTORY_WATCH => super::inventory_watch::handle(hub, conn, &params),

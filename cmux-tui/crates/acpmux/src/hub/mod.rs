@@ -207,9 +207,10 @@ use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// How long a session's harness may sit unused (no client, no turn, no
-/// activity) before it exits; the session resumes on its next prompt.
-pub const IDLE_CHILD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// How long a session's harness may sit unused (no turn, nothing queued, no
+/// question waiting, no activity) before it hibernates: it exits and the
+/// session resumes on its next prompt (`idle.rs`).
+pub const IDLE_CHILD: std::time::Duration = std::time::Duration::from_secs(2 * 60);
 /// Git hash and date stamped at build time (see build.rs).
 pub const BUILD: &str = env!("ACPMUX_BUILD");
 
@@ -884,6 +885,8 @@ impl Hub {
             last_model_at: AtomicU64::new(0),
             silent_turn: StdMutex::new(None),
             last_active: AtomicU64::new(self.clock_now()),
+            hibernated_at: AtomicU64::new(0),
+            wake_cause: StdMutex::new(None),
             web_control_ended: AtomicBool::new(false),
             floor: Default::default(),
             subagents: StdMutex::new(Default::default()),

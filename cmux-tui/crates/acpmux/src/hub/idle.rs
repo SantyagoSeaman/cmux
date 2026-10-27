@@ -1,12 +1,24 @@
-//! Part of `Hub`; see `hub/mod.rs`. A session harness nobody uses exits.
+//! Part of `Hub`; see `hub/mod.rs`. An idle session hibernates: its harness exits.
 //!
 //! Every new session used to keep its adapter alive until the daemon
 //! stopped: after about 25 sessions, 36 adapters, 187 processes and 9.4 GB,
-//! with switches slowing as they piled up. A session is idle when no client
-//! is attached, no turn runs or waits, no permission is pending, no start
-//! holds its spawn lock, and nothing was logged for `idle_child`. Its
-//! harness is then stopped through `detach_child`: the record and the
-//! agent session id stay, so the next prompt resumes it (`session/load`).
+//! with switches slowing as they piled up. A session is idle when no turn
+//! runs or waits (Claude Code's own turns included), nothing is queued, no
+//! permission or question is pending, no start holds its spawn lock, no
+//! background command or subagent runs, and nothing was logged for
+//! `idle_child` (2 min, `IDLE_CHILD`; `ACPMUX_IDLE_CHILD_SECS`). A client
+//! attached to it, the open chat on screen included, does not keep it awake:
+//! the chat stays where it is and only the agent goes. Its harness is then
+//! stopped through `detach_child`, which ends the harness's process group and
+//! with it the MCP servers it started: the record and the agent session id
+//! stay, so the next prompt resumes it (`session/load`, `claude --resume`).
+//!
+//! A wake is the next start of a hibernated session's agent: a prompt, a
+//! person typing into the chat (`_acpmux/typing`, `wake_for_typing`, so the
+//! agent is up by the time they send), or any request that needs the agent.
+//! Every hibernation and every wake is logged with its cause and duration.
+//! A wake that fails fails its prompt like any start that fails (its
+//! `turn_error`, which the chat shows with Retry).
 //!
 //! The same task ends a running turn whose model has said nothing for
 //! `stalledTurnEndMs` (`stalled_turn.rs`).
@@ -14,7 +26,9 @@
 //! One task per hub waits on the injected clock for the earliest deadline
 //! and on a wake signal for a new child; it never polls, so idle costs no
 //! CPU. Activity only moves deadlines later, so the task wakes at most once
-//! per idle period per live child.
+//! per idle period per live child. It sleeps without a deadline when no
+//! session has a live child, and ends with the hub (its weak reference) or
+//! for good once shutdown starts (`stop_idle_reaper`).
 
 use super::*;
 
@@ -35,9 +49,11 @@ impl Hub {
     /// the permission as pending, and moves the status off ready.
     fn idle_eligible(&self, session: &Session) -> bool {
         !self.stopping.load(Ordering::SeqCst)
-            && session.attached.load(Ordering::SeqCst) == 0
             && matches!(session.status(), SessionStatus::Ready | SessionStatus::Idle)
             && session.turn().is_none()
+            // Nor a turn Claude Code started itself (a task notification's), which `turn` does
+            // not show.
+            && !session.harness_turn.load(Ordering::SeqCst)
             && session.turn_lock.try_lock().is_ok()
             && session.queued() == 0
             && session.pending_permissions().is_empty()
@@ -125,7 +141,8 @@ impl Hub {
                 continue;
             }
             if self.idle_eligible(&session) {
-                tracing::info!(session = %session.id, "idle harness exits; the session resumes on its next prompt");
+                let idle_for = now.saturating_sub(session.last_active.load(Ordering::Relaxed));
+                let began = std::time::Instant::now();
                 // A hosted child whose link is closed cannot take a Terminate
                 // frame: end its host with the nonce proof, as closing does.
                 let child = session.child.lock().await.clone();
@@ -137,10 +154,82 @@ impl Hub {
                 if link_lost {
                     self.end_unadopted_host(&session).await;
                 }
+                session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
+                tracing::info!(
+                    session = %session.id,
+                    cause = "idle",
+                    idle_secs = idle_for / 1_000_000_000,
+                    exit_ms = began.elapsed().as_millis() as u64,
+                    "hibernated: no turn, nothing queued, no question pending, no command running; \
+                     the harness and its MCP servers exited and the session wakes on its next prompt"
+                );
             } else {
                 // In use at its deadline: a full idle period starts now.
                 self.touch(&session);
             }
         }
+    }
+
+    /// What asks for a hibernated session's agent: told to the wake's log (`wake_began`).
+    /// Only the first cause counts until the wake is done.
+    pub(super) fn wake_cause(&self, session: &Session, cause: &'static str) {
+        if session.hibernated_at.load(Ordering::SeqCst) != 0 {
+            session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(cause);
+        }
+    }
+
+    /// A start of `session`'s agent begins (`ensure_child`): a wake when the idle exit hibernated
+    /// it, timed from here.
+    pub(super) fn wake_began(&self, session: &Session) -> Option<std::time::Instant> {
+        (session.hibernated_at.load(Ordering::SeqCst) != 0).then(std::time::Instant::now)
+    }
+
+    /// The start `wake_began` timed ended: logs the wake with its cause and duration. A failed
+    /// one stays hibernated, so the next try is logged as a wake again.
+    pub(super) fn wake_ended(
+        &self,
+        session: &Session,
+        began: Option<std::time::Instant>,
+        failed: Option<&RpcError>,
+    ) {
+        let Some(began) = began else { return };
+        let took_ms = began.elapsed().as_millis() as u64;
+        let at = session.hibernated_at.load(Ordering::SeqCst);
+        let slept_secs = self.clock_now().saturating_sub(at) / 1_000_000_000;
+        let cause = session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let cause = cause.unwrap_or("request");
+        match failed {
+            None => {
+                session.hibernated_at.store(0, Ordering::SeqCst);
+                tracing::info!(session = %session.id, cause, took_ms, slept_secs, "woke");
+            }
+            Some(e) => {
+                tracing::warn!(session = %session.id, cause, took_ms, slept_secs, "wake failed: {}", e.message)
+            }
+        }
+    }
+
+    /// A person started typing into `session` (`_acpmux/typing` on): a hibernated session wakes
+    /// now, so its agent is up by the time they send. Nothing for a session that was not
+    /// hibernated, is closed, already has its agent or starts one, or whose folder has no Trust
+    /// answer (`warm.rs`). The wake runs on its own task; a failure is logged and the prompt that
+    /// follows starts the agent itself (and shows its error, with Retry, if that fails too).
+    pub fn wake_for_typing(self: &Arc<Self>, session: &Arc<Session>, web: bool) {
+        if session.hibernated_at.load(Ordering::SeqCst) == 0
+            || session.status() != SessionStatus::Idle
+            || self.stopping.load(Ordering::SeqCst)
+            || session.spawn_lock.try_lock().is_err()
+        {
+            return;
+        }
+        let hub = self.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            if !hub.folder_trusted(&session, web).await {
+                return;
+            }
+            hub.wake_cause(&session, "typing");
+            let _ = hub.child_for(&session).await;
+        });
     }
 }

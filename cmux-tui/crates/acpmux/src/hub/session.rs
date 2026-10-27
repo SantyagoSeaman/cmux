@@ -179,6 +179,13 @@ pub struct Session {
     /// The hub clock's time (`Hub::clock_now`) of the last record or
     /// attach change; the idle harness exit counts from it (`idle.rs`).
     pub(super) last_active: AtomicU64,
+    /// The hub clock's time (`Hub::clock_now`) at which the idle exit hibernated its harness
+    /// (`idle.rs`), or 0: the next start of its agent is a wake, logged with its cause and how
+    /// long it took.
+    pub(super) hibernated_at: AtomicU64,
+    /// What asked for the agent the next wake starts (`idle.rs` `wake_cause`): `typing`, `prompt`,
+    /// else a request that needs the agent.
+    pub(super) wake_cause: StdMutex<Option<&'static str>>,
     /// Web control ended: the mode left the asking table (`web_control.rs`).
     pub(super) web_control_ended: AtomicBool,
     /// The remote floor's per-session marks (`remote_floor.rs`).
