@@ -1172,8 +1172,15 @@ error) runs the stores that take the owner's clock and id source
 starts at the fixture epoch, 2026-01-01T00:00:00Z (1767225600000 ms), and
 moves only on this command, and mints their ids from a ChaCha20 stream keyed
 by the seed. Two daemons with the same seed that run the same requests write
-the same ids and times. Without the seed, and always in a release daemon, the
-stores use the system clock and the system's random source. Like
+the same ids and times. A seeded daemon with a persistent state root keeps
+`oracle-env.json` in the session's state directory: how many seeded daemons
+opened it and the clock's offset, written on every move. A daemon that
+restarts on that root resumes the clock at the offset and mints from a stream
+of its own (the launch count is the ChaCha20 stream id), so it never repeats
+an id or a time of an earlier launch; a first launch is stream 0 at offset 0.
+Reads never draw from the seeded stream. Without the seed, and always in a
+release daemon, the stores use the system clock and the system's random
+source. Like
 `oracle-state`, a release daemon answers `bad request: unknown variant`, and
 only trusted local connections get a reply. The oracle probes for the clock
 with `ms: 0`.
@@ -1191,8 +1198,10 @@ object{offsetMs:uint64, nowMs:uint64}
 
 Errors: `oracle state requires a trusted local connection`,
 `oracle-advance-clock requires CMUX_TUI_ORACLE_SEED: this daemon runs on the
-system clock`, `bad request: ...`, and `the clock exceeds the millisecond range`
-for a move past the largest millisecond count.
+system clock`, `bad request: ...`, `the clock exceeds the millisecond range`
+for a move past the largest millisecond count, and `the oracle clock record
+could not be written: ...` when the clock moved but `oracle-env.json` was not
+written.
 
 ### trace-start, trace-stop, trace-status
 

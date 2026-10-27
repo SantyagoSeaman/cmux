@@ -22,10 +22,10 @@ const CHILD_SEED: &str = "CMUX_ORACLE_ENV_STORES_CHILD_SEED";
 const CHILD_TEST: &str = "oracle_env::stores_tests::converted_stores_of_the_child_seed";
 const MARK: &str = "converted-stores:";
 
-struct StateRoot(PathBuf);
+pub(super) struct StateRoot(pub(super) PathBuf);
 
 impl StateRoot {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut bytes = [0_u8; 8];
         getrandom::fill(&mut bytes).expect("random");
         let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -39,7 +39,7 @@ impl Drop for StateRoot {
     }
 }
 
-fn mutate(mux: &Arc<Mux>, operation: &str, mut params: Value, key: &str) -> Value {
+pub(super) fn mutate(mux: &Arc<Mux>, operation: &str, mut params: Value, key: &str) -> Value {
     params["machine"] = json!("current");
     params["session"] = json!("current");
     let envelope = json!({

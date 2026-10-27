@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::switches::Switches;
+use anyhow::Context as _;
 
 impl Mux {
     #[track_caller]
@@ -197,6 +198,12 @@ impl Mux {
         memory_setup: crate::memory::MemorySetup,
         switches: Switches,
     ) -> anyhow::Result<Arc<Self>> {
+        // A seeded owner continues the clock and the id stream of the
+        // launches before it on this session's directory.
+        let session_directory = registry.session_journal_database_path();
+        let switches = switches
+            .resume_in(session_directory.as_deref().and_then(Path::parent))
+            .context("the oracle launch record could not be read or written")?;
         let snapshot = registry.snapshot()?;
         let topology = registry.resource_topology_snapshot()?;
         let session_shutdown = crate::session_shutdown::SessionShutdownClock::open(

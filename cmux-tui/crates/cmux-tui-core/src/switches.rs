@@ -65,6 +65,12 @@ impl Switches {
         Self { oracle: OracleEnv::seeded(seed) }
     }
 
+    /// These switches as the owner of the session state `directory` opens
+    /// them (`OracleEnv::resume_in`); `None` for an in-memory session.
+    pub(crate) fn resume_in(self, directory: Option<&std::path::Path>) -> std::io::Result<Self> {
+        Ok(Self { oracle: self.oracle.resume_in(directory)? })
+    }
+
     pub(crate) fn oracle_env(&self) -> &OracleEnv {
         &self.oracle
     }

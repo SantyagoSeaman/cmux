@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use super::capture::{self, Include, Request, Stamp};
 use super::record::{Limits, rfc3339};
 use super::scan::{self, failed};
-use super::store::{Scratch, Store, io_failed};
+use super::store::{Scratch, Store, io_failed, mint};
 use super::{Target, not_found, target, writer};
 use crate::Mux;
 use crate::git_ops::diff;
@@ -114,14 +114,16 @@ fn files_tree(
 }
 
 /// The working tree now, captured as a checkpoint would be (every eligible
-/// untracked file, default limits) but never published: its object id.
+/// untracked file, default limits) but never published: its object id. Its
+/// throwaway id comes from the OS source, as scratch names do, so a read
+/// never moves the owner's seeded id stream.
 fn live_files(
     store: &Store,
     git: &WriteGit<'_>,
     target: &Target,
     scratch: &Scratch,
 ) -> Result<(String, bool), ResourceError> {
-    let checkpoint_id = store.mint_id("live");
+    let checkpoint_id = mint("live");
     let created_at = rfc3339(store.now_ms());
     let stamp = Stamp {
         checkpoint_id: &checkpoint_id,
