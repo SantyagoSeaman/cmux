@@ -183,9 +183,10 @@ struct QuitSessionsTests {
             let generation = await next.identity?.generation
             let second = try #require(after.workspaces.flatMap(\.screens).flatMap(\.panes).flatMap(\.tabs)
                 .first { $0.tabResourceID == keptIDs.last })
+            let expectedCwd = other.resolvingSymlinksInPath().path
             let output = try await Self.run(#"echo "kept:$PWD""#, in: second, endpoint: endpoint,
-                                            generation: generation, until: "/other")
-            #expect(output.range(of: #"kept:/\S*/other"#, options: .regularExpression) != nil, "\(output)")
+                                            generation: generation, until: "kept:/")
+            #expect(output.contains("kept:\(expectedCwd)"), "\(output)")
             let again = try await next.relaunchKeptTabs()
             #expect(again.relaunched == 0 && again.failures.isEmpty, "a second relaunch restarted a running tab: \(again.failures)")
             #expect(Self.shape(after) == Self.shape(before), "the relaunch changed the layout")
