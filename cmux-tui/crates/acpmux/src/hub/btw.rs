@@ -86,6 +86,36 @@ where
     }
 }
 
+/// Creation publishes a session before all of its startup awaits finish. Keep a timed-out
+/// creation running in the background so cancellation cannot strand that published session; when
+/// it eventually returns, discard the session it created.
+async fn with_inline_creation<F>(
+    hub: Arc<Hub>,
+    deadline: Option<tokio::time::Instant>,
+    future: F,
+) -> Result<Arc<Session>, RpcError>
+where
+    F: Future<Output = Result<Arc<Session>, RpcError>> + Send + 'static,
+{
+    let Some(deadline) = deadline else {
+        return future.await;
+    };
+    let mut task = tokio::spawn(future);
+    match tokio::time::timeout_at(deadline, &mut task).await {
+        Ok(result) => {
+            result.map_err(|e| RpcError::internal(e.to_string())).and_then(|result| result)
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                if let Ok(Ok(side)) = task.await {
+                    hub.btw_discard(&side).await;
+                }
+            });
+            Err(RpcError::internal("the inline side question timed out"))
+        }
+    }
+}
+
 impl Hub {
     /// Open a side session about `session` and send it `question`. Legacy calls
     /// return `{sessionId, model, readOnly}`. Inline calls return `{text}` and
@@ -140,11 +170,15 @@ impl Hub {
         .await??
         {
             Some(through) => (
-                with_inline_deadline(
-                    inline_deadline,
-                    self.fork(session, Some(name), None, Default::default(), None, Some(through)),
-                )
-                .await??,
+                with_inline_creation(self.clone(), inline_deadline, {
+                    let hub = self.clone();
+                    let parent = session.clone();
+                    async move {
+                        hub.fork(&parent, Some(name), None, Default::default(), None, Some(through))
+                            .await
+                    }
+                })
+                .await?,
                 None,
             ),
             None => {
@@ -170,21 +204,22 @@ impl Hub {
                     disallowed_tools: Vec::new(),
                     checked_cwd: None,
                 };
-                let side = match with_inline_deadline(
-                    inline_deadline,
-                    self.new_session(req.clone()),
-                )
-                .await?
+                let side = match with_inline_creation(self.clone(), inline_deadline, {
+                    let hub = self.clone();
+                    let req = req.clone();
+                    async move { hub.new_session(req).await }
+                })
+                .await
                 {
                     // A default model the harness refuses: its own default instead.
                     Err(e) if !inline && explicit.is_none() && model.is_some() => {
                         tracing::warn!(session = %session.id, "side session model: {}", e.message);
                         model = None;
-                        with_inline_deadline(
-                            inline_deadline,
-                            self.new_session(NewRequest { model: None, ..req }),
-                        )
-                        .await??
+                        with_inline_creation(self.clone(), inline_deadline, {
+                            let hub = self.clone();
+                            async move { hub.new_session(NewRequest { model: None, ..req }).await }
+                        })
+                        .await?
                     }
                     other => other?,
                 };
