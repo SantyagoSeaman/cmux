@@ -4,20 +4,13 @@ use super::*;
 
 #[test]
 fn browser_state_cannot_grant_new_authority_to_cached_pixels() {
-    let surface = RemoteSurface {
-        id: 1,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(10, 5, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    };
+    let surface = RemoteSurface::mirror(
+        1,
+        SurfaceKind::Browser,
+        Terminal::new(10, 5, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    );
     surface.update_browser_frame(&json!({
         "seq": 8,
         "width": 80,
@@ -67,20 +60,13 @@ fn browser_state_cannot_grant_new_authority_to_cached_pixels() {
 
 #[test]
 fn browser_pointer_range_does_not_authorize_unacknowledged_presentations() {
-    let surface = RemoteSurface {
-        id: 1,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(10, 5, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    };
+    let surface = RemoteSurface::mirror(
+        1,
+        SurfaceKind::Browser,
+        Terminal::new(10, 5, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    );
     surface.update_browser_frame(&json!({
         "seq": 9,
         "width": 80,
@@ -130,20 +116,13 @@ fn browser_pointer_range_does_not_authorize_unacknowledged_presentations() {
 
 #[test]
 fn stale_frame_does_not_restore_failed_browser_pointer_admission() {
-    let surface = RemoteSurface {
-        id: 1,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(10, 5, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    };
+    let surface = RemoteSurface::mirror(
+        1,
+        SurfaceKind::Browser,
+        Terminal::new(10, 5, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    );
     surface.update_browser_state(&json!({
         "url": "https://failed.test",
         "title": "browser failed: navigation failed",

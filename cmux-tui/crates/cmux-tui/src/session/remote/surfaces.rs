@@ -289,21 +289,8 @@ impl RemoteSession {
             let cell_pixels = *self.cell_pixels.lock().unwrap();
             let mut term = Terminal::new(cols, rows, 10_000, Callbacks::default())?;
             term.resize(cols, rows, u32::from(cell_pixels.0), u32::from(cell_pixels.1))?;
-            let surface = Arc::new(RemoteSurface {
-                id,
-                kind,
-                term: Mutex::new(term),
-                mouse_encoders: Mutex::new(MouseEncoders::new()?),
-                cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-                dirty: AtomicBool::new(false),
-                geometry_lifecycle: Mutex::new(()),
-                cell_pixels: Mutex::new(cell_pixels),
-                #[cfg(test)]
-                geometry_test_hook: Mutex::new(None),
-                content_generation: AtomicU64::new(1),
-                reported_size: Mutex::new(None),
-                browser: Mutex::new(RemoteBrowserState::default()),
-            });
+            let surface =
+                Arc::new(RemoteSurface::mirror(id, kind, term, MouseEncoders::new()?, cell_pixels));
             surface.update_browser_source(source);
             self.surfaces.lock().unwrap().insert(id, surface.clone());
             surface

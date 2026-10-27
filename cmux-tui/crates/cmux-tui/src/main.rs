@@ -58,6 +58,7 @@ mod launchd_role;
 mod link;
 mod local_owner;
 mod localization;
+mod lock_rank;
 mod loopback_policy;
 mod machine;
 #[cfg(unix)]

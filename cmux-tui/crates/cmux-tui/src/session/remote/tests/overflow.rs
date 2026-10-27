@@ -236,20 +236,13 @@ fn ordered_resize_replay_recovers_from_stale_initial_replay() {
     let server_text = server.plain_text().unwrap();
     assert!(server_text.lines().next().unwrap_or_default().contains("lawrence"));
 
-    let surface = RemoteSurface {
-        id: 1,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(12, 3, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    };
+    let surface = RemoteSurface::mirror(
+        1,
+        SurfaceKind::Pty,
+        Terminal::new(12, 3, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    );
     surface.apply_stream_resize(12, 3, None, &[]).unwrap();
     surface.term.lock().unwrap().vt_write(&stale_replay);
     surface.apply_stream_resize(10, 3, Some(&resize_replay), &[]).unwrap();

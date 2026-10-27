@@ -18,6 +18,7 @@ use serde_json::Map;
 use cmux_tui_core::resource::{PROTOCOL, StreamPublicId};
 
 use super::*;
+use crate::lock_rank::RankedGuard;
 use crate::session::sidebar_doc::{
     BatchOutcome, ItemRow, PINNED_SECTION_ID, SIDEBAR_DOC_CAPABILITY, SidebarDocModel,
 };
@@ -51,15 +52,14 @@ const MAX_STREAM_RESTARTS: u64 = 3;
 /// Past the restart limit, the shortest time between two fallback reads.
 const FALLBACK_READ_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
 pub(crate) struct RemoteSidebarDoc {
-    model: Mutex<SidebarDocModel>,
-    pending: Mutex<HashMap<String, Sender<Value>>>,
+    model: RankedMutex<SidebarDocModel>,
+    pending: RankedMutex<HashMap<String, Sender<Value>>>,
     /// The open `session.events` stream.
-    stream: Mutex<Option<String>>,
+    stream: RankedMutex<Option<String>>,
     /// The cursor of the stream's last item: a reopened stream resumes from
     /// it with deltas instead of a full session snapshot.
-    cursor: Mutex<Option<Value>>,
+    cursor: RankedMutex<Option<Value>>,
     /// A start or refetch worker is running.
     loading: AtomicBool,
     /// A gap was seen: the worker reads the document again.
@@ -70,33 +70,51 @@ pub(crate) struct RemoteSidebarDoc {
     stream_restarts: AtomicU64,
     /// When the last fallback `sidebar.get` started (stream ended past the
     /// restart limit): the idle tick reads the document at most this often.
-    fallback_read_at: Mutex<Option<Instant>>,
+    fallback_read_at: RankedMutex<Option<Instant>>,
     /// The daemon refused the document on this connection: keep the old
     /// path. A timeout or a closed transport does not set it.
     unavailable: AtomicBool,
     next_id: AtomicU64,
 }
 
+impl Default for RemoteSidebarDoc {
+    fn default() -> Self {
+        Self {
+            model: RankedMutex::new(LockRank::SidebarModel, SidebarDocModel::default()),
+            pending: RankedMutex::new(LockRank::SidebarPending, HashMap::new()),
+            stream: RankedMutex::new(LockRank::SidebarStream, None),
+            cursor: RankedMutex::new(LockRank::SidebarCursor, None),
+            loading: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
+            stream_restarts: AtomicU64::new(0),
+            fallback_read_at: RankedMutex::new(LockRank::SidebarFallbackReadAt, None),
+            unavailable: AtomicBool::new(false),
+            next_id: AtomicU64::new(0),
+        }
+    }
+}
+
 /// A poisoned lock still holds a usable read model: a panic elsewhere must
 /// not take the TUI down with it.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+#[track_caller]
+fn lock<T>(mutex: &RankedMutex<T>) -> RankedGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl RemoteSidebarDoc {
-    fn model(&self) -> std::sync::MutexGuard<'_, SidebarDocModel> {
+    fn model(&self) -> RankedGuard<'_, SidebarDocModel> {
         lock(&self.model)
     }
 
-    fn stream(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+    fn stream(&self) -> RankedGuard<'_, Option<String>> {
         lock(&self.stream)
     }
 
-    fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, Sender<Value>>> {
+    fn pending(&self) -> RankedGuard<'_, HashMap<String, Sender<Value>>> {
         lock(&self.pending)
     }
 
-    fn cursor(&self) -> std::sync::MutexGuard<'_, Option<Value>> {
+    fn cursor(&self) -> RankedGuard<'_, Option<Value>> {
         lock(&self.cursor)
     }
 
@@ -518,5 +536,28 @@ impl RemoteSession {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod lock_order_tests {
+    use super::RemoteSidebarDoc;
+
+    /// The open-stream check reads the model in the same condition, so the
+    /// stream lock is the outer one: taking it under the model panics.
+    #[test]
+    fn the_stream_taken_under_the_model_panics() {
+        let doc = RemoteSidebarDoc::default();
+        drop((doc.stream(), doc.model()));
+        let model = doc.model();
+        let inverted =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(doc.stream())));
+        drop(model);
+        let payload = inverted.expect_err("the inversion is detected");
+        let message = payload.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            message.contains("acquiring SidebarStream while this thread holds SidebarModel"),
+            "{message}"
+        );
     }
 }

@@ -270,20 +270,13 @@ fn resize_replay_replaces_mirror_with_server_truth_without_duplication() {
     assert_eq!(server_oldest, "srv00");
     let replay = server.vt_replay_bytes().unwrap();
 
-    let surface = RemoteSurface {
-        id: 1,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(20, 6, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    };
+    let surface = RemoteSurface::mirror(
+        1,
+        SurfaceKind::Pty,
+        Terminal::new(20, 6, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    );
     {
         let mut mirror = surface.term.lock().unwrap();
         mirror.vt_write(b"mirror-only\r\nstate\r\n");

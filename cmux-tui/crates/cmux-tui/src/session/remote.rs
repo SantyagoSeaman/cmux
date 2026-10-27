@@ -43,6 +43,7 @@ use super::parse_identity_capabilities;
 use super::tree::parse_tree;
 use super::tree::{TreeCapabilities, TreeView, parse_tree_with_capabilities};
 use super::{AgentInfo, CLEAR_HISTORY_UNSUPPORTED_ERROR};
+use crate::lock_rank::{LockRank, RankedMutex};
 
 const SUPPORTED_PROTOCOL_VERSION: u64 = 12;
 const SURFACE_OVERFLOW_RETRY_DELAYS: [Duration; 3] =
@@ -456,17 +457,17 @@ type RemoteGeometryTestHook = Arc<dyn Fn(RemoteGeometryTestStep) + Send + Sync>;
 pub struct RemoteSurface {
     pub id: SurfaceId,
     pub kind: SurfaceKind,
-    pub term: Mutex<Terminal>,
-    mouse_encoders: Mutex<MouseEncoders>,
-    cursor_provenance: Mutex<CursorStyleProvenance>,
+    pub term: RankedMutex<Terminal>,
+    mouse_encoders: RankedMutex<MouseEncoders>,
+    cursor_provenance: RankedMutex<CursorStyleProvenance>,
     pub dirty: AtomicBool,
-    geometry_lifecycle: Mutex<()>,
-    cell_pixels: Mutex<(u16, u16)>,
+    geometry_lifecycle: RankedMutex<()>,
+    cell_pixels: RankedMutex<(u16, u16)>,
     #[cfg(test)]
-    geometry_test_hook: Mutex<Option<RemoteGeometryTestHook>>,
+    geometry_test_hook: RankedMutex<Option<RemoteGeometryTestHook>>,
     pub(super) content_generation: AtomicU64,
-    reported_size: Mutex<Option<(u16, u16)>>,
-    browser: Mutex<RemoteBrowserState>,
+    reported_size: RankedMutex<Option<(u16, u16)>>,
+    browser: RankedMutex<RemoteBrowserState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,6 +481,35 @@ struct RemoteTerminalColors {
 }
 
 impl RemoteSurface {
+    /// A fresh local mirror of a remote surface; the attach's vt-state
+    /// event fills its terminal.
+    fn mirror(
+        id: SurfaceId,
+        kind: SurfaceKind,
+        term: Terminal,
+        mouse_encoders: MouseEncoders,
+        cell_pixels: (u16, u16),
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            term: RankedMutex::new(LockRank::SurfaceTerm, term),
+            mouse_encoders: RankedMutex::new(LockRank::SurfaceMouseEncoders, mouse_encoders),
+            cursor_provenance: RankedMutex::new(
+                LockRank::SurfaceCursorProvenance,
+                CursorStyleProvenance::default(),
+            ),
+            dirty: AtomicBool::new(false),
+            geometry_lifecycle: RankedMutex::new(LockRank::SurfaceGeometryLifecycle, ()),
+            cell_pixels: RankedMutex::new(LockRank::SurfaceCellPixels, cell_pixels),
+            #[cfg(test)]
+            geometry_test_hook: RankedMutex::new(LockRank::Leaf, None),
+            content_generation: AtomicU64::new(1),
+            reported_size: RankedMutex::new(LockRank::SurfaceReportedSize, None),
+            browser: RankedMutex::new(LockRank::SurfaceBrowser, RemoteBrowserState::default()),
+        }
+    }
+
     #[cfg(test)]
     fn run_geometry_test_hook(&self, step: RemoteGeometryTestStep) {
         let hook = self.geometry_test_hook.lock().unwrap().clone();
@@ -1650,34 +1680,34 @@ pub struct RemoteSession {
     /// reader failure so closing our own transport does not report a fake
     /// remote diagnostic.
     disconnect_state: disconnect::DisconnectCell,
-    pending: Mutex<PendingRemoteRequests>,
+    pending: RankedMutex<PendingRemoteRequests>,
     next_id: AtomicU64,
     attach_progress: AtomicU64,
     shutdown: AtomicBool,
-    surfaces: Mutex<HashMap<SurfaceId, Arc<RemoteSurface>>>,
-    exited_surfaces: Mutex<ExitedSurfaceState>,
-    surface_leases: Mutex<HashMap<SurfaceId, String>>,
-    retired_surfaces: Mutex<HashSet<SurfaceId>>,
+    surfaces: RankedMutex<HashMap<SurfaceId, Arc<RemoteSurface>>>,
+    exited_surfaces: RankedMutex<ExitedSurfaceState>,
+    surface_leases: RankedMutex<HashMap<SurfaceId, String>>,
+    retired_surfaces: RankedMutex<HashSet<SurfaceId>>,
     #[cfg(test)]
-    retire_surface_test_marker: Mutex<Option<Sender<SurfaceId>>>,
-    tree: Mutex<RemoteTreeCache>,
-    browser_sources: Mutex<HashMap<SurfaceId, BrowserSource>>,
-    tree_refresh: Mutex<()>,
+    retire_surface_test_marker: RankedMutex<Option<Sender<SurfaceId>>>,
+    tree: RankedMutex<RemoteTreeCache>,
+    browser_sources: RankedMutex<HashMap<SurfaceId, BrowserSource>>,
+    tree_refresh: RankedMutex<()>,
     tree_stale: AtomicBool,
     subscription_started: AtomicBool,
     event_surface_filter: AtomicU64,
-    subscription_recovery: Mutex<SubscriptionRecoveryState>,
+    subscription_recovery: RankedMutex<SubscriptionRecoveryState>,
     subscribers: MuxEventBroadcaster,
-    primed_subscription: Mutex<Option<MuxEventReceiver>>,
+    primed_subscription: RankedMutex<Option<MuxEventReceiver>>,
     frame_dump_dir: Option<PathBuf>,
-    frame_logs: Mutex<RemoteFrameLogs>,
-    surface_overflow_recovery: Mutex<HashMap<SurfaceId, SurfaceOverflowRecovery>>,
+    frame_logs: RankedMutex<RemoteFrameLogs>,
+    surface_overflow_recovery: RankedMutex<HashMap<SurfaceId, SurfaceOverflowRecovery>>,
     surface_overflow_reconnect_required: AtomicBool,
-    cell_pixel_lifecycle: Mutex<()>,
-    cell_pixels: Mutex<(u16, u16)>,
-    capabilities: Mutex<HashSet<String>>,
+    cell_pixel_lifecycle: RankedMutex<()>,
+    cell_pixels: RankedMutex<(u16, u16)>,
+    capabilities: RankedMutex<HashSet<String>>,
     /// Latest `size-state` per terminal (shared-sizing-v1).
-    size_states: Mutex<HashMap<SurfaceId, super::SurfaceSizeState>>,
+    size_states: RankedMutex<HashMap<SurfaceId, super::SurfaceSizeState>>,
     provider_workspace_authority: Option<BearerToken>,
     provider_workspaces_guarded: AtomicBool,
     /// The daemon's sidebar document (`sidebar-doc-v1`), as a read model.
@@ -2497,32 +2527,41 @@ fn test_session_with_writer(
     Arc::new(RemoteSession {
         interactive_writer: InteractiveWriter::spawn(writer, Arc::new(NoopTransportAbort)).unwrap(),
         disconnect_state: disconnect::DisconnectCell::default(),
-        pending: Mutex::new(PendingRemoteRequests::default()),
+        pending: RankedMutex::new(LockRank::SessionPending, PendingRemoteRequests::default()),
         next_id: AtomicU64::new(1),
         attach_progress: AtomicU64::new(0),
         shutdown: AtomicBool::new(false),
-        surfaces: Mutex::new(HashMap::new()),
-        exited_surfaces: Mutex::new(ExitedSurfaceState::default()),
-        surface_leases: Mutex::new(HashMap::new()),
-        retired_surfaces: Mutex::new(HashSet::new()),
-        retire_surface_test_marker: Mutex::new(None),
-        tree: Mutex::new(RemoteTreeCache::default()),
-        browser_sources: Mutex::new(HashMap::new()),
-        tree_refresh: Mutex::new(()),
+        surfaces: RankedMutex::new(LockRank::SessionSurfaces, HashMap::new()),
+        exited_surfaces: RankedMutex::new(
+            LockRank::SessionExitedSurfaces,
+            ExitedSurfaceState::default(),
+        ),
+        surface_leases: RankedMutex::new(LockRank::SessionSurfaceLeases, HashMap::new()),
+        retired_surfaces: RankedMutex::new(LockRank::SessionRetiredSurfaces, HashSet::new()),
+        retire_surface_test_marker: RankedMutex::new(LockRank::Leaf, None),
+        tree: RankedMutex::new(LockRank::SessionTree, RemoteTreeCache::default()),
+        browser_sources: RankedMutex::new(LockRank::SessionBrowserSources, HashMap::new()),
+        tree_refresh: RankedMutex::new(LockRank::SessionTreeRefresh, ()),
         tree_stale: AtomicBool::new(true),
         subscription_started: AtomicBool::new(false),
         event_surface_filter: AtomicU64::new(0),
-        subscription_recovery: Mutex::new(SubscriptionRecoveryState::default()),
+        subscription_recovery: RankedMutex::new(
+            LockRank::SessionSubscriptionRecovery,
+            SubscriptionRecoveryState::default(),
+        ),
         subscribers: MuxEventBroadcaster::default(),
-        primed_subscription: Mutex::new(None),
+        primed_subscription: RankedMutex::new(LockRank::SessionPrimedSubscription, None),
         frame_dump_dir: None,
-        frame_logs: Mutex::new(RemoteFrameLogs::default()),
-        surface_overflow_recovery: Mutex::new(HashMap::new()),
+        frame_logs: RankedMutex::new(LockRank::SessionFrameLogs, RemoteFrameLogs::default()),
+        surface_overflow_recovery: RankedMutex::new(
+            LockRank::SessionSurfaceOverflowRecovery,
+            HashMap::new(),
+        ),
         surface_overflow_reconnect_required: AtomicBool::new(false),
-        cell_pixel_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        capabilities: Mutex::new(capabilities),
-        size_states: Mutex::new(HashMap::new()),
+        cell_pixel_lifecycle: RankedMutex::new(LockRank::SessionCellPixelLifecycle, ()),
+        cell_pixels: RankedMutex::new(LockRank::SessionCellPixels, (8, 16)),
+        capabilities: RankedMutex::new(LockRank::SessionCapabilities, capabilities),
+        size_states: RankedMutex::new(LockRank::SessionSizeStates, HashMap::new()),
         provider_workspace_authority,
         provider_workspaces_guarded: AtomicBool::new(false),
         sidebar_doc: sidebar_doc::RemoteSidebarDoc::default(),
@@ -2808,20 +2847,13 @@ pub(super) fn test_unleased_view_surface(
     surface_id: SurfaceId,
 ) -> (Arc<RemoteSession>, Arc<RemoteSurface>) {
     let session = test_session_with_view_attachment_leases();
-    let surface = Arc::new(RemoteSurface {
-        id: surface_id,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(80, 24, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        surface_id,
+        SurfaceKind::Pty,
+        Terminal::new(80, 24, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
     session.surfaces.lock().unwrap().insert(surface_id, surface.clone());
     (session, surface)
 }
@@ -2851,29 +2883,28 @@ pub(super) fn test_session_with_browser_pointer_range(
         seq: frame_seq,
     };
     let surface = Arc::new(RemoteSurface {
-        id: surface_id,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(10, 5, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState {
-            url: Some("https://example.test".to_string()),
-            title: Some("example".to_string()),
-            status: BrowserStatus::Live,
-            live_since: Some(Instant::now()),
-            last_frame_at: Some(Instant::now()),
-            frame: Some(RemoteBrowserFrame { frame: Arc::new(frame) }),
-            pointer_frame_floor_seq: Some(pointer_frame_floor_seq),
-            pointer_frame_seq: Some(frame_seq),
-            presented_pointer_frame_seq: Some(pointer_frame_floor_seq),
-            ..RemoteBrowserState::default()
-        }),
+        browser: RankedMutex::new(
+            LockRank::SurfaceBrowser,
+            RemoteBrowserState {
+                url: Some("https://example.test".to_string()),
+                title: Some("example".to_string()),
+                status: BrowserStatus::Live,
+                live_since: Some(Instant::now()),
+                last_frame_at: Some(Instant::now()),
+                frame: Some(RemoteBrowserFrame { frame: Arc::new(frame) }),
+                pointer_frame_floor_seq: Some(pointer_frame_floor_seq),
+                pointer_frame_seq: Some(frame_seq),
+                presented_pointer_frame_seq: Some(pointer_frame_floor_seq),
+                ..RemoteBrowserState::default()
+            },
+        ),
+        ..RemoteSurface::mirror(
+            surface_id,
+            SurfaceKind::Browser,
+            Terminal::new(10, 5, 100, Callbacks::default()).unwrap(),
+            MouseEncoders::new().unwrap(),
+            (8, 16),
+        )
     });
     session.surfaces.lock().unwrap().insert(surface_id, surface);
     session

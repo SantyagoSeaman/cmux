@@ -184,20 +184,13 @@ fn agent_refresh_retains_updates_when_topology_temporarily_omits_surface() {
 
 #[test]
 fn browser_state_without_frame_keeps_cached_frame() {
-    let surface = RemoteSurface {
-        id: 1,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(10, 5, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    };
+    let surface = RemoteSurface::mirror(
+        1,
+        SurfaceKind::Browser,
+        Terminal::new(10, 5, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    );
 
     surface.update_browser_frame(&json!({
         "seq": 9,

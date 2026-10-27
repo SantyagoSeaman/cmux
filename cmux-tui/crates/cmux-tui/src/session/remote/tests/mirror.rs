@@ -292,20 +292,13 @@ fn legacy_cursor_absence_preserves_raw_decscusr_and_mode_12() {
 fn initial_attach_resolves_sparse_source_palette_before_rendering() {
     let (client, _server) = UnixStream::pair().unwrap();
     let session = socket_test_session(client);
-    let surface = Arc::new(RemoteSurface {
-        id: 7,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(12, 4, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        7,
+        SurfaceKind::Pty,
+        Terminal::new(12, 4, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
     session.surfaces.lock().unwrap().insert(7, surface.clone());
 
     session.handle_line(json!({
@@ -341,20 +334,13 @@ fn initial_attach_resolves_sparse_source_palette_before_rendering() {
 fn colors_changed_replaces_complete_sparse_palette_state() {
     let (client, _server) = UnixStream::pair().unwrap();
     let session = socket_test_session(client);
-    let surface = Arc::new(RemoteSurface {
-        id: 7,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(12, 4, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        7,
+        SurfaceKind::Pty,
+        Terminal::new(12, 4, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
     {
         let mut terminal = surface.term.lock().unwrap();
         terminal.replace_default_colors(
@@ -385,20 +371,13 @@ fn colors_changed_replaces_complete_sparse_palette_state() {
 fn reused_render_state_observes_complete_special_color_reset() {
     let (client, _server) = UnixStream::pair().unwrap();
     let session = socket_test_session(client);
-    let surface = Arc::new(RemoteSurface {
-        id: 7,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(12, 4, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        7,
+        SurfaceKind::Pty,
+        Terminal::new(12, 4, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
     session.surfaces.lock().unwrap().insert(7, surface.clone());
 
     session.handle_line(json!({

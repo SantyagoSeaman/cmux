@@ -20,10 +20,10 @@ fn two_views_of_one_terminal_keep_independent_scroll_offsets() {
     assert!(first_scrollbar.scrolled_back());
     assert!(!second_scrollbar.scrolled_back());
     assert_ne!(first_scrollbar.offset, second_scrollbar.offset);
-    assert_eq!(
-        first.term.lock().unwrap().selection_text_absolute((0, 0), (8, 0)).unwrap(),
-        second.term.lock().unwrap().selection_text_absolute((0, 0), (8, 0)).unwrap()
-    );
+    // One terminal at a time: two mirrors' terminals have no lock order.
+    let first_text = first.term.lock().unwrap().selection_text_absolute((0, 0), (8, 0)).unwrap();
+    let second_text = second.term.lock().unwrap().selection_text_absolute((0, 0), (8, 0)).unwrap();
+    assert_eq!(first_text, second_text);
 }
 
 #[test]
@@ -193,20 +193,13 @@ fn resized_event_preserves_the_automatic_kitty_image_id_cursor() {
 fn resized_event_decodes_protocol_replay_field() {
     let (client, _server) = UnixStream::pair().unwrap();
     let session = socket_test_session(client);
-    let surface = Arc::new(RemoteSurface {
-        id: 7,
-        kind: SurfaceKind::Pty,
-        term: Mutex::new(Terminal::new(12, 4, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(None),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        7,
+        SurfaceKind::Pty,
+        Terminal::new(12, 4, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
     session.surfaces.lock().unwrap().insert(7, surface.clone());
 
     let mut authoritative = Terminal::new(12, 4, 100, Callbacks::default()).unwrap();
@@ -316,20 +309,14 @@ fn surface_resized_event_is_forwarded_without_changing_reported_size() {
     let (client, _server) = UnixStream::pair().unwrap();
     let session = socket_test_session(client);
     let events = session.subscribe();
-    let surface = Arc::new(RemoteSurface {
-        id: 7,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(12, 4, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(Some((12, 4))),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        7,
+        SurfaceKind::Browser,
+        Terminal::new(12, 4, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
+    surface.set_reported_size((12, 4));
     session.surfaces.lock().unwrap().insert(7, surface.clone());
 
     session.handle_line(json!({
@@ -352,20 +339,14 @@ fn surface_resize_failure_releases_remote_browser_report() {
     let (client, _server) = UnixStream::pair().unwrap();
     let session = socket_test_session(client);
     let events = session.subscribe();
-    let surface = Arc::new(RemoteSurface {
-        id: 7,
-        kind: SurfaceKind::Browser,
-        term: Mutex::new(Terminal::new(12, 4, 100, Callbacks::default()).unwrap()),
-        mouse_encoders: Mutex::new(MouseEncoders::new().unwrap()),
-        cursor_provenance: Mutex::new(CursorStyleProvenance::default()),
-        dirty: AtomicBool::new(false),
-        geometry_lifecycle: Mutex::new(()),
-        cell_pixels: Mutex::new((8, 16)),
-        geometry_test_hook: Mutex::new(None),
-        content_generation: AtomicU64::new(1),
-        reported_size: Mutex::new(Some((90, 31))),
-        browser: Mutex::new(RemoteBrowserState::default()),
-    });
+    let surface = Arc::new(RemoteSurface::mirror(
+        7,
+        SurfaceKind::Browser,
+        Terminal::new(12, 4, 100, Callbacks::default()).unwrap(),
+        MouseEncoders::new().unwrap(),
+        (8, 16),
+    ));
+    surface.set_reported_size((90, 31));
     session.surfaces.lock().unwrap().insert(7, surface.clone());
 
     session.handle_line(json!({
