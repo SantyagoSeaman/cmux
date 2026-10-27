@@ -41,8 +41,10 @@
 //! barrier first (`admitted_overlay`): while the writer has not answered an
 //! admitted intent, SQLite does not show it yet, so the read waits for the
 //! writer (counted, `read_barrier_waits`) before it takes the lock the
-//! writer commits under. Hot topology reads take the overlay instead and
-//! never reach the connection.
+//! writer commits under. [`RegistryConnection::get_checked`] waits once, up
+//! to a bound, then refuses (`AdmittedJournalBehind`); a plain `get` or
+//! `pin` waits for the writer's answers as it waits for the lock. Hot
+//! topology reads take the overlay instead and never reach the connection.
 
 use std::cell::Cell;
 use std::panic::Location;
@@ -174,8 +176,7 @@ pub(crate) struct RegistryConnection {
     pub(super) unsettled: std::sync::Mutex<Vec<super::registry_intent::UnsettledReceipt>>,
     /// Admitted intents the writer has not committed yet
     /// (`admitted_overlay`). Taken only by threads that hold the workspace
-    /// registry, so it is never contended, never by the writer, and never
-    /// while this thread holds the connection lock.
+    /// registry, so it is never contended, and never by the writer.
     admitted: cmux_threads::sync::Mutex<super::admitted_overlay::AdmittedOverlay>,
     /// Entries in `admitted`, so a first acquisition with none skips its lock.
     admitted_pending: std::sync::atomic::AtomicUsize,
@@ -315,13 +316,74 @@ impl RegistryConnection {
     /// [`Self::get`] for a site captured before a closure (closures are not
     /// `#[track_caller]`): `let site = Location::caller();` in the
     /// `#[track_caller]` method, then `get_at(site)` inside the closure.
+    ///
+    /// A first acquisition waits until the writer answered every admitted
+    /// intent (`admitted_overlay`), so it never reads SQLite without them.
+    /// Under a hold taken ahead of SQLite a read cannot wait (the writer
+    /// needs the lock): it reads through the overlay or
+    /// [`Self::get_checked`], never here.
     #[track_caller]
     pub(crate) fn get_at(&self, site: &'static Location<'static>) -> RegistryConnectionGuard<'_> {
         self.debug_assert_lock_order();
         let reentry = self.connection.is_owned_by_current_thread();
-        if !reentry {
-            self.read_barrier(site);
+        if !reentry && self.admitted_pending() {
+            self.admitted_overlay().wait_answered(site);
+        } else if reentry && self.held_ahead() {
+            let unanswered = self.admitted_overlay().pending();
+            debug_assert_eq!(
+                unanswered, 0,
+                "a plain registry read at {site} under a hold taken ahead of admitted \
+                 intents; read through the admitted overlay or get_checked"
+            );
         }
+        self.acquire_at(site, reentry)
+    }
+
+    /// [`Self::get`] for a read or write that can fail: while the writer
+    /// has not answered an admitted intent, it waits once up to the barrier
+    /// bound and then refuses (`AdmittedJournalBehind`), never handing out
+    /// a connection that misses an admitted intent. Under a pin taken ahead
+    /// of SQLite it refuses at once.
+    #[track_caller]
+    pub(crate) fn get_checked(
+        &self,
+    ) -> Result<RegistryConnectionGuard<'_>, super::admitted_overlay::AdmittedJournalBehind> {
+        self.get_checked_at(Location::caller())
+    }
+
+    /// [`Self::get_checked`] at `site`.
+    #[track_caller]
+    pub(crate) fn get_checked_at(
+        &self,
+        site: &'static Location<'static>,
+    ) -> Result<RegistryConnectionGuard<'_>, super::admitted_overlay::AdmittedJournalBehind> {
+        self.debug_assert_lock_order();
+        let reentry = self.connection.is_owned_by_current_thread();
+        if !reentry && self.admitted_pending() {
+            self.admitted_overlay().barrier(site)?;
+        } else if reentry && self.held_ahead() {
+            self.admitted_overlay().refuse_ahead()?;
+        }
+        Ok(self.acquire_at(site, reentry))
+    }
+
+    /// [`Self::get`] past the read barrier, for a read no admitted intent
+    /// can change (`WorkspaceRegistry::committed_mutation_row`).
+    #[track_caller]
+    pub(super) fn get_unbarriered_at(
+        &self,
+        site: &'static Location<'static>,
+    ) -> RegistryConnectionGuard<'_> {
+        self.debug_assert_lock_order();
+        self.acquire_at(site, self.connection.is_owned_by_current_thread())
+    }
+
+    #[track_caller]
+    fn acquire_at(
+        &self,
+        site: &'static Location<'static>,
+        reentry: bool,
+    ) -> RegistryConnectionGuard<'_> {
         let wait = self.acquire_rank();
         let timed = RequestPathHold::note_acquire(reentry, site);
         let guard = if reentry {
@@ -342,13 +404,20 @@ impl RegistryConnection {
     /// Hold the connection lock for a request flow before it takes the
     /// state lock (lock order: registry -> connection -> state), so the flow
     /// never holds state while it waits behind a writer commit.
+    ///
+    /// The pin waits for the writer only when an admitted intent is not on
+    /// the overlay (cold). When every one is, it is taken ahead of SQLite
+    /// without waiting: the flow under it reads topology and admitted
+    /// mutations from the overlay, and a read or write that needs SQLite to
+    /// hold them refuses ([`Self::get_checked`]) instead of waiting under
+    /// the lock the writer commits under.
     #[track_caller]
     pub(crate) fn pin(&self) -> RegistryConnectionPin {
         self.debug_assert_lock_order();
         let site = Location::caller();
         let reentry = self.connection.is_owned_by_current_thread();
-        if !reentry {
-            self.read_barrier(site);
+        if !reentry && self.admitted_pending() {
+            self.admitted_overlay().wait_unless_hot(site);
         }
         let wait = self.acquire_rank();
         let timed = RequestPathHold::note_acquire(reentry, site);
@@ -375,13 +444,18 @@ impl RegistryConnection {
         }
     }
 
-    /// Wait until the writer answered every admitted intent, before a first
-    /// acquisition at `site` (see the module docs).
-    fn read_barrier(&self, site: &'static Location<'static>) {
-        if self.admitted_pending.load(std::sync::atomic::Ordering::Acquire) == 0 {
-            return;
-        }
-        self.admitted_overlay().barrier(site);
+    /// True while the overlay holds an entry: the lock-free check before a
+    /// first acquisition's barrier.
+    fn admitted_pending(&self) -> bool {
+        self.admitted_pending.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+
+    /// True when this thread holds the lock while an admitted intent may be
+    /// unanswered: the writer cannot commit it until the hold ends, so
+    /// SQLite may miss it (a pin taken ahead of SQLite, or an intent
+    /// admitted under the hold).
+    fn held_ahead(&self) -> bool {
+        self.admitted_pending() && self.connection.is_owned_by_current_thread()
     }
 
     /// Admit an intent to the overlay (`WorkspaceRegistry::admit_registry_intent`).
@@ -397,13 +471,30 @@ impl RegistryConnection {
     /// The newest admitted resource topology for a hot read; `None` when the
     /// read goes to SQLite (behind the barrier if an intent is cold).
     pub(super) fn admitted_topology(&self) -> Option<Arc<super::ResourceTopologySnapshot>> {
-        if self.admitted_pending.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        if !self.admitted_pending() {
             return None;
         }
         self.admitted_overlay().serve()
     }
 
-    /// `(hot reads served, read barrier waits, read barrier timeouts)` of
+    /// A full resource topology read from SQLite at `revision`
+    /// (`AdmittedOverlay::note_stored`).
+    pub(super) fn note_stored_topology(&self, revision: u64) {
+        self.admitted_overlay().note_stored(revision);
+    }
+
+    /// Whether an admitted, unanswered intent carries `mutation`.
+    pub(super) fn mutation_admission(
+        &self,
+        mutation: &(String, String),
+    ) -> super::admitted_overlay::MutationAdmission {
+        if !self.admitted_pending() {
+            return super::admitted_overlay::MutationAdmission::NotAdmitted;
+        }
+        self.admitted_overlay().admission(mutation)
+    }
+
+    /// `(hot reads served, read barrier waits, read barrier refusals)` of
     /// the admitted overlay.
     #[cfg_attr(
         not(test),

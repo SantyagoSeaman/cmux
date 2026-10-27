@@ -1430,19 +1430,6 @@ impl WorkspaceRegistry {
         ))
     }
 
-    #[track_caller]
-    pub fn resource_topology_snapshot(&self) -> anyhow::Result<ResourceTopologySnapshot> {
-        // Admitted, uncommitted topology first (`admitted_overlay`).
-        if let Some(admitted) = self.connection.admitted_topology() {
-            return Ok(ResourceTopologySnapshot::clone(&admitted));
-        }
-        load_resource_topology(
-            &self.connection.get(),
-            self.session_id.clone(),
-            self.generation.clone(),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub fn commit_resource_patch(

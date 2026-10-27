@@ -20,12 +20,28 @@ impl WorkspaceRegistry {
         if let Some(admitted) = self.connection.admitted_topology() {
             return Ok(admitted_overlay::scoped(&admitted, workspaces));
         }
+        let db = self.connection.get_checked()?;
         load_resource_topology_scoped(
-            &self.connection.get(),
+            &db,
             self.session_id.clone(),
             self.generation.clone(),
             workspaces,
         )
+    }
+
+    /// The whole resource topology: the newest admitted, uncommitted one
+    /// (`admitted_overlay`), else SQLite once it holds every admitted intent.
+    #[track_caller]
+    pub fn resource_topology_snapshot(&self) -> anyhow::Result<ResourceTopologySnapshot> {
+        if let Some(admitted) = self.connection.admitted_topology() {
+            return Ok(ResourceTopologySnapshot::clone(&admitted));
+        }
+        let db = self.connection.get_checked()?;
+        let topology =
+            load_resource_topology(&db, self.session_id.clone(), self.generation.clone())?;
+        drop(db);
+        self.connection.note_stored_topology(topology.revision);
+        Ok(topology)
     }
 
     /// One terminal's durable record unless it is tombstoned, as

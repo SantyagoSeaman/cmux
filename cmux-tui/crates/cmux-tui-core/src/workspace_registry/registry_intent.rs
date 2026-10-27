@@ -333,7 +333,8 @@ impl WorkspaceRegistry {
         &self,
         intent: &RegistryIntent,
     ) -> anyhow::Result<RegistryReceipt> {
-        let db = self.connection.get();
+        // After every admitted intent, or refused (`admitted_overlay`).
+        let db = self.connection.get_checked()?;
         let tx = db.unchecked_transaction()?;
         let receipt = intent.apply(&tx)?;
         tx.commit()?;

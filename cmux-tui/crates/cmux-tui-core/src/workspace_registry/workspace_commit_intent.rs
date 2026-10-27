@@ -30,6 +30,9 @@ pub(crate) struct WorkspaceCommitIntent {
     project_resource: bool,
     /// The resource topology before this commit (with `project_resource`).
     previous_topology: Option<ResourceTopologySnapshot>,
+    /// At prepare, the mutation was committed or admitted already: the
+    /// commit replays it and changes nothing (with `project_resource`).
+    replays: bool,
     session_id: SessionPublicId,
     /// Rows written after the ledger, before the resource batch.
     extra: Option<ExtraRows>,
@@ -76,6 +79,9 @@ impl WorkspaceRegistry {
         self.connection.drain_unsettled()?;
         validate_identifier("mutation id", &mutation.id)?;
         validate_identifier("mutation origin", &mutation.origin)?;
+        // A retry of a committed or admitted mutation replays: the overlay
+        // must not derive a topology from it.
+        let replays = project_resource && self.mutation_replays(mutation)?;
         Ok(WorkspaceCommitIntent {
             mutation: mutation.clone(),
             fingerprint: canonical_json(fingerprint)?,
@@ -92,6 +98,7 @@ impl WorkspaceRegistry {
             previous_topology: project_resource
                 .then(|| self.resource_topology_snapshot())
                 .transpose()?,
+            replays,
             session_id: self.session_id.clone(),
             extra: None,
         })
@@ -134,7 +141,8 @@ impl WorkspaceRegistry {
                 .into_workspace()?
                 .commit);
         };
-        let db = self.connection.get();
+        // A local write commits after every admitted intent, or not at all.
+        let db = self.connection.get_checked()?;
         let tx = db.unchecked_transaction()?;
         let receipt = intent.apply(&tx, Some(extra))?;
         tx.commit()?;
@@ -155,6 +163,9 @@ impl WorkspaceCommitIntent {
         let Some(previous) = self.previous_topology.as_ref() else {
             return (mutation, None, AdmittedTopology::Unchanged);
         };
+        if self.replays {
+            return (mutation, Some(previous.revision), AdmittedTopology::Unchanged);
+        }
         let topology = admitted_overlay::topology_after_workspace_commit(
             previous,
             &self.workspaces,

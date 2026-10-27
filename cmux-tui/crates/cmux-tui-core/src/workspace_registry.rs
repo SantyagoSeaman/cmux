@@ -3281,19 +3281,11 @@ impl WorkspaceRegistry {
         validate_identifier("mutation id", &mutation.id)?;
         validate_identifier("mutation origin", &mutation.origin)?;
         let fingerprint = canonical_json(fingerprint)?;
-        let stored = self
-            .connection
-            .get()
-            .query_row(
-                "SELECT fingerprint, result_json, committed_revision
-                 FROM mutations WHERE origin = ?1 AND mutation_id = ?2",
-                params![mutation.origin, mutation.id],
-                |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
-                },
-            )
-            .optional()?;
-        let Some((stored_fingerprint, stored_result, revision)) = stored else {
+        // Past the admitted overlay's read barrier unless an admitted intent
+        // carries the mutation (`admitted_overlay`).
+        let Some((stored_fingerprint, stored_result, revision)) =
+            self.committed_mutation_row(mutation)?
+        else {
             return Ok(None);
         };
         if stored_fingerprint != fingerprint {
