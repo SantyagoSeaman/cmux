@@ -166,6 +166,13 @@ TARGETED_OPS = frozenset({"action.run", "key", "tui.key"})
 CHECKPOINTS = frozenset({"before", "turn", "settled"})
 CRASH_KINDS = frozenset({"renderer", "gpu", "browser", "utility", "daemon", "holder"})
 PLATFORMS = ("linux", "mac", "windows")
+# driver_daemon.py and the Python SDK it drives (cmux-tui/bindings/python/cmux/transport.py) speak only AF_UNIX and
+# POSIX process control (SIGKILL, setsid, geteuid), so a daemon run on a Windows lane cannot start yet.
+WINDOWS_DAEMON_UNSUPPORTED = (
+    "run --product daemon cannot run on windows yet: driver_daemon.py and the Python SDK transport speak only "
+    "AF_UNIX and POSIX signals (follow-up to p15-oracle-235: a named-pipe transport and a Windows process "
+    "driver); diff --platform-parity takes the Windows run once a driver can make it"
+)
 BUILDS = ("debug", "bench", "asan", "tsan")
 ARMS = ("old", "new")
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -1492,33 +1499,14 @@ class PlatformLine:
                 "results": sorted(self.entry.results), "reason": self.reason}
 
 
-def trailing_comment(raw: str) -> Optional[str]:
-    """The `# text` after an expectations line (expectations.py drops it while parsing)."""
-    tokens = raw.split()
-    for index, token in enumerate(tokens[1:], start=1):
-        if token.startswith("#"):
-            return " ".join(tokens[index:]).lstrip("#").strip() or None
-    return None
-
-
 def platform_lines(entries: Iterable[Any], platforms: Iterable[str]) -> List[PlatformLine]:
-    """Every line tagged with one of `platforms`, with its trailing reason read from its file."""
+    """Every line tagged with one of `platforms`, with the trailing `# reason` expectations.py kept."""
     wanted = set(platforms)
-    texts: Dict[str, List[str]] = {}
     lines = []
     for entry in entries:
         tagged = sorted(wanted & set(entry.tags))
-        if not tagged:
-            continue
-        if entry.file not in texts:
-            path = Path(entry.file) if Path(entry.file).is_absolute() else REPO / entry.file
-            try:
-                texts[entry.file] = path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                texts[entry.file] = []
-        text = texts[entry.file]
-        raw = text[entry.lineno - 1] if 0 < entry.lineno <= len(text) else ""
-        lines.append(PlatformLine(entry, tagged[0], trailing_comment(raw)))
+        if tagged:
+            lines.append(PlatformLine(entry, tagged[0], entry.comment))
     return lines
 
 
@@ -1894,6 +1882,8 @@ def run_one(options: RunOptions, *, open_session: Optional[SessionOpener] = None
         "normalize": "present" if (HERE / "normalize.py").is_file() else "absent (p15-oracle-013): drivers send canonical snapshots",
     }
     if open_session is None and not options.dry_run:
+        if options.product == "daemon" and "windows" in (options.platform, current_platform()):
+            raise UsageError(WINDOWS_DAEMON_UNSUPPORTED)
         driver = load_sibling(f"driver_{options.product}")
         # driver_daemon.py has the facet capture (021) before its case runner (023).
         open_session = getattr(driver, "open_session", None)

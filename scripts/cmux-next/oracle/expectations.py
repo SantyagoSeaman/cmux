@@ -73,6 +73,8 @@ TASK_ID_RE = re.compile(r"^p\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}$")
 ISSUE_RE = re.compile(r"^#\d+$")
 # `#1234 [ tags ] suite/case... [` : an issue line has a target and its results bracket; other `#` lines are comments.
 ISSUE_LINE_RE = re.compile(r"^\s*#\d+\s+(?:\[[^\[\]]*\]\s*)?[A-Za-z0-9][A-Za-z0-9._-]*/\S*\s*\[")
+# A line's tokens: a bracket, or a run of other non-space characters (so `[Failure]#why` is `[ Failure ] #why`).
+TOKEN_RE = re.compile(r"[\[\]]|[^\s\[\]]+")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # Scope ranks, least to most specific.
@@ -123,6 +125,8 @@ class Entry:
     step: str | None
     pointer: str | None
     results: frozenset[str]
+    # The `# text` after the results bracket, as written; not part of the line's identity.
+    comment: str | None = dataclasses.field(default=None, compare=False)
 
     @property
     def scope(self) -> int:
@@ -233,13 +237,16 @@ def _parse_line(raw: str, file: str, lineno: int, kind: str) -> tuple[Entry | No
     def error(code: str, message: str) -> tuple[None, Diagnostic]:
         return None, Diagnostic(file, lineno, code, message)
 
-    tokens = raw.replace("[", " [ ").replace("]", " ] ").split()
+    matches = list(TOKEN_RE.finditer(raw))
+    tokens = [match.group() for match in matches]
     if not tokens:
         return None, None
     if tokens[0].startswith("#") and not ISSUE_LINE_RE.match(raw):
         return None, None  # comment line
+    comment: str | None = None
     for index, token in enumerate(tokens[1:], start=1):
         if token.startswith("#"):
+            comment = raw[matches[index].start() :].lstrip("#").strip() or None
             tokens = tokens[:index]  # trailing comment
             break
 
@@ -313,6 +320,7 @@ def _parse_line(raw: str, file: str, lineno: int, kind: str) -> tuple[Entry | No
         step=step,
         pointer=pointer,
         results=frozenset(results),
+        comment=comment,
     )
     if len(entry.results) != len(results):
         return error("duplicate-result", f"{test}: a result appears twice")
@@ -801,8 +809,20 @@ def _selftest() -> int:
         and e.bug == "p15-oracle-015"
         and e.tags == {"linux", "daemon"}
         and (e.suite, e.case, e.step, e.pointer) == ("journeys", "split", "s2", "/panes/0/frame")
-        and e.results == {FAILURE},
+        and e.results == {FAILURE}
+        and e.comment == "wrong frame",
     )
+    # 1b. The comment survives tight brackets and keeps its own text; `#` alone is no comment.
+    comments = [
+        entry.comment
+        for entry in parse(
+            "p15-oracle-015 [windows] daemon-ops/c#/v [Failure]#cwd [differs]\n"
+            "p15-oracle-015 [ windows ] daemon-ops/c#/v [ Failure ]# cwd differs\n"
+            "#12 [ windows ] daemon-ops/c [ Skip ] #\n"
+            "#12 daemon-ops/d [ Skip ]"
+        )[0]
+    ]
+    check("trailing comment", comments == ["cwd [differs]", "cwd differs", None, None])
     # 2. Issue bug ids are not comments; other # lines are.
     entries, diags = parse("#1234 terminal/vt-01 [ Timeout ]\n# a comment [ Failure ]\n#tags: x")
     check("issue id and comments", len(entries) == 1 and entries[0].bug == "#1234" and not diags)

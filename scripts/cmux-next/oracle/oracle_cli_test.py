@@ -885,11 +885,27 @@ class PlatformParityTests(unittest.TestCase):
         self.assertTrue(cmp["refused"].startswith("nothing compared"), cmp["refused"])
         self.assertEqual(len(cmp["not_comparable"]), 5)
 
-    def test_trailing_comment(self):
-        self.assertEqual(oracle.trailing_comment("p15-oracle-235 [ windows ] s/c#/a [ Failure ]  # why"), "why")
-        self.assertIsNone(oracle.trailing_comment("p15-oracle-235 [ windows ] s/c#/a [ Failure ]"))
-        self.assertIsNone(oracle.trailing_comment("#12 [ windows ] s/c [ Skip ] #"))
-        self.assertEqual(oracle.trailing_comment("#12 [ windows ] s/c [ Skip ] # lane"), "lane")
+    def test_a_reason_after_a_tight_bracket_is_a_reason(self):
+        """oracle.py reads the reason expectations.py parsed, so `]# why` and `[Failure]#why` hold too."""
+        self.lines("p15-oracle-235 [windows] daemon-ops/case-001#/value [Failure]#cwd is C:\\o on the lane\n"
+                   "p15-oracle-235 [ windows ] daemon-ops/case-002 [ Skip ]# no ConPTY in the lane session\n")
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="AMD64")
+        code, cmp = self.parity()
+        self.assertEqual(code, 0, cmp)
+        self.assertEqual([line["reason"] for line in cmp["platform_parity"]["lines"]],
+                         ["cwd is C:\\o on the lane", "no ConPTY in the lane session"])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            oracle.main(["check", "--corpus", str(self.tmp / "corpus"), "--expectations-root", str(self.tmp / "expectations")])
+        self.assertNotIn("needs a reason", out.getvalue())
+
+    def test_a_daemon_run_on_windows_is_refused_until_a_driver_can_make_it(self):
+        with self.assertRaises(oracle.UsageError) as raised:
+            oracle.run_one(options(self.tmp, platform="windows"))
+        self.assertIn("p15-oracle-235", str(raised.exception))
+        receipt, _ = oracle.run_one(options(self.tmp, platform="windows"), open_session=FakeDriver().open_session)
+        self.assertEqual(receipt["platform"], "windows")
 
 
 class CheckTests(unittest.TestCase):
