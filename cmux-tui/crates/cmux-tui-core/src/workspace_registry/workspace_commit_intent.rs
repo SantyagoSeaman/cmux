@@ -5,10 +5,13 @@
 //! The request thread validates the input, renders canonical JSON and reads
 //! the previous resource topology while it holds the registry (topology
 //! writers stay serialized until the receipt, so that read cannot go stale).
-//! The replay check, the revision CAS and every write run inside the commit
-//! transaction: the writer's SAVEPOINT, or a request-side transaction when
-//! the writer does not run or the caller still holds the connection.
+//! The replay check and the revision CAS run when the request admits the
+//! intent, in memory (`mutation_ledger_cache`); every write runs inside the
+//! commit transaction at the admitted revision: the writer's SAVEPOINT, or a
+//! request-side transaction when the writer does not run or the caller still
+//! holds the connection.
 
+use super::registry_intent::LedgerIntent;
 use super::*;
 
 /// One prepared workspace registry commit.
@@ -33,6 +36,9 @@ pub(crate) struct WorkspaceCommitIntent {
     session_id: SessionPublicId,
     /// Rows written after the ledger, before the resource batch.
     extra: Option<ExtraRows>,
+    /// The revision the ledger cache admitted this commit at
+    /// (`mutation_ledger_cache`); `None` commits at the stored next one.
+    admitted_revision: Option<u64>,
 }
 
 /// [`OwnedTransactionWrite`] with a `Debug` for the intent.
@@ -92,6 +98,7 @@ impl WorkspaceRegistry {
                 .transpose()?,
             session_id: self.session_id.clone(),
             extra: None,
+            admitted_revision: None,
         })
     }
 
@@ -132,13 +139,72 @@ impl WorkspaceRegistry {
                 .into_workspace()?
                 .commit);
         };
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let receipt = intent.apply(&tx, Some(extra))?;
-        tx.commit()?;
-        drop(db);
+        let mut intent = intent;
+        self.ledger_cache.reconcile_indeterminate();
+        if let Some(replayed) = self.admit_ledger_intent(&mut intent)? {
+            return Ok(replayed.into_workspace()?.commit);
+        }
+        let ticket = intent.ledger_request().ticket();
+        let committed = (|| {
+            let db = self.connection.get();
+            let tx = db.unchecked_transaction()?;
+            let receipt = intent.apply(&tx, Some(extra))?;
+            tx.commit()?;
+            anyhow::Ok(receipt)
+        })();
+        let outcome = match &committed {
+            Ok(receipt) if !receipt.commit.replayed => {
+                mutation_ledger::LedgerOutcome::Committed(receipt.commit.revision)
+            }
+            _ => mutation_ledger::LedgerOutcome::Unapplied,
+        };
+        self.ledger_cache.settle(&ticket, outcome);
+        let receipt = committed?;
         self.connection.write_path_stats().request_effect_committed();
         Ok(receipt.commit)
+    }
+}
+
+impl LedgerIntent for WorkspaceCommitIntent {
+    fn ledger_request(&self) -> mutation_ledger::LedgerRequest<'_> {
+        mutation_ledger::LedgerRequest {
+            ledger: mutation_ledger::KeyedLedger::Workspace,
+            mutation: &self.mutation,
+            fingerprint: &self.fingerprint,
+            result_json: &self.result_json,
+            expected_revision: self.expected_revision,
+        }
+    }
+
+    fn check_generation(&self) -> anyhow::Result<()> {
+        if let Some(expected) = self.expected_generation.as_deref()
+            && expected != self.generation
+        {
+            anyhow::bail!(
+                "workspace generation conflict: expected {expected}, current {}",
+                self.generation
+            );
+        }
+        Ok(())
+    }
+
+    fn admit_at(&mut self, revision: u64) {
+        self.admitted_revision = Some(revision);
+    }
+
+    fn admitted_revision(&self) -> Option<u64> {
+        self.admitted_revision
+    }
+
+    fn replayed(&self, revision: u64, result_json: &str) -> anyhow::Result<RegistryReceipt> {
+        Ok(RegistryReceipt::Workspace(WorkspaceCommitReceipt {
+            commit: RegistryCommit {
+                revision,
+                result: serde_json::from_str(result_json)?,
+                replayed: true,
+            },
+            resource_revision: None,
+        }))
     }
 }
 
@@ -185,7 +251,11 @@ impl WorkspaceCommitIntent {
         let result_json: &str = &self.result_json;
         let project_resource = self.project_resource;
         let previous_topology = &self.previous_topology;
+        // An admitted intent's `meta` writes are the revision the cache gave it.
+        let _admitted =
+            self.admitted_revision.map(|_| mutation_ledger::AdmittedWriteScope::enter());
 
+        // A key older than the ledger cache replays here.
         if let Some((stored_fingerprint, stored_result, revision)) = tx
             .query_row(
                 "SELECT fingerprint, result_json, committed_revision
@@ -231,11 +301,15 @@ impl WorkspaceCommitIntent {
                 "active workspace is absent from the desired registry: {active_workspace}"
             );
         }
-        let (revision, _) = commit_workspace_registry_in_transaction(
+        let plan = match self.admitted_revision {
+            Some(revision) => mutation_ledger::RevisionPlan::Admitted(revision),
+            None => mutation_ledger::RevisionPlan::Next { expected: expected_revision },
+        };
+        let (revision, _) = workspace_rows_commit::commit_workspace_rows(
             tx,
             mutation,
             fingerprint,
-            expected_revision,
+            plan,
             event_kind,
             workspace_key,
             workspaces,

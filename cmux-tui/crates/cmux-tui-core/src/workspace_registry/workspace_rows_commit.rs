@@ -4,6 +4,8 @@
 
 use super::*;
 
+/// [`commit_workspace_rows`] at the next revision, with an optional CAS: the
+/// stores that commit without admitting through the ledger cache.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn commit_workspace_registry_in_transaction(
     transaction: &Transaction<'_>,
@@ -15,18 +17,36 @@ pub(super) fn commit_workspace_registry_in_transaction(
     workspaces: &[RegistryWorkspace],
     result_json: &str,
 ) -> anyhow::Result<(u64, TerminalBatchClose)> {
+    commit_workspace_rows(
+        transaction,
+        mutation,
+        fingerprint,
+        mutation_ledger::RevisionPlan::Next { expected: expected_revision },
+        event_kind,
+        workspace_key,
+        workspaces,
+        result_json,
+    )
+}
+
+/// Writes the rows at the revision `plan` names.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn commit_workspace_rows(
+    transaction: &Transaction<'_>,
+    mutation: &WorkspaceMutation,
+    fingerprint: &str,
+    plan: mutation_ledger::RevisionPlan,
+    event_kind: &str,
+    workspace_key: &str,
+    workspaces: &[RegistryWorkspace],
+    result_json: &str,
+) -> anyhow::Result<(u64, TerminalBatchClose)> {
     validate_identifier("mutation id", &mutation.id)?;
     validate_identifier("mutation origin", &mutation.origin)?;
     validate_workspace_key(workspace_key)?;
     validate_registry(workspaces)?;
     let current = transaction_revision(transaction)?;
-    if let Some(expected) = expected_revision
-        && expected != current
-    {
-        anyhow::bail!("workspace revision conflict: expected {expected}, current {current}");
-    }
-    let revision =
-        current.checked_add(1).ok_or_else(|| anyhow::anyhow!("workspace revision exhausted"))?;
+    let revision = plan.revision(mutation_ledger::KeyedLedger::Workspace, current)?;
     let sqlite_revision =
         i64::try_from(revision).context("workspace revision exceeds SQLite integer range")?;
 

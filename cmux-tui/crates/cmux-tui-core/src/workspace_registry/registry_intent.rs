@@ -7,6 +7,12 @@
 //! transaction under a SAVEPOINT, so many commits share one fsync, and
 //! answers with a [`RegistryReceipt`].
 //!
+//! Before it sends a workspace or terminal intent, the request admits it
+//! against the registry's in-memory ledger cache (`mutation_ledger_cache`):
+//! a retried mutation replays there, the revision CAS runs there, and the
+//! intent carries the revision the writer must write. The receipt settles
+//! the cache entry (committed, unapplied, or indeterminate until drained).
+//!
 //! Lock order is unchanged: workspace registry -> registry connection ->
 //! state. While it waits for the receipt the request thread holds the
 //! registry (topology writers stay serialized) and may hold state, but never
@@ -79,7 +85,51 @@ pub(crate) struct UnsettledReceipt {
 /// How long a new registry commit waits for an earlier indeterminate one.
 const UNSETTLED_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A workspace or terminal intent that the in-memory ledger admits before
+/// it is written (`mutation_ledger_cache`).
+pub(crate) trait LedgerIntent {
+    fn ledger_request(&self) -> mutation_ledger::LedgerRequest<'_>;
+    /// The generation CAS: after the replay check, before the revision CAS
+    /// (the order the commit transaction used).
+    fn check_generation(&self) -> anyhow::Result<()>;
+    /// Commit at `revision` (the writer has no CAS left).
+    fn admit_at(&mut self, revision: u64);
+    fn admitted_revision(&self) -> Option<u64>;
+    /// The receipt of a replayed mutation.
+    fn replayed(&self, revision: u64, result_json: &str) -> anyhow::Result<RegistryReceipt>;
+}
+
+/// The ledger outcome of an answered commit.
+fn ledger_outcome(result: &anyhow::Result<RegistryReceipt>) -> mutation_ledger::LedgerOutcome {
+    use mutation_ledger::LedgerOutcome;
+    match result {
+        Ok(RegistryReceipt::Workspace(receipt)) if !receipt.commit.replayed => {
+            LedgerOutcome::Committed(receipt.commit.revision)
+        }
+        Ok(RegistryReceipt::Terminal(commit)) if !commit.replayed => {
+            LedgerOutcome::Committed(commit.revision)
+        }
+        _ => LedgerOutcome::Unapplied,
+    }
+}
+
+/// How the writer (or a local transaction) answered an admitted intent.
+enum SendOutcome {
+    Answered(anyhow::Result<RegistryReceipt>),
+    Indeterminate(anyhow::Error),
+}
+
 impl RegistryIntent {
+    /// The cache entry an admitted intent settles.
+    fn ledger_ticket(&self) -> Option<mutation_ledger::LedgerTicket> {
+        let admitted: &dyn LedgerIntent = match self {
+            Self::Effect(_) => return None,
+            Self::Terminal(intent) => intent,
+            Self::Workspace(intent) => intent,
+        };
+        admitted.admitted_revision().map(|_| admitted.ledger_request().ticket())
+    }
+
     /// Resident size for the writer's durable batch byte cap.
     pub(crate) fn estimated_bytes(&self) -> usize {
         match self {
@@ -289,21 +339,50 @@ impl WorkspaceRegistry {
         // so `intent` is not built on a base a late commit changes; this
         // second drain covers one that went indeterminate meanwhile.
         self.connection.drain_unsettled()?;
+        // Their answers are in SQLite now: the cache rereads its revisions.
+        self.ledger_cache.reconcile_indeterminate();
+        let mut intent = intent;
+        if let Some(replayed) = self.admit_registry_intent(&mut intent)? {
+            return Ok(replayed);
+        }
+        let ticket = intent.ledger_ticket();
+        let (result, outcome) = match self.send_admitted_intent(intent, release_pin, settle, site) {
+            SendOutcome::Answered(result) => {
+                let outcome = ledger_outcome(&result);
+                (result, outcome)
+            }
+            SendOutcome::Indeterminate(error) => {
+                (Err(error), mutation_ledger::LedgerOutcome::Indeterminate)
+            }
+        };
+        if let Some(ticket) = ticket {
+            self.ledger_cache.settle(&ticket, outcome);
+        }
+        result
+    }
+
+    fn send_admitted_intent(
+        &mut self,
+        intent: RegistryIntent,
+        release_pin: impl FnOnce(),
+        settle: Option<SettleState>,
+        site: &'static std::panic::Location<'static>,
+    ) -> SendOutcome {
         let Some(sink) = self.connection.accepting_sink().cloned() else {
-            return self.commit_registry_intent_locally(&intent);
+            return SendOutcome::Answered(self.commit_registry_intent_locally(&intent));
         };
         release_pin();
         // A thread that still holds the connection (an outer pin or guard)
         // would block the writer it waits for: commit locally instead. The
         // request_effect_commits counter makes any such caller visible.
         if self.connection.is_held_by_current_thread() {
-            return self.commit_registry_intent_locally(&intent);
+            return SendOutcome::Answered(self.commit_registry_intent_locally(&intent));
         }
         match sink.send(intent, site) {
-            EffectSend::Sent(Ok(receipt)) => Ok(receipt),
+            EffectSend::Sent(Ok(receipt)) => SendOutcome::Answered(Ok(receipt)),
             EffectSend::Sent(Err(error)) => {
                 self.abandon_effect_commit();
-                Err(error)
+                SendOutcome::Answered(Err(error))
             }
             EffectSend::Indeterminate(error, pending) => {
                 // The writer can still commit after this request gives up:
@@ -311,18 +390,76 @@ impl WorkspaceRegistry {
                 // state holder installs what it committed.
                 self.abandon_effect_commit();
                 self.connection.hold_unsettled(pending, settle);
-                Err(error)
+                SendOutcome::Indeterminate(error)
             }
             EffectSend::NotQueued(intent) => {
                 // The writer stopped between the check and the send. A
                 // thread that holds state cannot take the connection now.
-                anyhow::ensure!(
-                    !registry_connection::current_thread_holds_state(),
-                    "the session journal writer stopped before it took a registry commit"
-                );
-                self.commit_registry_intent_locally(&intent)
+                if registry_connection::current_thread_holds_state() {
+                    return SendOutcome::Answered(Err(anyhow::anyhow!(
+                        "the session journal writer stopped before it took a registry commit"
+                    )));
+                }
+                SendOutcome::Answered(self.commit_registry_intent_locally(&intent))
             }
         }
+    }
+
+    /// Replay or admit a workspace or terminal intent (effects pass): the
+    /// replay check and the revision CAS in memory, at the request.
+    #[track_caller]
+    fn admit_registry_intent(
+        &mut self,
+        intent: &mut RegistryIntent,
+    ) -> anyhow::Result<Option<RegistryReceipt>> {
+        match intent {
+            RegistryIntent::Effect(_) => Ok(None),
+            RegistryIntent::Terminal(intent) => self.admit_ledger_intent(intent),
+            RegistryIntent::Workspace(intent) => self.admit_ledger_intent(intent),
+        }
+    }
+
+    /// Replay `intent` from the ledger cache, or check its generation, CAS
+    /// its expected revision against the newest admitted one and admit it at
+    /// the next. A conflict looks the key up in SQLite first: a retry older
+    /// than the cache still replays. Returns the replayed receipt, if any.
+    #[track_caller]
+    pub(crate) fn admit_ledger_intent(
+        &mut self,
+        intent: &mut (impl LedgerIntent + ?Sized),
+    ) -> anyhow::Result<Option<RegistryReceipt>> {
+        if self.ledger_cache.is_stale() {
+            self.ledger_cache.refresh(&self.connection.get())?;
+        }
+        let request = intent.ledger_request();
+        if let Some(replay) = self.ledger_cache.replay(&request)? {
+            return intent.replayed(replay.revision, &replay.result_json).map(Some);
+        }
+        intent.check_generation()?;
+        let refusal = match self.ledger_cache.admit(&request) {
+            Ok(mutation_ledger::Admission::Admitted(revision)) => {
+                intent.admit_at(revision);
+                return Ok(None);
+            }
+            Ok(mutation_ledger::Admission::Replay(replay)) => {
+                return intent.replayed(replay.revision, &replay.result_json).map(Some);
+            }
+            Err(refusal) => refusal,
+        };
+        if !matches!(refusal, mutation_ledger::LedgerRefusal::RevisionConflict { .. }) {
+            return Err(refusal.into());
+        }
+        let request = intent.ledger_request();
+        let stored = mutation_ledger::stored_keyed_mutation(
+            &self.connection.get(),
+            request.ledger,
+            request.mutation,
+        )?;
+        let Some((fingerprint, result_json, revision)) = stored else {
+            return Err(refusal.into());
+        };
+        let replay = request.replay_of(&fingerprint, result_json, revision)?;
+        intent.replayed(replay.revision, &replay.result_json).map(Some)
     }
 
     /// Commit an intent in its own request-side transaction and fsync: the
@@ -346,3 +483,7 @@ impl WorkspaceRegistry {
 #[cfg(test)]
 #[path = "registry_intent_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "registry_intent_ledger_tests.rs"]
+mod ledger_tests;

@@ -811,6 +811,10 @@ pub struct WorkspaceRegistry {
     public_fold: Option<public_fold::PublicTopologyFold>,
     /// Projection and commit spans for `server-stats`; the mux keeps a clone.
     resource_projection_stats: std::sync::Arc<crate::diagnostics::ResourceProjectionStats>,
+    /// In-memory revisions and recent mutation ledger rows: intents are
+    /// replayed and CAS-checked against it before they are written
+    /// (`mutation_ledger_cache`).
+    ledger_cache: mutation_ledger::LedgerCache,
     #[cfg(test)]
     resource_patch_failures_remaining: Cell<u64>,
     pub(crate) lease: Option<SessionLease>,
@@ -2909,6 +2913,8 @@ impl WorkspaceRegistry {
             validate_resource_invariants(&tx)?;
             tx.commit()?;
         }
+        // Last: its update hook sees every later `meta` write.
+        let ledger_cache = mutation_ledger::LedgerCache::seed(&connection)?;
         Ok(Self {
             connection: RegistryConnection::new(connection, database_path.as_deref()),
             database_path,
@@ -2920,6 +2926,7 @@ impl WorkspaceRegistry {
             resource_effect_pepper,
             public_fold: None,
             resource_projection_stats: std::sync::Arc::default(),
+            ledger_cache,
             #[cfg(test)]
             resource_patch_failures_remaining: Cell::new(0),
             session_guard,

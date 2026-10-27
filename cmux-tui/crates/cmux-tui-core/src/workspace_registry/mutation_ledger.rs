@@ -10,6 +10,15 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::{new_uuid_v4, validate_identifier};
 
+/// The in-memory front of the keyed ledgers and their revisions (F10).
+#[path = "mutation_ledger_cache.rs"]
+mod cache;
+
+pub(crate) use cache::{
+    Admission, AdmittedWriteScope, LedgerCache, LedgerOutcome, LedgerRefusal, LedgerRequest,
+    LedgerTicket, RevisionPlan,
+};
+
 /// The `resource_mutations.actor` value of rows written before actors existed.
 pub(crate) const LEGACY_ACTOR: &str = "legacy";
 /// The account-less local user (identity.md: `user_local`).
@@ -156,12 +165,37 @@ pub(crate) fn insert_resource_mutation(
 }
 
 /// Which older ledger [`insert_keyed_mutation`] writes: both share one shape.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyedLedger {
     /// `mutations`: the workspace registry.
     Workspace,
     /// `terminal_mutations`: terminal lifecycles.
     Terminal,
+}
+
+impl KeyedLedger {
+    pub(crate) fn table(self) -> &'static str {
+        match self {
+            Self::Workspace => "mutations",
+            Self::Terminal => "terminal_mutations",
+        }
+    }
+
+    /// The `meta` key of the revision this ledger's commits advance.
+    pub(crate) fn revision_key(self) -> &'static str {
+        match self {
+            Self::Workspace => "revision",
+            Self::Terminal => "terminal_revision",
+        }
+    }
+
+    /// The word the store's error messages use for that revision.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Terminal => "terminal",
+        }
+    }
 }
 
 /// The one write of a `mutations` or `terminal_mutations` row; it records
@@ -174,10 +208,7 @@ pub(crate) fn insert_keyed_mutation(
     result_json: &str,
     committed_revision: i64,
 ) -> rusqlite::Result<usize> {
-    let table = match ledger {
-        KeyedLedger::Workspace => "mutations",
-        KeyedLedger::Terminal => "terminal_mutations",
-    };
+    let table = ledger.table();
     connection.execute(
         &format!(
             "INSERT INTO {table}(
@@ -193,6 +224,33 @@ pub(crate) fn insert_keyed_mutation(
             mutation.actor.wire(),
         ],
     )
+}
+
+/// The stored `(fingerprint, result_json, committed_revision)` of `mutation`
+/// in a keyed ledger: the replay of a key older than the [`LedgerCache`].
+pub(crate) fn stored_keyed_mutation(
+    connection: &Connection,
+    ledger: KeyedLedger,
+    mutation: &WorkspaceMutation,
+) -> anyhow::Result<Option<(String, String, u64)>> {
+    let stored = connection
+        .query_row(
+            &format!(
+                "SELECT fingerprint, result_json, committed_revision
+                 FROM {} WHERE origin = ?1 AND mutation_id = ?2",
+                ledger.table()
+            ),
+            params![mutation.origin, mutation.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .optional()?;
+    stored
+        .map(|(fingerprint, result_json, revision)| {
+            let revision = u64::try_from(revision)
+                .map_err(|_| anyhow::anyhow!("stored mutation revision is negative"))?;
+            Ok((fingerprint, result_json, revision))
+        })
+        .transpose()
 }
 
 /// Forward-only, additive: rows written before the column get `legacy`,
