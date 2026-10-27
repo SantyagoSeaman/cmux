@@ -19,7 +19,8 @@ struct BranchDaemonHarness {
         terminalEnvironment: (@Sendable () async -> [String: String])? = nil,
         sessionEvents: Bool = false,
         terminalReapGraceSeconds: UInt32? = nil,
-        installKey: FrontendInstallKey? = nil
+        installKey: FrontendInstallKey? = nil,
+        terminalStreams: Bool = false
     ) async throws -> BranchDaemonHarness {
         let binary = try #require(RealBinary.url)
         let id = UUID().uuidString.prefix(8).lowercased()
@@ -32,7 +33,8 @@ struct BranchDaemonHarness {
         if let terminalReapGraceSeconds { configuration.terminalReapGraceSeconds = terminalReapGraceSeconds }
         let launcher = DaemonLauncher(work: BackgroundWork(label: "test.daemon-launcher"), configuration: configuration, environment: { environment })
         let ensured = try await launcher.ensure()
-        var connectionConfiguration = Self.configuration(terminalEnvironment: terminalEnvironment, sessionEvents: sessionEvents)
+        var connectionConfiguration = Self.configuration(terminalEnvironment: terminalEnvironment, sessionEvents: sessionEvents,
+                                                         terminalStreams: terminalStreams)
         if let installKey { connectionConfiguration.clientHello = .init(installKey: installKey) }
         let connection = DaemonConnection(
             configuration: connectionConfiguration,
@@ -52,9 +54,11 @@ struct BranchDaemonHarness {
     /// These suites do not test the deadlines (DeadlineTests does); a hang
     /// stops at each suite's `.timeLimit`.
     static func configuration(terminalEnvironment: (@Sendable () async -> [String: String])? = nil,
-                              sessionEvents: Bool = false) -> DaemonConnection.Configuration {
+                              sessionEvents: Bool = false,
+                              terminalStreams: Bool = false) -> DaemonConnection.Configuration {
         DaemonConnection.Configuration(requestTimeout: nil, snapshotTimeout: nil,
-                                       terminalEnvironment: terminalEnvironment, sessionEvents: sessionEvents)
+                                       terminalEnvironment: terminalEnvironment, sessionEvents: sessionEvents,
+                                       terminalStreams: terminalStreams)
     }
 
     func stop() async {
@@ -105,11 +109,12 @@ struct BranchDaemonHarness {
         sessionEvents: Bool = false,
         terminalReapGraceSeconds: UInt32? = nil,
         installKey: FrontendInstallKey? = nil,
+        terminalStreams: Bool = false,
         _ body: (BranchDaemonHarness) async throws -> Void
     ) async throws {
         let harness = try await start(daemonEnvironment: daemonEnvironment, terminalEnvironment: terminalEnvironment,
                                       sessionEvents: sessionEvents, terminalReapGraceSeconds: terminalReapGraceSeconds,
-                                      installKey: installKey)
+                                      installKey: installKey, terminalStreams: terminalStreams)
         do {
             try await body(harness)
         } catch {

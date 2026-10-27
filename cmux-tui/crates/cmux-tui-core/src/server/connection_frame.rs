@@ -325,7 +325,15 @@ pub(super) fn handle_request_with_cancellation(
         return chief_inspect::start(mux, client, id, params, span.start_async(), writer);
     }
     if sized_browser_attach(mux, &cmd) {
-        return start_sized_browser_attach(mux, client, id, cmd, span.start_async(), writer);
+        return start_sized_browser_attach(
+            mux,
+            client,
+            id,
+            stream,
+            cmd,
+            span.start_async(),
+            writer,
+        );
     }
     // A remote client goes on to the relay gate, which refuses it.
     if matches!(cmd, Command::MachineListeningTcp) && !mux.is_remote_client(client) {
@@ -418,11 +426,13 @@ fn sized_browser_attach(mux: &Mux, cmd: &Command) -> bool {
 /// and answers, so this request thread answers the next line at once
 /// (Chrome posts such a wait to a MayBlock task runner,
 /// base/task/task_traits.h). Shutdown does not wait for it: the connection
-/// closes anyway.
+/// closes anyway. The worker keeps the request's `attach_stream`, so the
+/// attach is tagged to it and a failure ends it.
 fn start_sized_browser_attach(
     mux: &Arc<Mux>,
     client: u64,
     id: Option<Value>,
+    stream: Option<attach_frames::ClientStreamId>,
     cmd: Command,
     reply: AsyncReply,
     writer: &MessageWriter,
@@ -440,7 +450,7 @@ fn start_sized_browser_attach(
                 client,
                 cmd,
                 &worker_writer,
-                CommandContext::default(),
+                CommandContext { stream, ..CommandContext::default() },
             );
             reply.reply(|| {
                 send_command_result(&worker_mux, client, worker_id, result, &worker_writer).1

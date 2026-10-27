@@ -213,7 +213,7 @@ pub(super) fn serve_connection(
                     writer_ipc.frame_sent(header.kind(), header.frame_len());
                 }
                 OutboundItem::AttachFrame(frame) => {
-                    writer_ipc.frame_sent(frame.kind(), frame.len())
+                    writer_ipc.frame_sent(frame.kind(), frame.len());
                 }
                 OutboundItem::Flush(_) => {}
             }

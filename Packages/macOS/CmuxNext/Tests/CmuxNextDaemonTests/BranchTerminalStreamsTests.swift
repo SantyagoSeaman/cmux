@@ -12,7 +12,7 @@ struct BranchTerminalStreamsTests {
     /// The daemon's client count (`list-clients`).
     private struct ListClients: DaemonRequest {
         typealias Response = JSONValue
-        static let command = "list-clients"
+        static let commandName: DaemonCommandName = "list-clients"
     }
 
     private func clientCount(_ h: BranchDaemonHarness) async throws -> Int {
@@ -40,7 +40,7 @@ struct BranchTerminalStreamsTests {
     }
 
     @Test func twoViewsShareTheAppConnectionWithNoHandshakeAndEndOnlyTheirOwnStream() async throws {
-        try await BranchDaemonHarness.with { h in
+        try await BranchDaemonHarness.with(terminalStreams: true) { h in
             let (_, _, first) = try await h.workspaceWithTerminal("streams-a")
             let (_, _, second) = try await h.workspaceWithTerminal("streams-b")
             let device = TerminalSizingDevice(kind: "mac", name: "streams-test")

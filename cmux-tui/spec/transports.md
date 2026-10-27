@@ -518,12 +518,14 @@ vNext adds client-generated `stream_id` to `subscribe`. Request timeout remains 
 
 ## Framed IPC grants
 
-Status: grant rule only. The daemon advertises and grants a capability only
-after its transport is in the daemon. No transport is in the daemon yet, so
-`identify` lists none of the four and `set-client-info` grants none. The
-task that adds a transport also turns on its capability: p05-ipc-061 for
-`ipc-frames-v2`, the stream task for `attach-streams-v1` and `cancel-stream`,
-and the ring task for `terminal-output-ring-v1`
+Status: three of the four are bound. The daemon advertises and grants a
+capability only after its transport is in the daemon. `attach-streams-v1`
+(with `cancel-stream`, server/stream_lanes.rs), `attach-frames-v1`
+(server/attach_frames.rs) and, on a Unix build, `terminal-output-ring-v1`
+(surface/output_ring.rs) are in the daemon, so `identify` lists them and
+`set-client-info` grants them by the rules below
+(`plans/cmux-next/app-daemon-connection-DESIGN.md`). `ipc-frames-v2` has no
+reader yet: the daemon lists and grants it only after p05-ipc-061 adds one
 (`plans/cmux-next/chrome-parity/p05-ipc.md`, sections 3.1 and 3.2). Mojo
 works the same way: it exposes an interface only after its implementation
 is bound.
@@ -532,7 +534,7 @@ is bound.
 | --- | --- | --- |
 | `ipc-frames-v2` | 16-byte framed messages next to JSON lines, `SHARED_BUFFER` included | none |
 | `attach-streams-v1` | Client-minted streams on one connection. Their items stay JSON lines. | none |
-| `attach-frames-v1` | Attach output as `OUTPUT`, `GRID`, `SNAPSHOT` and `REPLAY` frames on a stream | `ipc-frames-v2`, `attach-streams-v1` |
+| `attach-frames-v1` | Attach output as `OUTPUT`, `GRID`, `SNAPSHOT` and `REPLAY` frames on a stream | `attach-streams-v1`. Not `ipc-frames-v2`: attach frames go daemon to client only, and client-to-daemon traffic stays JSON lines, so the daemon needs no frame reader for them. |
 | `terminal-output-ring-v1` | The per-terminal shared-memory output ring (`RING`, `RING_ADVANCE`, `RING_ACK`) | `attach-frames-v1` |
 
 `identify` lists each capability that is in the daemon and that the
@@ -546,7 +548,7 @@ it does for any other capability, and the reply stays `{}`.
 
 | Connection | Grants |
 | --- | --- |
-| Direct local peer on the Unix socket, with `api_revision` equal to the daemon's (declared in `set-client-info`) | all four |
+| Direct local peer on the Unix socket, with `api_revision` equal to the daemon's (declared in `set-client-info`) | each bound capability (all four once `ipc-frames-v2` is bound) |
 | Direct local peer at any other revision, or with no declared revision | `attach-streams-v1` |
 | Bridge that the daemon identifies at accept | `attach-streams-v1` |
 | Unverified Unix peer | `attach-streams-v1` |
@@ -587,8 +589,9 @@ time the grant is used.
 
 ### Attach frames
 
-Status: encoder only (p05-ipc-076). `attach-frames-v1` stays unbound until
-the outbound queue carries stream frames, so no connection gets these yet.
+Status: bound. The outbound queue carries stream frames, so a connection
+granted `attach-frames-v1` (a direct local peer at the daemon's revision with
+`attach-streams-v1`) gets its streams' attach events as these frames.
 
 On a stream granted `attach-frames-v1`, the byte attach events of
 `attach-surface` (see [events](events.md)) arrive as frames instead of JSON

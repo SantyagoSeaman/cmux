@@ -473,3 +473,80 @@ fn a_local_ring_stream_reads_its_output_from_shared_memory_and_gets_only_ring_ad
     handler.join().unwrap();
     mux.shutdown();
 }
+
+/// Sends a sized `attach-surface` for browser `surface` on stream `stream`
+/// (it attaches on a work item, connection_frame.rs `start_sized_browser_attach`)
+/// and returns its reply, keeping every other message in `seen`.
+fn sized_browser_attach(
+    harness: &mut Harness,
+    id: u64,
+    stream: u16,
+    surface: u64,
+    seen: &mut Vec<Wire>,
+) -> Value {
+    send(
+        &mut harness.client,
+        json!({"id": id, "cmd": "attach-surface", "attach_stream": stream, "surface": surface,
+               "cols": 100, "rows": 30}),
+    );
+    harness.reader.reply(id, seen)
+}
+
+#[test]
+fn a_sized_browser_attach_on_a_stream_tags_its_events_to_that_stream() {
+    let mut harness = Harness::connect(
+        "streams-sized-browser",
+        &["attach-streams-v1", GUARDED_BROWSER_POINTER_CAPABILITY],
+    );
+    let surface = sizing_browser(&harness.mux, (80, 24));
+    let mut seen = Vec::new();
+    let reply = sized_browser_attach(&mut harness, 2, 11, surface.id, &mut seen);
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(surface.size(), (100, 30), "the attach answered before the host resized");
+    let events: Vec<&Value> = seen
+        .iter()
+        .filter_map(|wire| match wire {
+            Wire::Line(value) if value.get("event").is_some() => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        events.iter().all(|event| event["attach_stream"] == 11),
+        "an attach event left its stream: {events:?}"
+    );
+    // The attach owns stream 11: cancelling it ends an open stream, and its
+    // stream-end names it.
+    send(&mut harness.client, json!({"id": 3, "cmd": "cancel-stream", "attach_stream": 11}));
+    let mut after_cancel = Vec::new();
+    let cancel = harness.reader.reply(3, &mut after_cancel);
+    assert_eq!(cancel["data"]["outcome"], "applied", "the attach opened no stream 11: {cancel}");
+    let end = loop {
+        match after_cancel.pop().unwrap_or_else(|| harness.reader.next()) {
+            Wire::Line(value) if value["event"] == "stream-end" => break value,
+            _ => {}
+        }
+    };
+    assert_eq!(end["attach_stream"], 11, "{end}");
+}
+
+#[test]
+fn a_failed_sized_browser_attach_on_a_stream_ends_that_stream() {
+    // Without the guarded pointer capability the browser attach is refused.
+    let mut harness = Harness::connect("streams-sized-browser-refused", &["attach-streams-v1"]);
+    let surface = sizing_browser(&harness.mux, (80, 24));
+    let mut seen = Vec::new();
+    let reply = sized_browser_attach(&mut harness, 2, 13, surface.id, &mut seen);
+    assert_eq!(reply["ok"], false, "{reply}");
+    // The stream-end goes out before the reply: it is in `seen`, or the fence
+    // below flushes it.
+    send(&mut harness.client, json!({"id": 3, "cmd": "ping"}));
+    harness.reader.reply(3, &mut seen);
+    let end = seen
+        .iter()
+        .find_map(|wire| match wire {
+            Wire::Line(value) if value["event"] == "stream-end" => Some(value),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the failed attach left stream 13 open: {seen:?}"));
+    assert_eq!(end["attach_stream"], 13, "{end}");
+}
