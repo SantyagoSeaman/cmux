@@ -19,6 +19,7 @@ even `verify-local.py --help` and `--list` load repository code.
 | Run one app module's tests | `swift test --filter <Module>Tests` in `Packages/macOS/CmuxNext` |
 | Merge-gate source rules for the app | `scripts/cmux-next/check-no-godfiles.sh`, `scripts/cmux-next/check-concurrency.sh` |
 | Decide whether a red web test is the PR's fault or a flake | `python3 scripts/ci/web_test_verdict.py --pr <N>` ([guide](references/web-test-flakes.md); `--coverage` runs the PR's code) |
+| Show that a refactor keeps behavior (oracle diff, confirm, switches, rebaseline) | `python3 -I scripts/cmux-next/oracle/oracle.py diff --base <sha> --head <sha> --suite <s>` on the Linux VM or the fleet ([oracle guide](references/oracle.md)) |
 | Get before and after perf numbers for a change | perf-lead.md fleet benches; `python3 -I scripts/perf-lab/lab.py try --base <sha> --head <sha> --wait` when it is on your base ([perf try receipts](#perf-try-receipts)) |
 
 Add a base ref after `--swift-changed` to include committed changes. Use `--list`
