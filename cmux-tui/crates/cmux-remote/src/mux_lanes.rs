@@ -10,6 +10,8 @@
 //! 0xFF, which never starts a UTF-8 line) is routed by the method or event id
 //! in its header and is never parsed, as Mojo routes a message by its header
 //! ordinal (chromium mojo/core/channel.cc, `Channel::Message::Deserialize`).
+//! `mux_codec::read_bounded_line_with_limit` reads a frame whole by the
+//! length in its header, so a 0x0A in it never splits it across lanes.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};

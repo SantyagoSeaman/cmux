@@ -55,6 +55,8 @@ pub enum RouteRule {
     PassingRead,
     /// Everything else: rides input, ordered behind what the client sent first.
     Sequence,
+    /// Carried by a subscription: control, in order with its other events.
+    SubscribeEvent,
     /// Carried only by attach streams: bulk, with the stream's output.
     AttachEvent,
     /// An event's schema priority.

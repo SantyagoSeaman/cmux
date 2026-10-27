@@ -38,6 +38,14 @@ where
     read_bounded_line_with_limit(reader, line, MAX_MUX_UPLOAD_LINE_BYTES).await
 }
 
+/// Reads one mux message into `line`: a newline-terminated JSON line, or a
+/// whole cmux-ipc binary frame, which the daemon's `FrameReader` accepts on
+/// the same socket. A frame (first byte `MAGIC`, which never starts a UTF-8
+/// line) is read by the length its header declares, so a 0x0A in its header
+/// or payload never cuts it into pieces that `mux_lanes` could put on
+/// different lanes. A truncated or undecodable header ends the message; it
+/// rides control, where the daemon refuses it. At most `maximum + 1` bytes are
+/// read, so the caller sees an oversized message.
 pub(crate) async fn read_bounded_line_with_limit<R>(
     reader: &mut R,
     line: &mut Vec<u8>,
@@ -50,7 +58,18 @@ where
     let limit = u64::try_from(maximum).ok().and_then(|maximum| maximum.checked_add(1)).ok_or_else(
         || io::Error::new(io::ErrorKind::InvalidInput, "mux line limit is too large"),
     )?;
-    reader.take(limit).read_until(b'\n', line).await
+    if reader.fill_buf().await?.first() != Some(&cmux_ipc::MAGIC) {
+        return reader.take(limit).read_until(b'\n', line).await;
+    }
+    let header_len = cmux_ipc::HEADER_LEN as u64;
+    (&mut *reader).take(header_len.min(limit)).read_to_end(line).await?;
+    let header = line
+        .first_chunk::<{ cmux_ipc::HEADER_LEN }>()
+        .and_then(|bytes| cmux_ipc::FrameHeader::decode(*bytes, cmux_ipc::MAX_FRAME_PAYLOAD).ok());
+    let Some(header) = header else { return Ok(line.len()) };
+    let frame_len = u64::try_from(header.frame_len()).unwrap_or(u64::MAX);
+    reader.take(frame_len.min(limit).saturating_sub(header_len)).read_to_end(line).await?;
+    Ok(line.len())
 }
 
 pub(crate) fn encode_line(message: u64, line: &[u8]) -> Result<Vec<Bytes>, MuxCodecError> {

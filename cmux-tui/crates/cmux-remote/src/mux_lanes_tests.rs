@@ -47,9 +47,6 @@ const PASSING_READ: &str = "read-only, and the schema lets it pass the sequence 
     independent or crosses_stream_ok): it moves to control, as the old table's lookups did";
 const SUBSCRIPTION: &str = "opens a subscription: it moves to control with the subscription's \
     events, as subscribe already did";
-const BACKGROUND_EVENT: &str = "schema priority background: idle diagnostics and inventory \
-    move to bulk, below replies and control events";
-const BULK_EVENT: &str = "schema priority bulk: raw surface output leaves control";
 const STREAM_END: &str = "only attach streams carry it: it ends the stream after the stream's \
     output on bulk, like detached; on control it could overtake that output";
 
@@ -78,11 +75,6 @@ const EXPECTED_DIFFERENCES: &[(&str, Lane, Lane, &str)] = &[
     ("cmd feed-local-list", Lane::Interactive, Lane::Control, PASSING_READ),
     ("cmd agent-inventory-refresh", Lane::Interactive, Lane::Bulk, READ_BEHIND_INPUT),
     ("cmd fs.read", Lane::Interactive, Lane::Bulk, READ_BEHIND_INPUT),
-    ("event agent-inventory-changed", Lane::Control, Lane::Bulk, BACKGROUND_EVENT),
-    ("event surface-output", Lane::Control, Lane::Bulk, BULK_EVENT),
-    ("event machine-usage-changed", Lane::Control, Lane::Bulk, BACKGROUND_EVENT),
-    ("event server-diagnostic-site", Lane::Control, Lane::Bulk, BACKGROUND_EVENT),
-    ("event activity-changed", Lane::Control, Lane::Bulk, BACKGROUND_EVENT),
     ("event stream-end", Lane::Control, Lane::Bulk, STREAM_END),
 ];
 
@@ -132,6 +124,55 @@ fn mux_lanes_generated_table_matches_the_old_table_except_listed_reasons() {
         differences, expected,
         "differences from the old table must be listed with a reason"
     );
+}
+
+/// Subscription events that leave control, and why.
+const SUBSCRIPTION_EVENTS_OFF_CONTROL: &[(&str, &str)] = &[(
+    "scroll-changed",
+    "attach streams carry it too and its line has no field that tells the copies apart: it \
+     stays on bulk with the attach output, as before task 152",
+)];
+
+#[test]
+fn mux_lanes_every_subscription_event_rides_the_subscriptions_lane() {
+    // The schema keeps one subscription's events in enqueue order, and an
+    // overflow ends the stream: a second lane would let an exit or an
+    // overflow pass output enqueued before it.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/sdk-schema.json");
+    let text = std::fs::read_to_string(path).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let lanes = RemoteLanes::schema();
+    let mut subscriptions = 0;
+    for (command, node) in schema["commands"].as_object().unwrap() {
+        let stream = &node["stream"];
+        if stream["kind"] != "subscribe" {
+            continue;
+        }
+        subscriptions += 1;
+        let route = lanes.command(command).unwrap();
+        assert_eq!(lane_of(route.lane_for(None)), Lane::Control, "cmd {command}");
+        for event in stream["event_names"].as_array().unwrap() {
+            let event = event.as_str().unwrap();
+            if SUBSCRIPTION_EVENTS_OFF_CONTROL.iter().any(|(name, _)| *name == event) {
+                continue;
+            }
+            let route = lanes.event(event).unwrap_or_else(|| panic!("{command}: {event}"));
+            // A subscription's line carries no attach `scope`.
+            assert_eq!(lane_of(route.lane_for(None)), Lane::Control, "{command}: {event}");
+            assert_eq!(lane_of(route.frame_lane()), Lane::Control, "{command}: {event} frame");
+        }
+    }
+    assert!(subscriptions >= 4, "the schema's subscribe commands were not found");
+    let tracker = MuxLaneTracker::default();
+    for line in [
+        &br#"{"event":"surface-output","surface":1}"#[..],
+        br#"{"event":"surface-exited","surface":1}"#,
+        br#"{"event":"overflow","error":"subscriber fell behind"}"#,
+        br#"{"event":"machine-usage-changed"}"#,
+        br#"{"event":"activity-changed"}"#,
+    ] {
+        assert_eq!(tracker.classify_server_line(line), Some(Lane::Control));
+    }
 }
 
 #[test]
@@ -388,4 +429,52 @@ fn mux_lanes_bad_frame_headers_ride_control() {
     assert_eq!(classify_client_line(&header), Lane::Control);
     let tracker = MuxLaneTracker::default();
     assert_eq!(tracker.classify_server_line(&header), Some(Lane::Control));
+}
+
+/// Every message `read_bounded_line_with_limit` reads from `stream`, through a
+/// small buffer so a frame header spans several fills.
+async fn read_messages(stream: &[u8], maximum: usize) -> Vec<Vec<u8>> {
+    let mut reader = tokio::io::BufReader::with_capacity(5, stream);
+    let mut messages = Vec::new();
+    let mut line = Vec::new();
+    while crate::mux_codec::read_bounded_line_with_limit(&mut reader, &mut line, maximum)
+        .await
+        .unwrap()
+        > 0
+    {
+        messages.push(line.clone());
+    }
+    messages
+}
+
+#[tokio::test]
+async fn mux_lanes_frames_with_newlines_are_read_and_routed_whole() {
+    // 0x0A in the payloads: a newline reader would cut each frame in two.
+    let send = call_frame(FrameKind::Request, method_id("send"), b"a\nb");
+    let history = call_frame(FrameKind::Request, method_id("terminal-history"), b"\n\n");
+    let output = call_frame(FrameKind::TypedEvent, event_id("output"), b"x\ny");
+    let line = br#"{"id":1,"cmd":"ping"}
+"#
+    .to_vec();
+    let mut bad = vec![0_u8; HEADER_LEN];
+    bad[0] = MAGIC;
+    bad[1] = 0xEE;
+    bad[2] = b'\n';
+    let client = [send.as_slice(), &line, &history, &bad, &line].concat();
+    let messages = read_messages(&client, crate::mux_codec::MAX_MUX_UPLOAD_LINE_BYTES).await;
+    // A bad header ends its message after the header; it rides control.
+    assert_eq!(messages, [send.clone(), line.clone(), history, bad, line.clone()]);
+    let lanes: Vec<Lane> = messages.iter().map(|message| classify_client_line(message)).collect();
+    assert_eq!(lanes, [Lane::Interactive, Lane::Control, Lane::Bulk, Lane::Control, Lane::Control]);
+
+    let server = [output.as_slice(), &line].concat();
+    let messages = read_messages(&server, crate::mux_codec::MAX_MUX_DOWNLOAD_LINE_BYTES).await;
+    assert_eq!(messages, [output, line]);
+    let tracker = MuxLaneTracker::default();
+    assert_eq!(tracker.classify_server_line(&messages[0]), Some(Lane::Bulk));
+
+    // A frame over the limit reads limit + 1 bytes, so the caller refuses it
+    // as it refuses a long line.
+    let messages = read_messages(&send, send.len() - 2).await;
+    assert_eq!(messages[0].len(), send.len() - 1);
 }

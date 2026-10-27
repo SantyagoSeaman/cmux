@@ -18,7 +18,12 @@
 //!    `independent`, or a `crosses_stream_ok` reason) rides control.
 //! 5. Every other command rides input, the ordered sequence, so it never
 //!    passes input or a mutation the client sent first.
-//! 6. An event that only attach streams carry rides bulk, in order with the
+//! 6. An event a subscription carries (a subscribe command's `event_names`,
+//!    or a `subscribe*` stream) rides control with the subscription's reply
+//!    and its other events, whatever its priority: the schema keeps one
+//!    subscription's events in enqueue order, so an overflow or an exit never
+//!    passes output enqueued before it.
+//! 7. An event that only attach streams carry rides bulk, in order with the
 //!    stream's output; every other event rides its schema priority.
 //!
 //! An exception names a command, a `prefix-*` pattern or a family, with its
@@ -27,7 +32,7 @@
 //! rule's lane, or refines on a field the schema does not declare, so the file
 //! never drifts from the schema.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
 use serde_json::{Map, Value};
@@ -90,6 +95,7 @@ pub enum Rule {
     BulkRead,
     PassingRead,
     Sequence,
+    SubscribeEvent,
     AttachEvent,
     EventPriority,
     Unlisted,
@@ -105,6 +111,7 @@ impl Rule {
             Rule::BulkRead => "BulkRead",
             Rule::PassingRead => "PassingRead",
             Rule::Sequence => "Sequence",
+            Rule::SubscribeEvent => "SubscribeEvent",
             Rule::AttachEvent => "AttachEvent",
             Rule::EventPriority => "EventPriority",
             Rule::Unlisted => "Unlisted",
@@ -128,6 +135,9 @@ impl Rule {
             }
             Rule::Sequence => {
                 "stays in the ordered sequence behind input and mutations the client sent first"
+            }
+            Rule::SubscribeEvent => {
+                "a subscription carries it: in order with the subscription's events on control"
             }
             Rule::AttachEvent => {
                 "only attach streams carry it: ordered with the stream's output on bulk"
@@ -398,13 +408,31 @@ fn command_rule(node: &Value, path: &str) -> Result<Route, LaneError> {
     })
 }
 
-/// Rule 6 for an event.
-fn event_rule(node: &Value, path: &str) -> Result<Route, LaneError> {
+/// The events some subscribe command's stream carries (its `event_names`).
+fn subscribed_events(sdk: &Value) -> BTreeSet<&str> {
+    sdk.get("commands")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|commands| commands.values())
+        .filter_map(|command| command.get("stream"))
+        .filter(|stream| stream.get("kind").and_then(Value::as_str) == Some("subscribe"))
+        .filter_map(|stream| stream.get("event_names").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// Rules 6 and 7 for an event; `subscribed` when a subscribe command's stream
+/// names it.
+fn event_rule(node: &Value, path: &str, subscribed: bool) -> Result<Route, LaneError> {
     let streams: Vec<&str> = node
         .get("streams")
         .and_then(Value::as_array)
         .map(|streams| streams.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
+    if subscribed || streams.iter().any(|stream| stream.starts_with("subscribe")) {
+        return Ok(Route::rule(Lane::Control, Rule::SubscribeEvent));
+    }
     if !streams.is_empty() && streams.iter().all(|stream| stream.starts_with("attach-")) {
         return Ok(Route::rule(Lane::Bulk, Rule::AttachEvent));
     }
@@ -461,6 +489,7 @@ pub fn read(sdk: &Value, v2: &Value, lanes: &Value) -> Result<Routes, LaneError>
     }
 
     let mut events = exceptions(lanes, "events")?;
+    let subscribed = subscribed_events(sdk);
     if let Some(entries) = sdk.get("events") {
         for (name, node) in object(entries, "sdk-schema.json $.events")? {
             let path = format!("sdk-schema.json $.events.{name}");
@@ -469,7 +498,8 @@ pub fn read(sdk: &Value, v2: &Value, lanes: &Value) -> Result<Routes, LaneError>
             };
             let family = family_of(id, &families, &path)?;
             let fields = declared_fields(node.get("payload"));
-            let route = apply(&mut events, name, &family, &fields, event_rule(node, &path)?)?;
+            let rule = event_rule(node, &path, subscribed.contains(name.as_str()))?;
+            let route = apply(&mut events, name, &family, &fields, rule)?;
             routes.event_ids.insert(id, route.clone());
             routes.events.insert(name.clone(), route);
         }

@@ -52,6 +52,7 @@ fn rule(rule: reader::Rule) -> RouteRule {
         reader::Rule::BulkRead => RouteRule::BulkRead,
         reader::Rule::PassingRead => RouteRule::PassingRead,
         reader::Rule::Sequence => RouteRule::Sequence,
+        reader::Rule::SubscribeEvent => RouteRule::SubscribeEvent,
         reader::Rule::AttachEvent => RouteRule::AttachEvent,
         reader::Rule::EventPriority => RouteRule::EventPriority,
         reader::Rule::Unlisted => RouteRule::Unlisted,
@@ -153,13 +154,15 @@ fn schema() -> Value {
             "probe-attach": {"method_id": 0x0903, "priority": "control", "durability": "memory",
                 "stream": {"kind": "attach"}},
             "probe-subscribe": {"method_id": 0x0904, "priority": "control", "durability": "memory",
-                "stream": {"kind": "subscribe"}},
+                "stream": {"kind": "subscribe", "event_names": ["probe-named"]}},
             "unframed": {"priority": "control"}
         },
         "events": {
             "probe-output": {"event_id": 0xC900, "priority": "input", "streams": ["attach-byte"]},
             "probe-changed": {"event_id": 0xC901, "priority": "background",
-                "streams": ["subscribe", "attach-byte"]}
+                "streams": ["subscribe", "attach-byte"]},
+            "probe-named": {"event_id": 0xC902, "priority": "bulk", "streams": ["control"]},
+            "probe-idle": {"event_id": 0xC903, "priority": "background", "streams": ["control"]}
         }
     })
 }
@@ -182,7 +185,11 @@ fn remote_lanes_rules_route_by_stream_priority_and_durability() {
     assert_eq!(routes.command_ids.len(), 5);
     let event = |name: &str| (routes.events[name].lane, routes.events[name].rule);
     assert_eq!(event("probe-output"), (Lane::Bulk, Rule::AttachEvent));
-    assert_eq!(event("probe-changed"), (Lane::Background, Rule::EventPriority));
+    // A subscription's events ride control with it, whatever their priority:
+    // by a subscribe stream, or named by a subscribe command.
+    assert_eq!(event("probe-changed"), (Lane::Control, Rule::SubscribeEvent));
+    assert_eq!(event("probe-named"), (Lane::Control, Rule::SubscribeEvent));
+    assert_eq!(event("probe-idle"), (Lane::Background, Rule::EventPriority));
 }
 
 #[test]

@@ -99,7 +99,11 @@
       },
       "scroll-changed": {
         "lane": "bulk",
-        "reason": "Attach streams send it in order with the output that scrolled; a subscription's copy rides with them."
+        "reason": "Attach streams send it in order with the output that scrolled. The line has no field that tells a subscription's copy from an attach stream's, so the subscription's copy rides bulk too, as before task 152: it is the one subscription event off control."
+      },
+      "agent-inventory-changed": {
+        "lane": "control",
+        "reason": "agent-inventory-watch sends it and agent-inventory-watch-ended to one connection; on control a watch-ended never passes a change enqueued before it."
       }
     },
     "unlisted": {
