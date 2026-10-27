@@ -27,6 +27,8 @@ mod resize_audit;
 #[cfg(unix)]
 mod resize_conformance;
 mod stream_progress;
+#[cfg(unix)]
+mod terminal_stream_hidden;
 use base64::Engine as _;
 use std::sync::mpsc::sync_channel;
 

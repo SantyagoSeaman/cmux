@@ -351,10 +351,12 @@ mod attach_tap;
 pub use attach_tap::AttachFrameReceiver;
 pub(crate) use attach_tap::AttachLifecycle;
 pub(crate) use attach_tap::AttachResize;
+pub(crate) use attach_tap::HiddenOutput;
 pub(crate) use attach_tap::ViewerEvent;
 #[cfg(test)]
 use attach_tap::{
-    AttachFrameMerge, OUTPUT_ARENA_BLOCK_BYTES, OUTPUT_ROPE_COPY_MAX_BYTES, OutputArena, OutputRope,
+    AttachFrameMerge, HIDDEN_FLUSH_BYTES, HIDDEN_FLUSH_INTERVAL, HIDDEN_SAVER_FLUSH_INTERVAL,
+    OUTPUT_ARENA_BLOCK_BYTES, OUTPUT_ROPE_COPY_MAX_BYTES, OutputArena, OutputRope,
 };
 use attach_tap::{AttachTap, AttachTaps};
 pub(crate) mod snapshot_attach;

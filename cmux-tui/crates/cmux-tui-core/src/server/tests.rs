@@ -552,6 +552,7 @@ mod client_sizing;
 mod deferred_commands;
 mod detach_and_browser;
 mod event_shape_tests;
+mod hidden_output;
 mod host_size_policy;
 mod identify_and_protocol;
 mod kitty_share;

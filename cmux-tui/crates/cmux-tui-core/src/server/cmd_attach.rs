@@ -570,6 +570,14 @@ fn attach_view(
             return Err(error.into());
         }
     };
+    if let Some(lease) = &lease {
+        mux.control_clients.register_hidden_output(
+            client,
+            surface_id,
+            lease,
+            attach.stream.hidden_output(),
+        );
+    }
     let shape = AttachWireShape {
         color_overrides: mux
             .control_clients

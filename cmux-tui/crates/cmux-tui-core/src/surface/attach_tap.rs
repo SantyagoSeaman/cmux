@@ -18,8 +18,15 @@ use super::*;
 use bytes::Bytes;
 use std::ops::DerefMut;
 
+mod hidden_batch;
 mod output_arena;
 mod output_rope;
+use hidden_batch::HiddenBatch;
+pub(crate) use hidden_batch::HiddenOutput;
+#[cfg(test)]
+pub(super) use hidden_batch::{
+    HIDDEN_FLUSH_BYTES, HIDDEN_FLUSH_INTERVAL, HIDDEN_SAVER_FLUSH_INTERVAL,
+};
 #[cfg(test)]
 pub(super) use output_arena::OUTPUT_ARENA_BLOCK_BYTES;
 pub(super) use output_arena::OutputArena;
@@ -67,19 +74,39 @@ pub struct AttachFrameReceiver {
 }
 
 impl AttachFrameReceiver {
-    fn pop_item(queue: &mut AttachTapQueue) -> Option<QueuedFrame> {
+    /// The next item the worker may take at `now`: none while a hidden
+    /// viewer's batch is held (`AttachTapQueue::held_until`).
+    fn pop_item(queue: &mut AttachTapQueue, now: Instant) -> Option<QueuedFrame> {
+        if queue.held_until(now).is_some() {
+            return None;
+        }
         let item = queue.frames.pop_front()?;
         queue.retained_bytes = queue.retained_bytes.saturating_sub(item.retained_bytes());
         Some(item)
+    }
+
+    /// Wait for the queue to change, at most until `until`.
+    fn wait<'a>(
+        &self,
+        queue: std::sync::MutexGuard<'a, AttachTapQueue>,
+        until: Option<Instant>,
+    ) -> std::sync::MutexGuard<'a, AttachTapQueue> {
+        match until {
+            None => self.state.ready.wait(queue).unwrap(),
+            Some(until) => {
+                let remaining = until.saturating_duration_since(Instant::now());
+                self.state.ready.wait_timeout(queue, remaining).unwrap().0
+            }
+        }
     }
 
     /// The next frame of a plain receiver. Only a snapshot viewer that opted
     /// into local history is ever offered a local READY, and it reads its
     /// queue with `recv_viewer_event`; any other item is skipped. The caller
     /// releases the queue lock before it joins the frame.
-    fn pop(queue: &mut AttachTapQueue) -> Option<TakenFrame> {
+    fn pop(queue: &mut AttachTapQueue, now: Instant) -> Option<TakenFrame> {
         loop {
-            match Self::pop_item(queue)? {
+            match Self::pop_item(queue, now)? {
                 QueuedFrame::Output(rope) => return Some(TakenFrame::Output(rope)),
                 QueuedFrame::Frame(frame) => return Some(TakenFrame::Frame(frame)),
                 QueuedFrame::LocalReady(_) => {}
@@ -90,36 +117,45 @@ impl AttachFrameReceiver {
     pub fn recv(&self) -> Result<AttachFrame, RecvError> {
         let mut queue = self.state.queue.lock().unwrap();
         loop {
-            if let Some(frame) = Self::pop(&mut queue) {
+            let now = Instant::now();
+            if let Some(frame) = Self::pop(&mut queue, now) {
                 drop(queue);
                 return Ok(frame.into_frame());
             }
             if !queue.sender_alive {
                 return Err(RecvError);
             }
-            queue = self.state.ready.wait(queue).unwrap();
+            let held = queue.held_until(now);
+            queue = self.wait(queue, held);
         }
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<AttachFrame, RecvTimeoutError> {
-        let started = Instant::now();
+        self.recv_until(None, Instant::now() + timeout)
+    }
+
+    /// A frame by `deadline`; `Timeout` once it passes, or once `interrupt`
+    /// has fired with nothing to take.
+    fn recv_until(
+        &self,
+        interrupt: Option<&crate::stream_interrupt::StreamInterrupt>,
+        deadline: Instant,
+    ) -> Result<AttachFrame, RecvTimeoutError> {
         let mut queue = self.state.queue.lock().unwrap();
         loop {
-            if let Some(frame) = Self::pop(&mut queue) {
+            let now = Instant::now();
+            if let Some(frame) = Self::pop(&mut queue, now) {
                 drop(queue);
                 return Ok(frame.into_frame());
             }
             if !queue.sender_alive {
                 return Err(RecvTimeoutError::Disconnected);
             }
-            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-                return Err(RecvTimeoutError::Timeout);
-            };
-            let (next, result) = self.state.ready.wait_timeout(queue, remaining).unwrap();
-            queue = next;
-            if result.timed_out() && queue.frames.is_empty() {
+            if interrupt.is_some_and(|interrupt| interrupt.is_fired()) || now >= deadline {
                 return Err(RecvTimeoutError::Timeout);
             }
+            let until = queue.held_until(now).map_or(deadline, |held| held.min(deadline));
+            queue = self.wait(queue, Some(until));
         }
     }
 
@@ -141,9 +177,13 @@ impl AttachFrameReceiver {
         interrupt: &crate::stream_interrupt::StreamInterrupt,
         deadline: Option<Instant>,
     ) -> Result<AttachFrame, RecvTimeoutError> {
+        if let Some(deadline) = deadline {
+            return self.recv_until(Some(interrupt), deadline);
+        }
         let mut queue = self.state.queue.lock().unwrap();
         loop {
-            if let Some(frame) = Self::pop(&mut queue) {
+            let now = Instant::now();
+            if let Some(frame) = Self::pop(&mut queue, now) {
                 drop(queue);
                 return Ok(frame.into_frame());
             }
@@ -153,21 +193,45 @@ impl AttachFrameReceiver {
             if interrupt.is_fired() {
                 return Err(RecvTimeoutError::Timeout);
             }
-            queue = match deadline {
-                None => self.state.ready.wait(queue).unwrap(),
-                Some(deadline) => {
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        return Err(RecvTimeoutError::Timeout);
-                    };
-                    self.state.ready.wait_timeout(queue, remaining).unwrap().0
-                }
-            };
+            let held = queue.held_until(now);
+            queue = self.wait(queue, held);
         }
     }
 
     pub fn try_recv(&self) -> Result<AttachFrame, TryRecvError> {
+        self.try_recv_at(Instant::now())
+    }
+
+    /// The next frame as of `at`, the batch clock, waiting up to `wait` of
+    /// real time for one to become takeable (an urgent flush, a show).
+    #[cfg(test)]
+    pub(crate) fn recv_at(
+        &self,
+        at: Instant,
+        wait: Duration,
+    ) -> Result<AttachFrame, RecvTimeoutError> {
+        let deadline = Instant::now() + wait;
         let mut queue = self.state.queue.lock().unwrap();
-        if let Some(frame) = Self::pop(&mut queue) {
+        loop {
+            if let Some(frame) = Self::pop(&mut queue, at) {
+                drop(queue);
+                return Ok(frame.into_frame());
+            }
+            if !queue.sender_alive {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            if Instant::now() >= deadline {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            queue = self.wait(queue, Some(deadline));
+        }
+    }
+
+    /// [`Self::try_recv`] as of `now`, the time a hidden viewer's batch is
+    /// judged due by.
+    pub(crate) fn try_recv_at(&self, now: Instant) -> Result<AttachFrame, TryRecvError> {
+        let mut queue = self.state.queue.lock().unwrap();
+        if let Some(frame) = Self::pop(&mut queue, now) {
             drop(queue);
             Ok(frame.into_frame())
         } else if queue.sender_alive {
@@ -461,6 +525,8 @@ pub(super) struct AttachTapQueue {
     /// The viewer reflows its own history: a resize reaches it as a
     /// local-history READY while it is not behind.
     local_history: bool,
+    /// The view is hidden: its output is held in batches (hidden_batch.rs).
+    hidden: Option<HiddenBatch>,
 }
 
 impl AttachTapQueue {
@@ -530,6 +596,11 @@ impl AttachFrameReceiver {
         SnapshotRequestHandle { state: Arc::downgrade(&self.state) }
     }
 
+    /// The handle that hides and shows this viewer's output.
+    pub(crate) fn hidden_output(&self) -> HiddenOutput {
+        HiddenOutput::new(&self.state)
+    }
+
     /// Next event of a snapshot viewer: a pending snapshot comes before any
     /// frame. Blocks until an event, `deadline`, or `interrupt`.
     pub(crate) fn recv_viewer_event(
@@ -542,7 +613,8 @@ impl AttachFrameReceiver {
             if queue.needs_snapshot {
                 return Ok(ViewerEvent::Snapshot);
             }
-            match Self::pop_item(&mut queue) {
+            let now = Instant::now();
+            match Self::pop_item(&mut queue, now) {
                 Some(QueuedFrame::Output(rope)) => {
                     drop(queue);
                     return Ok(ViewerEvent::Frame(rope.into_frame()));
@@ -554,18 +626,14 @@ impl AttachFrameReceiver {
             if !queue.sender_alive {
                 return Err(RecvTimeoutError::Disconnected);
             }
-            if interrupt.is_fired() {
+            if interrupt.is_fired() || deadline.is_some_and(|deadline| now >= deadline) {
                 return Err(RecvTimeoutError::Timeout);
             }
-            queue = match deadline {
-                None => self.state.ready.wait(queue).unwrap(),
-                Some(deadline) => {
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        return Err(RecvTimeoutError::Timeout);
-                    };
-                    self.state.ready.wait_timeout(queue, remaining).unwrap().0
-                }
+            let until = match (queue.held_until(now), deadline) {
+                (Some(held), Some(deadline)) => Some(held.min(deadline)),
+                (held, deadline) => held.or(deadline),
             };
+            queue = self.wait(queue, until);
         }
     }
 
@@ -648,6 +716,7 @@ impl AttachTap {
                 resyncs: 0,
                 snapshot_deferred: false,
                 local_history: false,
+                hidden: None,
             }),
             ready: Condvar::new(),
         });
@@ -729,11 +798,26 @@ impl AttachTap {
         {
             return self.overflow(queue);
         }
+        let output = matches!(item, QueuedFrame::Output(_));
+        let was_empty = queue.frames.is_empty();
         queue.retained_bytes = queue.retained_bytes.saturating_add(item_bytes);
         queue.frames.push_back(item);
+        let wake = queue.note_queued(output, was_empty, Instant::now());
         drop(queue);
-        self.state.ready.notify_one();
+        if wake {
+            self.state.ready.notify_one();
+        }
         true
+    }
+
+    /// Send a hidden viewer's held output now: it rang a bell, asked for a
+    /// desktop notification or changed the title.
+    pub(super) fn flush_held(&self) {
+        let mut queue = self.state.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if queue.flush_held() {
+            drop(queue);
+            self.state.ready.notify_one();
+        }
     }
 
     /// Overflow: a legacy viewer disconnects, a snapshot viewer falls behind.
@@ -795,8 +879,11 @@ impl AttachTap {
                         .retained_bytes
                         .saturating_sub(previous_bytes)
                         .saturating_add(merged_bytes);
+                    let wake = queue.note_queued(true, false, Instant::now());
                     drop(queue);
-                    self.state.ready.notify_one();
+                    if wake {
+                        self.state.ready.notify_one();
+                    }
                     return true;
                 }
                 AttachFrameMerge::Unmerged(unmerged) => frame = unmerged,

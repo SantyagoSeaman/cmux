@@ -242,7 +242,9 @@ impl HostedReader {
             journal_target = None;
             // Bells rung by this transition's parser work, emitted with
             // neither the terminal nor the geometry lock held.
-            self.pending_bells.publish(&mux, surface.id);
+            if self.pending_bells.publish(&mux, surface.id) {
+                pty.flush_held_attach_output();
+            }
         }
         frames.abandon();
         Some(StreamEnd {

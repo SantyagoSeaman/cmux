@@ -29,11 +29,11 @@ impl PendingBells {
 
     /// Emit one `Bell` event per counted bell, and mark the terminal's tab for
     /// attention like a notification (at most once per cooldown). Call without
-    /// the terminal or geometry lock held.
-    pub(super) fn publish(&self, mux: &Weak<Mux>, surface: SurfaceId) {
+    /// the terminal or geometry lock held. Returns whether a bell rang.
+    pub(super) fn publish(&self, mux: &Weak<Mux>, surface: SurfaceId) -> bool {
         let rung = self.rung.swap(0, Ordering::AcqRel);
         if rung == 0 {
-            return;
+            return false;
         }
         if let Some(mux) = mux.upgrade() {
             for _ in 0..rung {
@@ -43,6 +43,7 @@ impl PendingBells {
                 mux.post_bell_notification(surface);
             }
         }
+        true
     }
 
     /// Whether a bell at `now` posts a notification, recording it when it does.

@@ -452,6 +452,7 @@ impl ClientRegistry {
         if let Some(lease) = &removed_lease {
             attached.view_sizes.remove(lease);
             attached.read_only_leases.remove(lease);
+            attached.hidden_outputs.remove(lease);
         }
         let rollback = attached.size_rollbacks.remove(&stream);
         if let Some(removed) = rollback {

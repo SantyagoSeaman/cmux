@@ -858,6 +858,14 @@ fn attach(
         outbound_stream.id,
         stream.requests.clone(),
     );
+    if let Some(lease) = &lease {
+        mux.control_clients.register_hidden_output(
+            client,
+            surface_id,
+            lease,
+            stream.receiver.hidden_output(),
+        );
+    }
     let worker = SnapshotWorker {
         mux: mux.clone(),
         client,

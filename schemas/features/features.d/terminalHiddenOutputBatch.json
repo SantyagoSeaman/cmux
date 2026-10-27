@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "terminalHiddenOutputBatch",
+  "owner": "Performance Lead",
+  "description": "A terminal view hidden in place gets its output at most once per second (every 4 s in Energy Saver) or at 256 KB; a bell, desktop notification, title change or exit sends it at once, and showing the view sends it in the same turn.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "daemon",
+  "params": [],
+  "stories": ["memory-hidden"],
+  "sticky": false,
+  "runtimeMutable": false
+}

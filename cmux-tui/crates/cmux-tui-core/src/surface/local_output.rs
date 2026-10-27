@@ -322,7 +322,10 @@ impl OutputPublisher {
             pty.request_frame(generation);
             // Mux events take `Mux::state`; publish them only after
             // the terminal lock is released (see PtyTerminalRuntime).
-            self.pending_bells.publish(mux, surface.id);
+            let rang = self.pending_bells.publish(mux, surface.id);
+            if rang || title_update.is_some() || !terminal_notifications.is_empty() {
+                pty.flush_held_attach_output();
+            }
             if let Some(title) = title_update
                 && let Some(mux) = mux.upgrade()
             {

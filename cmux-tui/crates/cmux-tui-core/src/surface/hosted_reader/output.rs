@@ -127,6 +127,9 @@ impl HostedReader {
         surface.publish_pending_progress();
         pty.stream_progress.notify();
         pty.request_frame(generation);
+        if title_update.is_some() || !terminal_notifications.is_empty() {
+            pty.flush_held_attach_output();
+        }
         if let Some(title) = title_update
             && let Some(mux) = mux.upgrade()
         {

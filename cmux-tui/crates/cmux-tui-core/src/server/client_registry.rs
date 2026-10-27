@@ -103,6 +103,9 @@ pub(super) struct AttachedSurface {
     pub(super) geometry_lease: Option<String>,
     /// Leases of `terminal.attach read_only` views: they watch and never size.
     pub(super) read_only_leases: HashSet<String>,
+    /// Each leased byte view's queue, to hold its output while it is hidden
+    /// (hidden_output.rs).
+    pub(super) hidden_outputs: HashMap<String, crate::surface::HiddenOutput>,
 }
 
 pub(super) struct DetachedSurface {
@@ -333,6 +336,8 @@ pub(crate) struct ClientRegistry {
     #[cfg(unix)]
     pub(super) agent_sessions: agent_session_attach::AgentSessions,
     pub(crate) snapshot_viewers: terminal_snapshot::SnapshotViewers,
+    /// `terminalHiddenOutputBatch` (hidden_output.rs).
+    pub(super) hidden_output: super::hidden_output::HiddenOutputGate,
     pub(super) apps: crate::apps::AppsSlot,
     /// Script sessions by connection (`script-*`, crate::scripts).
     pub(crate) scripts: crate::scripts::ScriptsSlot,
@@ -402,6 +407,7 @@ impl ClientRegistry {
             #[cfg(unix)]
             agent_sessions: Default::default(),
             snapshot_viewers: Default::default(),
+            hidden_output: super::hidden_output::HiddenOutputGate::from_env(),
             apps: crate::apps::AppsSlot::default(),
             scripts: crate::scripts::ScriptsSlot::default(),
             origin_clock: Default::default(),

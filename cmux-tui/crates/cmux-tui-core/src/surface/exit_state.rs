@@ -151,6 +151,8 @@ pub(super) fn publish_local_exit_if_ready(surface: &Arc<Surface>) {
         return;
     }
     pty.dead.store(true, Ordering::Release);
+    // Its last output reaches hidden views with the exit, not a batch later.
+    pty.flush_held_attach_output();
     if let Some(mux) = pty.mux.upgrade() {
         mux.surface_exited(surface.id);
     }

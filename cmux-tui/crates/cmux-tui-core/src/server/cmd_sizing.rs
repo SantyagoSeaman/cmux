@@ -126,6 +126,11 @@ pub(super) fn set_size_counts(
     let changed = mux
         .set_terminal_size_counts(surface, &participant, counts)
         .ok_or_else(|| anyhow::anyhow!("unknown participant {participant}"))?;
+    if let Some(lease) = &lease {
+        // The caller's own view hid or shows again: its output batches, or
+        // what it held is sent now.
+        super::hidden_output::apply(mux, client, surface, lease, counts);
+    }
     Ok(json!({"outcome": "applied", "changed": changed, "participant": participant}))
 }
 

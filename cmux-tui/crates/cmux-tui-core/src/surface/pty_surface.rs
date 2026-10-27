@@ -136,6 +136,14 @@ impl PtySurface {
         sent
     }
 
+    /// Hidden viewers get their held output now: it rang a bell, asked for a
+    /// desktop notification or changed the title (attach_tap/hidden_batch.rs).
+    pub(super) fn flush_held_attach_output(&self) {
+        for tap in self.taps.lock().unwrap().iter() {
+            tap.flush_held();
+        }
+    }
+
     /// The first output a followed terminal sends an attachment
     /// (`CMUX_TUI_DEBUG_SPANS`).
     fn mark_attach_output_sent(&self) {
