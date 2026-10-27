@@ -55,13 +55,78 @@ impl Surface {
         })
     }
 
-    /// Launch a new host and shell for terminal `terminal_id` whose previous
-    /// shell was lost with its host (cx-6so.49 L2): the same terminal and
-    /// tab identity (`resource_identity`, the slot `id`), a new incarnation.
-    /// The host applies `seed` (VT replay of the previous screen) to its
-    /// parser before the shell's first byte. The terminal row must be
-    /// `launching`; activation waits until the caller commits the respawn.
-    pub(crate) fn respawn_hosted(
+    /// A new shell for terminal `terminal_id` whose previous shell ended or
+    /// was lost (cx-6so.49 L2, a user restart): the same terminal and tab
+    /// identity (`resource_identity`, the slot `id`), a new incarnation, its
+    /// parser seeded with `seed` (VT replay of the previous screen). It runs
+    /// where a new terminal runs (`spawn_with_terminal_id_and_resource_identity_at_cell_pixels`):
+    /// on the holder, or on a new host process in the hosts model.
+    pub(crate) fn respawn(
+        id: SurfaceId,
+        opts: SurfaceOptions,
+        mux: Weak<Mux>,
+        terminal_id: crate::terminal_host::TerminalId,
+        resource_identity: TabResourceIdentity,
+        cell_pixels: (u16, u16),
+        seed: &[u8],
+    ) -> anyhow::Result<Arc<Surface>> {
+        #[cfg(unix)]
+        if crate::holder_runtime::enabled() {
+            return Self::respawn_on_holder(
+                id,
+                opts,
+                mux,
+                terminal_id,
+                resource_identity,
+                cell_pixels,
+                seed,
+            );
+        }
+        Self::respawn_hosted(id, opts, mux, terminal_id, resource_identity, cell_pixels, seed)
+    }
+
+    /// [`Surface::respawn`] on the holder. The holder starts the shell at
+    /// once, so a caller that loses the respawn ends it with `Surface::kill`.
+    #[cfg(unix)]
+    fn respawn_on_holder(
+        id: SurfaceId,
+        opts: SurfaceOptions,
+        mux: Weak<Mux>,
+        terminal_id: crate::terminal_host::TerminalId,
+        resource_identity: TabResourceIdentity,
+        cell_pixels: (u16, u16),
+        seed: &[u8],
+    ) -> anyhow::Result<Arc<Surface>> {
+        let host_root = opts
+            .terminal_host_root
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("respawn needs a terminal host root"))?;
+        let (opts, terminal_public_id, kitty_reservation) =
+            Self::spawn_prelude(id, opts, &mux, Some(&resource_identity), KittyQuota::AtLaunch)?;
+        let initial_kitty_limits = kitty_reservation
+            .as_ref()
+            .map(crate::mux::KittyImageBudgetReservation::initial_limits)
+            .unwrap_or_default();
+        Self::spawn_on_holder(HolderSpawn {
+            id,
+            opts,
+            mux,
+            host_root,
+            terminal_id: Some(terminal_id),
+            seed: seed.to_vec(),
+            terminal_public_id,
+            resource_identity: Some(resource_identity),
+            kitty_reservation,
+            initial_kitty_limits,
+            cell_pixels,
+        })
+    }
+
+    /// [`Surface::respawn`] in the hosts model: a new host process. The host
+    /// applies `seed` to its parser before the shell's first byte. The
+    /// terminal row must be `launching`; activation waits until the caller
+    /// commits the respawn.
+    fn respawn_hosted(
         id: SurfaceId,
         opts: SurfaceOptions,
         mux: Weak<Mux>,

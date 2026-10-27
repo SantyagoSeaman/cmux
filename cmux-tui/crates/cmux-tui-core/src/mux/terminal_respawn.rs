@@ -516,7 +516,7 @@ impl Mux {
         }
         let terminal_id = TerminalId::from_hex(&plan.terminal_id)
             .context("terminal id is not a canonical UUIDv4")?;
-        let surface = Surface::respawn_hosted(
+        let surface = Surface::respawn(
             plan.slot,
             launch.options,
             Arc::downgrade(self),

@@ -311,3 +311,131 @@ fn the_hosts_opt_out_still_starts_a_terminal_host() {
     assert!(names.contains(&created_id.as_str()), "no host record for {created_id}: {names:?}");
     assert!(!daemon.host_processes().is_empty(), "no __terminal-host process");
 }
+
+impl Daemon {
+    /// A protocol 2 request (a mutation when it has an idempotency key):
+    /// its result.
+    fn operation(&self, key: &str, operation: &str, params: Value, mutation: bool) -> Value {
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+        let mut body = json!({"protocol": "cmux.protocol/2", "type": "request", "id": key,
+            "operation": operation, "params": params});
+        if mutation {
+            body["idempotency_key"] = json!(key);
+        }
+        (&stream).write_all(format!("{body}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["ok"], true, "{operation} failed: {reply}");
+        reply["result"].clone()
+    }
+
+    /// The first tab of the workspace named `name`.
+    fn tab_of(&self, name: &str) -> Value {
+        let tree = self.request(json!({"cmd": "list-workspaces"}));
+        tree["workspaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|workspace| workspace["name"] == name)
+            .flat_map(|workspace| workspace["screens"].as_array().into_iter().flatten())
+            .flat_map(|screen| screen["panes"].as_array().into_iter().flatten())
+            .flat_map(|pane| pane["tabs"].as_array().into_iter().flatten())
+            .next()
+            .cloned()
+            .unwrap_or_else(|| panic!("workspace {name} has no tab: {tree}"))
+    }
+
+    /// The shell in `surface` evaluates `$((40 + 2))`: a typed line alone
+    /// shows the expression, not its value.
+    fn evaluates(&self, surface: u64, tag: &str) {
+        let line = format!("echo {tag}-$((40 + 2))\n");
+        self.request(json!({"cmd": "send", "surface": surface, "text": line}));
+        let expected = format!("{tag}-42");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let screen = self.request(json!({"cmd": "read-screen", "surface": surface}));
+            if screen["text"].as_str().is_some_and(|screen| screen.contains(&expected)) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "surface {surface} never evaluated: {screen}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// A process end kept by `on_exit` keep, then `restart-tab` (what
+/// `cmux tab <id> restart` sends): the same terminal runs a new shell under
+/// a new incarnation, and the restart starts no terminal host. The restart
+/// goes through the L2 respawn worker the automatic respawn uses.
+fn restarts_a_kept_exit_without_a_terminal_host(name: &str, env: &[(&'static str, &'static str)]) {
+    const WORKSPACE: &str = "restart kept";
+    let mut daemon = Daemon::start(name, env);
+    let created = daemon.operation(
+        "restart-kept-workspace",
+        "workspace.create",
+        json!({"machine": "current", "session": "current", "name": WORKSPACE,
+            "initial_content": "empty"}),
+        true,
+    );
+    let workspace = created["value"]["workspace_id"].as_str().unwrap().to_string();
+    let run = daemon.operation(
+        "restart-kept-run",
+        "workspace.run",
+        json!({"machine": "current", "session": "current", "workspace": workspace,
+            "argv": ["/bin/sh", "-c", "printf 'kept-exit-marker\\n'; exit 9"], "on_exit": "keep"}),
+        true,
+    );
+    let public_terminal = run["value"]["terminal_id"].as_str().unwrap().to_string();
+    let tab = run["value"]["tab_id"].as_str().unwrap().to_string();
+    let waited = daemon.operation(
+        "restart-kept-wait",
+        "terminal.wait_exit",
+        json!({"machine": "current", "session": "current", "terminal": public_terminal,
+            "timeout_ms": "10000"}),
+        false,
+    );
+    assert_eq!(waited["state"], "exited", "{waited}");
+    let dead = daemon.tab_of(WORKSPACE);
+    assert_eq!(dead["dead"], true, "{dead}");
+    let terminal_id = dead["terminal_id"].as_str().unwrap().to_string();
+    let ended = daemon.request(json!({"cmd": "resolve-terminal", "terminal_id": terminal_id}));
+    daemon.assert_no_terminal_host("run");
+
+    let restarted = daemon.request(json!({"cmd": "restart-tab", "surface": tab}));
+    assert_eq!(restarted["terminal"], public_terminal.as_str(), "{restarted}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let surface = loop {
+        let resolved =
+            daemon.request(json!({"cmd": "resolve-terminal", "terminal_id": terminal_id}));
+        let tab = daemon.tab_of(WORKSPACE);
+        if resolved["lifecycle"] == "running"
+            && resolved["terminal_incarnation"] != ended["terminal_incarnation"]
+            && tab["dead"] == false
+            && let Some(surface) = tab["surface"].as_u64()
+        {
+            break surface;
+        }
+        assert!(Instant::now() < deadline, "restart-tab never ran {terminal_id}: {resolved} {tab}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    daemon.track(surface);
+    daemon.evaluates(surface, "restarted");
+    daemon.assert_no_terminal_host("restart-tab");
+}
+
+/// A restart of a dead tab in the default env.
+#[test]
+fn the_default_env_restarts_a_kept_exit_without_a_terminal_host() {
+    restarts_a_kept_exit_without_a_terminal_host("restart-default", &[]);
+}
+
+/// The same with the holder model named through its feature list.
+#[test]
+fn the_holder_model_restarts_a_kept_exit_without_a_terminal_host() {
+    restarts_a_kept_exit_without_a_terminal_host(
+        "restart-holder",
+        &[("CMUX_ENABLE_FEATURES", "terminalHolder")],
+    );
+}
