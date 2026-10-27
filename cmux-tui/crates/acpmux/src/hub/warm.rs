@@ -56,7 +56,8 @@ impl Hub {
             if session.status() == SessionStatus::Closed || session.closing.load(Ordering::SeqCst) {
                 continue;
             }
-            let stops = *requested_stops.get(&session.id).unwrap_or(&session.stops.load(Ordering::SeqCst));
+            let stops =
+                *requested_stops.get(&session.id).unwrap_or(&session.stops.load(Ordering::SeqCst));
             if expected_stops.get(&session.id).is_some_and(|expected| *expected != stops) {
                 continue;
             }
@@ -91,7 +92,7 @@ impl Hub {
                         "stops": current_stops,
                         "error": error
                     }));
-                },
+                }
             }
         }
         (warmed, failed)
