@@ -1,6 +1,7 @@
 //! Terminal registry record helpers: launch specs and create fingerprints, lifecycle names, template terminals, and terminal transition and workspace commits.
 
 use super::*;
+use crate::workspace_registry::RegistryIntent;
 
 pub(super) fn terminal_launch_spec(options: &SurfaceOptions) -> Value {
     let cmux_env = options
@@ -96,6 +97,10 @@ pub(super) fn is_template_terminal(terminal: &RegistryTerminal) -> bool {
     terminal.launch_spec == template_terminal_launch_spec()
 }
 
+/// Admit one daemon-local terminal row (reserve, import, recover, claim) and
+/// return its revision. The journal writer commits admitted rows in admit
+/// order after the caller moves on (F10, p05-ipc-120): a tombstone admitted
+/// later gets a later revision and lands after this row.
 #[track_caller]
 pub(super) fn commit_terminal_transition(
     registry: &mut WorkspaceRegistry,
@@ -104,7 +109,7 @@ pub(super) fn commit_terminal_transition(
     terminal: &RegistryTerminal,
 ) -> anyhow::Result<u64> {
     let mutation = WorkspaceMutation::daemon_local("cmux-tui-runtime");
-    let commit = registry.commit_terminal(
+    let intent = registry.prepare_terminal_commit(
         &mutation,
         &serde_json::json!({
             "op": operation,
@@ -124,6 +129,8 @@ pub(super) fn commit_terminal_transition(
             "state": terminal.lifecycle,
         }),
     )?;
+    let commit =
+        registry.admit_and_enqueue(RegistryIntent::Terminal(intent))?.receipt.into_terminal()?;
     Ok(commit.revision)
 }
 
