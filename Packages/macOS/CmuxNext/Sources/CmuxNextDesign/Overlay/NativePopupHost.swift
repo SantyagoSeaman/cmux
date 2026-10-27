@@ -69,6 +69,10 @@ public final class NativePopupHost {
                      trailing: Bool = false, centered: Bool = false, makeKey: Bool = false,
                      entrance: Bool = true) -> (frame: CGRect, side: PopupPlacement.Side)? {
         guard window.isVisible, let screen = PopupPlacement.screen(for: anchor, fallback: window) else { return nil }
+        func __cpu() -> Double { var ts = timespec(); clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); return Double(ts.tv_sec) * 1e3 + Double(ts.tv_nsec) / 1e6 }
+        var __t = __cpu(); var __marks: [String] = []
+        func __mark(_ n: String) { let now = __cpu(); __marks.append("\(n)=\(String(format: "%.2f", now - __t))"); __t = now }
+        defer { print("POPUP-PHASES " + __marks.joined(separator: " ")) }
         let (frame, side) = PopupPlacement.frame(anchor: anchor, size: size, preferred: preferred, trailing: trailing,
                                                  centered: centered, screen: screen.visibleFrame)
         generation += 1
@@ -76,19 +80,26 @@ public final class NativePopupHost {
         let opening = !panel.isVisible || isClosing
         isClosing = false
         self.anchor = anchor
+        __mark("place")
         panel.setFrame(PopupStyle.standard.windowFrame(forCard: frame), display: true)
+        __mark("setFrame")
         if panel.parent !== window {
             panel.parent?.removeChildWindow(panel)
             window.addChildWindow(panel, ordered: .above)
         }
+        __mark("child")
         panel.level = window.level
         // Opens like every native popup (no flash); a popup already open stays put.
         if opening, !panel.isVisible { panel.alphaValue = 0 }
+        __mark("level")
         if makeKey { panel.makeKeyAndOrderFront(nil) } else { panel.orderFront(nil) }
+        __mark("order")
         if opening {
             if entrance { panel.openPopup(pivot: panel.popupPivot(toward: anchor)) } else { panel.showPopupAtOnce() }
         }
+        __mark("entrance")
         watch(window)
+        __mark("watch")
         return (frame, side)
     }
 

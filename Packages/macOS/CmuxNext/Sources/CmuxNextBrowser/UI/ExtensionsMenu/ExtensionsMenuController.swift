@@ -151,10 +151,15 @@ final class ExtensionsMenuController {
     func prepare(host: any BrowserExtensionActionHosting) {
         guard !isShown else { return }
         self.host = host
+        func __cpu() -> Double { var ts = timespec(); clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); return Double(ts.tv_sec) * 1e3 + Double(ts.tv_nsec) / 1e6 }
+        var __t = __cpu()
         render()
+        let __r = __cpu() - __t; __t = __cpu()
         content.layoutSubtreeIfNeeded()
         card.layoutSubtreeIfNeeded()
+        let __l = __cpu() - __t; __t = __cpu()
         warmPanel()
+        print("PREPARE-PHASES render=\(String(format: "%.2f", __r)) layout=\(String(format: "%.2f", __l)) warm=\(String(format: "%.2f", __cpu() - __t))")
     }
 
     /// Whether the panel has been on screen once.
