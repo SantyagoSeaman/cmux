@@ -5,11 +5,13 @@
 
 Stdlib only; runs on the Linux VM (no app). The registry file is read from the checkout, and its
 expected_differences go through the real diff.py, so a settled divergence between the arms fails
-and a settings or turn difference is explained.
+and a settings or turn difference is explained, but only in the motion-on diff: launch-config
+leaves the config arm and its expected_differences out.
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import re
@@ -24,6 +26,7 @@ if str(ORACLE) not in sys.path:
     sys.path.insert(0, str(ORACLE))
 
 import action_fixtures  # noqa: E402
+import oracle  # noqa: E402
 from action_fixtures import INCONSISTENT, MOTION_REGISTRY, NO_ARM, MotionArm, MotionArmError  # noqa: E402
 
 REPO = ORACLE.parents[2]
@@ -92,10 +95,14 @@ class RegistryTests(unittest.TestCase):
         # The readback differs by construction; switch_readback in the receipts checks it instead.
         self.assertIn(self.arm.readback, [r["pointer"] for r in self.entry["expected_differences"]])
 
-    def test_expiry_is_within_fourteen_days(self) -> None:
-        import datetime as dt
-        days = (dt.date.fromisoformat(self.entry["expires"]) - dt.date.fromisoformat(self.entry["created"])).days
-        self.assertTrue(0 <= days <= 14, days)
+    def test_a_standing_suite_has_no_expiry_and_stays_out_of_the_deletion_queue(self) -> None:
+        """motion-on is a run mode (spec 3B), not a refactor: switches.py --expired never asks to delete it or
+        ui.animations.enabled."""
+        self.assertNotIn("expires", self.entry)
+        result = subprocess.run([sys.executable, "-I", str(ORACLE / "switches.py"), "--expired", "--today", "2099-01-01"],
+                                capture_output=True, text=True, check=False)
+        self.assertNotIn(MOTION_REGISTRY.name, result.stdout + result.stderr)
+        self.assertNotIn("ui.animations.enabled", result.stdout + result.stderr)
 
     def test_switches_check_accepts_the_registry_file(self) -> None:
         """switches.py --check validates the config arm: a settings row and a readback that reads it."""
@@ -153,10 +160,14 @@ class LaunchTests(unittest.TestCase):
         with self.assertRaises(MotionArmError):
             self.arm.launch_config({}, "launch-config")
 
-    def test_start_calls_record_spans_and_new_arm_overrides_reduce_motion(self) -> None:
-        self.assertEqual(self.arm.start_calls("old"), [("debug.motion", {"action": "start"})])
-        self.assertEqual(self.arm.start_calls("new"), [("debug.motion", {"action": "start"}),
-                                                       ("debug.motion", {"action": "reduce", "value": False})])
+    def test_start_calls_record_spans_and_pin_reduce_motion_off_on_both_arms(self) -> None:
+        """A host with Reduce Motion or calm mode on reads the same reduceMotion on both arms."""
+        for arm in ("old", "new"):
+            with self.subTest(arm=arm):
+                self.assertEqual(self.arm.start_calls(arm), [("debug.motion", {"action": "start"}),
+                                                             ("debug.motion", {"action": "reduce", "value": False})])
+        with self.assertRaises(MotionArmError):
+            self.arm.start_calls("launch-config")
         self.assertEqual(MotionArm.stop_call(), ("debug.motion", {"action": "stop"}))
         self.assertEqual(self.arm.arm_pointers(), ["/facets/settings/motion/enabled"])
 
@@ -186,7 +197,7 @@ class ReadbackTests(unittest.TestCase):
                          {"switch_readback": {"motion-on": "old"}, "switch_hits": {"motion-on": {"old": 1}}})
         self.assertEqual(self.arm.case_report("new", on, {"spans": [span, span]}),
                          {"switch_readback": {"motion-on": "new"}, "switch_hits": {"motion-on": {"new": 2}}})
-        # Something animated with the master switch off: a new-arm hit on the old arm (arm-not-applied).
+        # Something animated with the master switch off: a new-arm hit on the old arm (the run reads arm-mixed).
         self.assertEqual(self.arm.case_report("old", off, {"spans": [span]})["switch_hits"], {"motion-on": {"new": 1}})
         # Nothing animated on the motion-on arm: the case did not exercise it.
         self.assertEqual(self.arm.case_report("new", on, {"spans": []})["switch_hits"], {})
@@ -196,11 +207,29 @@ class ReadbackTests(unittest.TestCase):
         with self.assertRaises(MotionArmError):
             self.arm.case_report("new", on, {"recording": False})
 
+    def summary(self, arm: str, reports: list) -> dict:
+        cases = {f"actions/c{i}": {"attempts": 1, "outcome": "expected", "flaky": False} for i in range(len(reports))}
+        hits = oracle.sum_switch_hits(r["switch_hits"] for r in reports)
+        return oracle.run_summary(cases, hits=hits, config={"switch": "motion-on", "arm": arm}, dry_run=False,
+                                  infra_errors=[])
+
+    def test_a_span_on_the_old_arm_fails_the_run(self) -> None:
+        """One case animated with ui.animations.enabled=false: the old-arm run is arm-mixed, not ok."""
+        off = [snapshot(False)]
+        span = {"name": "tabs.slide", "ms": 180.0, "at_ms": 3.0}
+        clean = self.arm.case_report("old", off, {"spans": []})
+        leaked = self.arm.case_report("old", off, {"spans": [span]})
+        self.assertTrue(self.summary("old", [clean, clean])["ok"])
+        mixed = self.summary("old", [clean, leaked, clean])
+        self.assertEqual(mixed["switch_hits"], {"motion-on": {"old": 2, "new": 1}})
+        self.assertIs(mixed["arm_exercised"], False)
+        self.assertFalse(mixed["ok"])
+
 
 class SettledEqualityTests(unittest.TestCase):
     """The registry's expected_differences through diff.py: only settled snapshots must be equal."""
 
-    def run_diff(self, old: list, new: list) -> tuple:
+    def run_diff(self, old: list, new: list, expected: tuple = (MOTION_REGISTRY,)) -> tuple:
         with tempfile.TemporaryDirectory(prefix="motion-arm-") as tmp:
             dirs = []
             for name, points in (("old", old), ("new", new)):
@@ -213,7 +242,8 @@ class SettledEqualityTests(unittest.TestCase):
                     for cp, snap in points))
                 dirs.append(str(path))
             out = Path(tmp) / "divergence.json"
-            proc = subprocess.run([sys.executable, "-I", str(DIFF), *dirs, "--out", str(out), "--expected", str(MOTION_REGISTRY)],
+            flags = [arg for path in expected for arg in ("--expected", str(path))]
+            proc = subprocess.run([sys.executable, "-I", str(DIFF), *dirs, "--out", str(out), *flags],
                                   check=False, capture_output=True, text=True)
             return proc.returncode, json.loads(out.read_text(encoding="utf-8"))
 
@@ -231,6 +261,22 @@ class SettledEqualityTests(unittest.TestCase):
         code, doc = self.run_diff([("turn", snapshot(False)), ("settled", snapshot(False))],
                                   [("turn", snapshot(True, layout="A|B~")), ("settled", snapshot(True))])
         self.assertEqual(code, 0, doc)
+
+    def test_a_launch_config_turn_difference_still_diverges(self) -> None:
+        """motion-on is old on both sides of a default vs launch-config diff, so its turn and settings rules do
+        not apply there: a turn divergence of another switch stays a divergence."""
+        registry = oracle.load_switch_registry()
+        self.assertIn("motion-on", registry)
+        args = argparse.Namespace(base=None, head=None, switch=None, arm="launch-config", ref=None, binary=None,
+                                  product="app")
+        (_, launch), expected = oracle.diff_sides(args, registry)
+        self.assertNotIn("motion-on", launch.switches)
+        self.assertNotIn(MOTION_REGISTRY, expected)
+        turn = [("turn", snapshot(False)), ("settled", snapshot(False))]
+        code, doc = self.run_diff(turn, [("turn", snapshot(False, layout="A|B~")), ("settled", snapshot(False))],
+                                  expected=tuple(expected))
+        self.assertEqual(code, 1, doc)
+        self.assertEqual(doc["divergences"][0]["pointer"], "/facets/layout/probe")
 
     def test_reduce_motion_on_the_motion_on_arm_diverges(self) -> None:
         code, doc = self.run_diff([("settled", snapshot(False))], [("settled", snapshot(True, reduce=True))])

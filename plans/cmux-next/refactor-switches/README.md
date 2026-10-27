@@ -18,7 +18,7 @@ Check: `python3 -I scripts/cmux-next/oracle/switches.py --check` (`oracle.py swi
 | `config_arms`, `readback` | Config arms only. `config_arms`: the key's value on `old` and `new`. `readback`: the snapshot pointer where the product reports the applied value (its schema `x-oracle-source` `from` is the key); each case's `switch_readback` comes from it. |
 | `default` | The arm when nothing sets the switch. |
 | `planned` | The arm the refactor lands at; `--arm launch-config` runs every switch at it. |
-| `created`, `expires` | Days (UTC). `expires` is at most `created` + 14 days. |
+| `created`, `expires` | Days (UTC). `expires` is at most `created` + 14 days. A config arm has no `expires`: it is a standing run mode, not a refactor, and never enters the `--expired` queue. |
 | `suites` | The minimum suites a both-arm run covers. |
 | `expected_differences` | The arms' intended differences (diff.py `--expected`); `[]` when the arms must be equal. |
 | `old_paths` | Optional: the old arm's files, deleted with the switch. |
@@ -49,7 +49,8 @@ freezes that arm.
 (the `old` arm), and the `new` arm reruns the actions and journeys suites with animation on; settled
 snapshots must be equal. `scripts/cmux-next/oracle/action_fixtures/__init__.py` (`MotionArm`) turns the arm
 into the launch config, reads it back from `/facets/settings/motion/enabled` and counts its hits per case
-(`debug.motion` spans).
+(`debug.motion` spans). A config arm's `planned` is its `default`: `oracle.py diff --arm launch-config` leaves it
+out (and with it its `expected_differences`); `oracle.py diff --switch motion-on` runs both arms.
 
 The first switches (F6 holder, F1 layer hosting, F2 CEF helper, F7 intents, F8 discard) are task
 p15-oracle-232; they need the catalogs of p15-oracle-020 (`switches.rs`) and p15-oracle-180

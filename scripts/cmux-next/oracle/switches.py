@@ -41,21 +41,25 @@ configured trial that no code queried reports nothing; here the site counts the 
 - a file that does not parse or does not match the schema (normalize.py's validator, task 013):
   a missing `planned`, `owner` or `plan`, an unknown field, a bad arm, no key or two keys;
 - a `name` that is not the file stem;
-- `expires` before `created`, or more than MAX_LIFETIME_DAYS (14) after it;
+- `expires` before `created`, or more than MAX_LIFETIME_DAYS (14) after it (refactor switches only: the
+  schema refuses `expires` on a config arm and requires it on an app or daemon switch);
 - an app key that is not a raw value of `enum RefactorSwitchKey` in APP_CATALOG (task 180);
 - a daemon key that is not in `SWITCH_NAMES` of DAEMON_CATALOG (task 020): the daemon would not parse it;
 - a config arm (`config_key`, task 233) whose key is not a row of SETTINGS_SCHEMA, whose `config_arms`
   value the row does not accept, or whose `readback` is not a SNAPSHOT_SCHEMA value read from that key
-  (its x-oracle-source `from`): an arm the product never applies or never reports proves nothing;
+  (its x-oracle-source `from`): an arm the product never applies or never reports proves nothing; and
+  a config arm whose `planned` is not its `default` (launch-config leaves config arms at their default);
 - an app switch that a Swift source reads through a per-call closure (see `closure_reads`);
 - a `plan` or `old_paths` entry that does not exist, a suite that baselines.py does not classify,
   and an `expected_differences` list that diff.py refuses.
 `--check` does not read the date: an expired switch is the `--expired` queue (task 171), not a refusal.
 
 `--expired` (MQ-switch-expiry) prints, by `expires` day then name, one line per switch:
-    NAME expired=DAY owner=OWNER key=app:KEY|daemon:KEY|config:KEY catalog=PATH default=ARM keep=ARM delete=P1,P2,...
+    NAME expired=DAY owner=OWNER key=app:KEY|daemon:KEY catalog=PATH default=ARM keep=ARM delete=P1,P2,...
 `keep` is the `planned` arm. `delete` is the old arm's `old_paths` (only when `keep` is new) and the
 registry file; the owner also removes KEY's case from `catalog` and its reads. Values are shell-quoted.
+A config arm (`config_key`) is skipped: it is a standing virtual suite with no expiry, and its key is a
+settings row, not a switch catalog case.
 
 Catalog contracts this file reads (the producing tasks must keep them):
 - APP_CATALOG declares `enum RefactorSwitchKey: String` with one `case name = "raw.value"` (or a bare
@@ -315,6 +319,11 @@ def check_config_arm(data: Dict[str, Any], roots: Roots, settings: Optional[Dict
     return problems
 
 
+def is_config_arm(data: Dict[str, Any]) -> bool:
+    """A config arm (`config_key`): a standing virtual suite, not a refactor; it never expires."""
+    return "config_key" in data
+
+
 def relative(path: Path, repo: Path) -> str:
     try:
         return str(path.relative_to(repo))
@@ -348,10 +357,11 @@ def check_entry(path: Path, data: Dict[str, Any], schema: Any, roots: Roots, app
 
     if data["name"] != path.stem:
         refuse(f"name {data['name']!r} is not the file stem {path.stem!r}")
-    created, expires = parse_day(data["created"]), parse_day(data["expires"])
+    created = parse_day(data["created"])
+    expires = parse_day(data["expires"]) if "expires" in data else None
     if created is None:
         refuse(f"created {data['created']!r} is not a day (YYYY-MM-DD)")
-    if expires is None:
+    if "expires" in data and expires is None:
         refuse(f"expires {data['expires']!r} is not a day (YYYY-MM-DD)")
     if created and expires:
         lifetime = (expires - created).days
@@ -377,6 +387,9 @@ def check_entry(path: Path, data: Dict[str, Any], schema: Any, roots: Roots, app
     elif "config_key" in data:
         for problem in check_config_arm(data, roots, settings, snapshot):
             refuse(problem)
+        if data["planned"] != data["default"]:
+            refuse(f"config arm planned {data['planned']!r} is not its default {data['default']!r}: launch-config "
+                   "runs config arms at their default; only --switch runs the other arm")
     else:
         key = data["daemon_key"]
         if daemons is None:
@@ -462,12 +475,13 @@ class DeletionTask:
 
 def deletion_task(path: Path, data: Dict[str, Any], day: dt.date, roots: Roots) -> DeletionTask:
     """The registry file always goes; the old arm's files go only when the refactor keeps the new arm.
-    A switch planned at `old` is a refactor given up: its old paths stay and the key's reads go."""
+    A switch planned at `old` is a refactor given up: its old paths stay and the key's reads go.
+    A config arm has no deletion task (`expired` skips it): its key is a settings row, not a catalog case."""
+    if is_config_arm(data):
+        raise UsageError(f"{relative(path, roots.repo)}: a config arm does not expire and has no deletion task")
     keep = str(data.get("planned", "-"))
     if "app_key" in data:
         key, catalog = f"app:{data['app_key']}", roots.app_catalog
-    elif "config_key" in data:
-        key, catalog = f"config:{data['config_key']}", roots.settings_schema
     else:
         key, catalog = f"daemon:{data.get('daemon_key', '-')}", roots.daemon_catalog
     old_paths = [str(old) for old in data.get("old_paths") or []] if keep == "new" else []
@@ -488,6 +502,8 @@ def expired(roots: Roots, today: dt.date) -> Tuple[List[DeletionTask], List[Find
         data, error = load_entry(path)
         if data is None:
             unread.append(Finding(where, f"{error or 'unreadable'}; its expiry is unknown (run --check)"))
+            continue
+        if is_config_arm(data):
             continue
         day = parse_day(data.get("expires"))
         if day is None:
@@ -686,7 +702,7 @@ def config_entry(**overrides: Any) -> Dict[str, Any]:
     return selftest_entry(**{"name": "motion-on", "app_key": None, "config_key": "ui.animations.enabled",
                              "config_arms": {"old": False, "new": True}, "readback": "/facets/settings/motion/enabled",
                              "read": "launch", "planned": "old", "suites": ["actions", "journeys"],
-                             "expected_differences": [], "old_paths": None, **overrides})
+                             "expected_differences": [], "old_paths": None, "expires": None, **overrides})
 
 
 # (name, files {stem: entry}, extra Swift site or None, the substring every finding must hold; "" = pass)
@@ -743,6 +759,10 @@ SELFTEST_CASES: Sequence[Tuple[str, Dict[str, Dict[str, Any]], Optional[str], st
      "oneOf"),
     ("a readback without a config key is refused",
      {"layer-hosting": selftest_entry(readback="/facets/settings/motion/enabled")}, None, "config_key"),
+    ("a config arm with an expiry is refused", {"motion-on": config_entry(expires="2026-11-09")}, None, "oneOf"),
+    ("an app switch without an expiry is refused", {"layer-hosting": selftest_entry(expires=None)}, None, "oneOf"),
+    ("a config arm planned off its default is refused", {"motion-on": config_entry(planned="new")}, None,
+     "is not its default"),
 )
 
 
@@ -828,6 +848,13 @@ SELFTEST_EXPIRED: Sequence[Tuple[str, Dict[str, Dict[str, Any]], dt.date, List[s
      ["layer-hosting expired=2026-11-08 owner='Lawrence Chen' key=app:browser.layer-hosting "
       "catalog=Sources/RefactorSwitches.swift default=old keep=new "
       "delete=Sources/Old.swift,Sources,registry/layer-hosting.json"],
+     []),
+    ("a config arm never expires and emits no settings-schema removal",
+     {"motion-on": config_entry(), "stale-config": config_entry(name="stale-config", expires="2026-09-10"),
+      "holder": daemon_entry(expires="2026-10-30")},
+     dt.date(2026, 11, 20),
+     ["holder expired=2026-10-30 owner=perf-lead key=daemon:holder catalog=switches.rs default=old keep=new "
+      "delete=registry/holder.json"],
      []),
     ("an unreadable expiry is reported, the rest still listed",
      {"layer-hosting": selftest_entry(expires="2026-02-30"), "holder": daemon_entry(expires="2026-10-30")},

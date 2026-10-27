@@ -9,6 +9,7 @@ The Expectations tests run when expectations.py (p15-oracle-015) is beside this 
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import subprocess
@@ -208,6 +209,46 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(sum(view.receipt["counts"].values()), 24)
             self.assertEqual(view.receipt["unexpected"], ["alpha/case-000"])
             self.assertFalse(view.receipt["ok"])
+
+
+    def test_hits_on_the_other_arm_are_not_exercised(self):
+        """As switches.py --hits arm-mixed: a site that ran the other arm makes the run prove nothing."""
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus", per_suite=2)
+            driver = FakeDriver(hits={"f6": {"new": 1, "old": 1}})
+            run_cases(tmp, driver, out=tmp / "mixed", run_id="mixed", switch="f6", arm="new", retry_limit=0)
+            receipt = json.loads((tmp / "mixed" / "receipt.json").read_text())
+            self.assertIs(receipt["arm_exercised"], False)
+            self.assertFalse(receipt["ok"])
+
+
+class ConfigArmTests(unittest.TestCase):
+    """A config arm (motion-on, p15-oracle-233) is a virtual suite: launch-config leaves it at its default."""
+
+    REGISTRY = {
+        "f6": {"app_key": "f6", "default": "old", "planned": "new", "expected_differences": [{"pointer": "/a"}]},
+        "motion-on": {"config_key": "ui.animations.enabled", "default": "old", "planned": "old",
+                      "expected_differences": [{"pointer": "", "checkpoint": "turn"}]},
+    }
+
+    def test_launch_config_sends_no_config_arm_to_the_drivers(self):
+        self.assertEqual(oracle.resolve_switches(self.REGISTRY, None, "launch-config"), {"f6": "new"})
+        self.assertNotIn("motion-on", oracle.resolve_switches(oracle.load_switch_registry(), None, "launch-config"))
+
+    def test_launch_config_applies_no_config_arm_expected_differences(self):
+        args = argparse.Namespace(base=None, head=None, switch=None, arm="launch-config", ref=None, binary=None,
+                                  product="app")
+        (default, launch), expected = oracle.diff_sides(args, self.REGISTRY)
+        self.assertEqual((default.switches, launch.switches), ({}, {"f6": "new"}))
+        self.assertEqual([path.name for path in expected], ["f6.json"])
+
+    def test_the_switch_diff_still_runs_both_config_arms(self):
+        args = argparse.Namespace(base=None, head=None, switch="motion-on", arm=None, ref=None, binary=None,
+                                  product="app")
+        sides, expected = oracle.diff_sides(args, self.REGISTRY)
+        self.assertEqual([side.switches for side in sides], [{"motion-on": "old"}, {"motion-on": "new"}])
+        self.assertEqual([path.name for path in expected], ["motion-on.json"])
 
 
 class SelectionTests(unittest.TestCase):

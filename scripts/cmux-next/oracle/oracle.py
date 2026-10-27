@@ -981,7 +981,9 @@ def run_summary(cases: Mapping[str, Mapping[str, Any]], *, hits: Dict[str, Dict[
     arm_exercised: Optional[bool] = None
     switch, arm = config.get("switch"), config.get("arm")
     if switch and arm and not dry_run and any(r["attempts"] for r in cases.values()):
-        arm_exercised = hits.get(switch, {}).get(arm, 0) > 0
+        # As switches.py --hits: hits on the requested arm and none on the other (arm-mixed proves nothing).
+        arm_hits = hits.get(switch, {})
+        arm_exercised = arm_hits.get(arm, 0) > 0 and not any(arm_hits.get(other, 0) for other in ARMS if other != arm)
     counts: Dict[str, int] = {}
     for record in cases.values():
         counts[record["outcome"]] = counts.get(record["outcome"], 0) + 1
@@ -1554,6 +1556,13 @@ def switch_expected_files(registry: Dict[str, Dict[str, Any]], names: Iterable[s
     return [root / f"{name}.json" for name in sorted(set(names)) if registry.get(name, {}).get("expected_differences")]
 
 
+def is_config_arm(entry: Mapping[str, Any]) -> bool:
+    """A config arm (`config_key`, such as motion-on) is a virtual suite, not a refactor: it runs only under
+    `--switch NAME`, and every other run, launch-config too, takes its default arm (switches.py --check
+    refuses one planned elsewhere). The drivers apply it as a launch config value, never as a switch."""
+    return "config_key" in entry
+
+
 def resolve_switches(registry: Dict[str, Dict[str, Any]], switch: Optional[str], arm: Optional[str]) -> Dict[str, str]:
     if switch:
         if switch not in registry:
@@ -1562,10 +1571,11 @@ def resolve_switches(registry: Dict[str, Dict[str, Any]], switch: Optional[str],
             raise UsageError(f"--switch {switch} needs --arm old or --arm new")
         return {switch: arm}
     if arm == "launch-config":
-        missing = sorted(name for name, entry in registry.items() if entry.get("planned") not in ARMS)
+        refactors = {name: entry for name, entry in registry.items() if not is_config_arm(entry)}
+        missing = sorted(name for name, entry in refactors.items() if entry.get("planned") not in ARMS)
         if missing:
             raise UsageError("switches without a planned arm: " + ", ".join(missing))
-        return {name: entry["planned"] for name, entry in sorted(registry.items())}
+        return {name: entry["planned"] for name, entry in sorted(refactors.items())}
     if arm not in (None, "default"):
         raise UsageError(f"--arm {arm} without --switch: use launch-config or default")
     return {}
@@ -1710,7 +1720,9 @@ def print_run(receipt: Dict[str, Any], options: RunOptions, as_json: bool) -> No
     for cid in receipt["leaked_state"][:20]:
         print(f"  LeakedState: {leak_line(receipt['cases'][cid]['leaked_state'][0])}")
     if receipt["arm_exercised"] is False:
-        print(f"  arm-not-exercised: {options.switch}={options.arm} had 0 hits")
+        print(f"  arm-not-exercised: {options.switch}={options.arm} hits "
+              f"{json.dumps(receipt['switch_hits'].get(options.switch, {}), sort_keys=True)} "
+              "(needs hits on this arm and none on the other)")
     for error in receipt["infra_errors"][:10]:
         print(f"  infra: {error}")
     print(f"  receipt: {options.out / 'receipt.json'}")

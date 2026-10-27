@@ -10,7 +10,6 @@
   "default": "old",
   "planned": "old",
   "created": "2026-10-26",
-  "expires": "2026-11-09",
   "suites": ["actions", "journeys"],
   "expected_differences": [
     {

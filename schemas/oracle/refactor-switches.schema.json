@@ -5,11 +5,11 @@
   "description": "One refactor switch: plans/cmux-next/refactor-switches/<name>.json (plans/cmux-next/chrome-parity/p15-oracle.md, sections 3F.2 and 3I). A switch runs an old and a new arm of one refactor in one build, so the oracle can diff them (`oracle.py run --switch NAME --arm old|new`) and the new path can ship with a kill switch. It is the analog of a chrome/browser/flag-metadata.json entry (owners, expiry_milestone) plus its FlagExpectations file (expected_differences). scripts/cmux-next/oracle/switches.py --check runs this schema through normalize.py's validator, then the checks JSON Schema cannot express: expires <= created + 14 days, the app key is a RefactorSwitchKey raw value, the daemon key is in switches.rs SWITCH_NAMES, a config key is a settings row whose snapshot readback reads it, no app site reads the switch through a closure literal, and every expected_differences entry loads in diff.py.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "owner", "plan", "read", "default", "planned", "created", "expires", "suites", "expected_differences"],
+  "required": ["name", "owner", "plan", "read", "default", "planned", "created", "suites", "expected_differences"],
   "oneOf": [
-    {"required": ["app_key"], "not": {"anyOf": [{"required": ["daemon_key"]}, {"required": ["config_key"]}]}},
-    {"required": ["daemon_key"], "not": {"anyOf": [{"required": ["app_key"]}, {"required": ["config_key"]}]}},
-    {"required": ["config_key", "config_arms", "readback"], "not": {"anyOf": [{"required": ["app_key"]}, {"required": ["daemon_key"]}]}}
+    {"required": ["app_key", "expires"], "not": {"anyOf": [{"required": ["daemon_key"]}, {"required": ["config_key"]}]}},
+    {"required": ["daemon_key", "expires"], "not": {"anyOf": [{"required": ["app_key"]}, {"required": ["config_key"]}]}},
+    {"required": ["config_key", "config_arms", "readback"], "not": {"anyOf": [{"required": ["app_key"]}, {"required": ["daemon_key"]}, {"required": ["expires"]}]}}
   ],
   "dependentRequired": {"config_arms": ["config_key"], "readback": ["config_key"]},
   "properties": {
@@ -51,7 +51,7 @@
     "config_key": {
       "type": "string",
       "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)+$",
-      "description": "A config arm: a dotted cmux-next.json settings key (a row `key` of schemas/settings/settings-schema.json) that the driver writes into the launch config, one value per arm (`config_arms`). For a virtual suite such as motion-on (p15-oracle-233): the same cases rerun with one setting changed, not a refactor's two code paths."
+      "description": "A config arm: a dotted cmux-next.json settings key (a row `key` of schemas/settings/settings-schema.json) that the driver writes into the launch config, one value per arm (`config_arms`). For a virtual suite such as motion-on (p15-oracle-233): the same cases rerun with one setting changed, not a refactor's two code paths. It has no `expires`, its `planned` is its `default` (`oracle.py diff --arm launch-config` leaves it out; only `--switch NAME` runs its other arm), and the drivers apply it as a launch config value, never as a RefactorSwitches or CMUX_TUI_SWITCHES key."
     },
     "config_arms": {
       "type": "object",
@@ -81,7 +81,7 @@
     "expires": {
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
-      "description": "The day the old path and this file must be gone: at most created + 14 days. `switches.py --expired` lists every switch whose day has come."
+      "description": "The day the old path and this file must be gone: at most created + 14 days. `switches.py --expired` lists every switch whose day has come. Refactor switches (app_key, daemon_key) only: a config arm is a standing virtual suite, not a refactor, so it has no expiry and never enters the deletion queue."
     },
     "suites": {
       "type": "array",

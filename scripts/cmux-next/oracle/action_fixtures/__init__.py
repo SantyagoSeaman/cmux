@@ -44,12 +44,15 @@ expected_differences list the only values allowed to differ.
 The arm is a launch config value, not a RefactorSwitches key, so the driver writes it into the
 bench config (`launch_config`) and removes it from `--cmux-switches` (`split_switches`). The arm is
 read back from the settings facet (`readback` in the registry, /facets/settings/motion/enabled):
-the applied settings, not the file the driver wrote. With Reduce Motion on, motion is not on, so
-that readback is no arm. `case_report` gives the driver protocol's `switch_readback` and
-`switch_hits` for one case. A hit is evidence that the arm ran: on the new arm, each animation span
-`debug.motion` recorded (MotionTrace: first frame to rest); on the old arm, a case that read back
-motion off and recorded no span. A span on the old arm counts as a new-arm hit: something animated
-with the master switch off, and `oracle.py diff --switch` refuses that run as arm-not-applied.
+the applied settings, not the file the driver wrote. Both arms pin Reduce Motion off in memory
+(`start_calls`), so the host's Reduce Motion or calm mode never makes the arms read differently;
+a snapshot that still reads Reduce Motion on with motion on is no arm. `case_report` gives the
+driver protocol's `switch_readback` and `switch_hits` for one case. A hit is evidence that the arm
+ran: on the new arm, each animation span `debug.motion` recorded (MotionTrace: first frame to rest);
+on the old arm, a case that read back motion off and recorded no span. A span on the old arm counts
+as a new-arm hit: something animated with the master switch off. `oracle.py run` then reads the old
+arm as arm-mixed (`arm_exercised` false: hits on both arms), so the run is not ok and `oracle.py diff
+--switch` refuses it.
 
 Chrome reference (chromium/src): chrome/test/interaction/interactive_browser_test.h and
 ui/base/interaction/interactive_test.h keep one setup and verb set that every interactive UI test composes, instead
@@ -356,7 +359,7 @@ def load_sweep(argv: Sequence[str]) -> ModuleType:
 MOTION_SWITCH = "motion-on"
 MOTION_REGISTRY = HERE.parents[3] / "plans" / "cmux-next" / "refactor-switches" / f"{MOTION_SWITCH}.json"
 ARMS = ("old", "new")
-# Reduce Motion replaces movement (spec 3B; Motion.basePolicy), so a motion-on arm needs it off.
+# Reduce Motion replaces movement (spec 3B; Motion.basePolicy), so both arms pin it off in memory.
 REDUCE_MOTION_POINTER = "/facets/settings/motion/reduceMotion"
 # The per-case readback when the checkpoints disagree about the arm (a mid-case settings change).
 INCONSISTENT = "inconsistent"
@@ -496,11 +499,13 @@ class MotionArm:
         }
 
     def start_calls(self, arm: str) -> List[Tuple[str, Dict[str, Any]]]:
-        """Socket calls before a case: start span recording; on the new arm, Reduce Motion off in memory."""
-        calls: List[Tuple[str, Dict[str, Any]]] = [("debug.motion", {"action": "start"})]
-        if self.check_arm(arm) == "new":
-            calls.append(("debug.motion", {"action": "reduce", "value": False}))
-        return calls
+        """Socket calls before a case: start span recording and pin Reduce Motion off in memory.
+
+        Both arms pin it: /facets/settings/motion/reduceMotion reads Motion.basePolicy, which follows the
+        host's Reduce Motion and calm mode, so an unpinned arm would diverge from the other on such a host.
+        """
+        self.check_arm(arm)
+        return [("debug.motion", {"action": "start"}), ("debug.motion", {"action": "reduce", "value": False})]
 
     @staticmethod
     def stop_call() -> Tuple[str, Dict[str, Any]]:
