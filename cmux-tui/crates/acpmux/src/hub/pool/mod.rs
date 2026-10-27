@@ -675,6 +675,7 @@ impl Hub {
             let _ = target.send(session.inbound_tx.clone());
         }
         let child = p.child.clone();
+        self.gate_on_hub_clock(&child);
         *session.child.lock().await = Some(child.clone());
         self.wake_idle_reaper();
         if let Some(rx) = session.inbound_rx.lock().await.take() {

@@ -160,6 +160,13 @@ impl WorkflowIndex {
         rows.bound();
     }
 
+    /// Whether chat `session_id` has a workflow running (the hidden harness
+    /// freeze never stops it, `freeze.rs`).
+    pub fn running_in(&self, session_id: &str) -> bool {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        rows.by_id.values().any(|row| row.session_id == session_id && row.ended_at.is_none())
+    }
+
     /// Forgets the workflows of chats that are gone.
     pub fn forget(&self, sessions: &HashSet<String>) {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());

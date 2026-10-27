@@ -655,6 +655,7 @@ impl Hub {
                 }
                 return Err(super::shutdown::shutting_down_error());
             }
+            self.gate_on_hub_clock(&child);
             *slot = Some(child.clone());
         }
         self.wake_idle_reaper();

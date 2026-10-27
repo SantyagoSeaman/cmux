@@ -34,7 +34,7 @@
 
 use crate::hub::merge_mux_meta;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Whether a `session/update` params object is a subagent's (the hub tags it
 /// `_meta.acpmux.subagent`, ``SubagentTree::annotate``). A subagent's text and
@@ -53,9 +53,34 @@ pub struct SubagentTree {
     /// The session's own agent session id (its harness thread), once known:
     /// never one of its subagents.
     own: Option<String>,
+    /// The `background` subagents still running: they outlive their turn in
+    /// the harness's process (the hidden harness freeze never stops them).
+    background: HashSet<String>,
 }
 
 impl SubagentTree {
+    /// Whether a background subagent still runs.
+    pub fn background_running(&self) -> bool {
+        !self.background.is_empty()
+    }
+
+    /// The agent process exited: its subagents ended with it.
+    pub fn end_background(&mut self) {
+        self.background.clear();
+    }
+
+    /// Follows the background subagents `events` start, change or end.
+    fn note_background(&mut self, events: &[Value]) {
+        for event in events {
+            let Some(id) = event.get("id").and_then(Value::as_str) else { continue };
+            if event.get("state").and_then(Value::as_str) != Some("running") {
+                self.background.remove(id);
+            } else if event.get("background") == Some(&Value::Bool(true)) {
+                self.background.insert(id.to_owned());
+            }
+        }
+    }
+
     /// Whether `session_id` is one of this session's subagents.
     pub fn owns(&self, session_id: &str) -> bool {
         self.own.as_deref() != Some(session_id) && self.parents.contains_key(session_id)
@@ -83,6 +108,7 @@ impl SubagentTree {
             .map(str::to_owned);
         let events =
             params.get("update").map(|u| self.events(u, owner.as_deref())).unwrap_or_default();
+        self.note_background(&events);
         let mut fields = Map::new();
         if let Some(owner) = &owner {
             fields.insert("subagent".into(), json!(owner));

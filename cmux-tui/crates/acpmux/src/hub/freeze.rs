@@ -8,7 +8,8 @@
 //! acpmux does the same for agent harnesses: a session that is attached but
 //! that no attached client shows (`_acpmux/view`, `_acpmux/visibility`;
 //! `seen.rs` counts them), with no turn, queued prompt, pending permission or
-//! question, start, background process or waiting continuation, gets its
+//! question, start, background process, running workflow or background
+//! subagent, or waiting continuation, gets its
 //! harness's process group stopped after `freezeAfterSeconds` of no use
 //! (300; 30 under Energy Saver). Its harness then costs no CPU and no wakeups.
 //!
@@ -83,9 +84,11 @@ struct GateState {
     frozen: Option<(Arc<dyn ProcessControl>, u32)>,
     /// Writes in progress.
     writing: usize,
-    /// Writes begun, and that count when the harness was last seen quiet.
-    writes: u64,
-    quiet_at: u64,
+    /// The hub clock (`Hub::gate_on_hub_clock`) and when on it the last
+    /// write began. A host logs a write back after its bytes went out, so
+    /// that record's `used_at` can come after the write's end.
+    clock: Option<Arc<dyn crate::clock::Clock>>,
+    wrote_at: u64,
 }
 
 /// A write in progress (`HarnessGate::writing`): no stop until it drops.
@@ -102,6 +105,11 @@ impl HarnessGate {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Times writes on `clock`, the clock `Session::used_at` is on.
+    pub fn use_clock(&self, clock: Arc<dyn crate::clock::Clock>) {
+        self.lock().clock = Some(clock);
+    }
+
     /// Before bytes go to the harness: continues it when stopped. Until the
     /// guard drops the harness is not stopped again.
     pub fn writing(&self) -> Writing<'_> {
@@ -110,7 +118,9 @@ impl HarnessGate {
             control.resume(group);
         }
         state.writing += 1;
-        state.writes += 1;
+        if let Some(clock) = &state.clock {
+            state.wrote_at = clock.now().as_nanos() as u64;
+        }
         Writing(self)
     }
 
@@ -124,26 +134,15 @@ impl HarnessGate {
         self.lock().frozen.is_some()
     }
 
-    /// The harness counts as quiet from now: only a write after this keeps
-    /// the next [`HarnessGate::freeze`] from stopping it.
-    pub fn mark_quiet(&self) {
-        let mut state = self.lock();
-        state.quiet_at = state.writes;
-    }
-
-    /// Stops `group` when nothing was written since the last
-    /// [`HarnessGate::mark_quiet`] and no write runs; otherwise marks it quiet
-    /// from now and stops nothing. True when it is stopped now.
-    pub fn freeze(&self, control: Arc<dyn ProcessControl>, group: u32) -> bool {
+    /// Stops `group` when no write runs and none began after `quiet_since`
+    /// (the session's `used_at`, on the gate's clock). True when it is
+    /// stopped now.
+    pub fn freeze(&self, control: Arc<dyn ProcessControl>, group: u32, quiet_since: u64) -> bool {
         let mut state = self.lock();
         if state.frozen.is_some() {
             return true;
         }
-        if state.writing > 0 || state.writes != state.quiet_at {
-            state.quiet_at = state.writes;
-            return false;
-        }
-        if !control.stop(group) {
+        if state.writing > 0 || state.wrote_at > quiet_since || !control.stop(group) {
             return false;
         }
         state.frozen = Some((control, group));
@@ -258,13 +257,14 @@ impl Hub {
             self.thaw_session(session);
         } else if self.hidden_attached(session) {
             self.touch(session);
-            if let Ok(child) = session.child.try_lock()
-                && let Some(child) = child.as_ref()
-            {
-                child.gate.mark_quiet();
-            }
             self.idle_wake.notify_one();
         }
+    }
+
+    /// Times the writes to `child` on the hub clock; every place that
+    /// installs a child in its session calls it.
+    pub(super) fn gate_on_hub_clock(&self, child: &ChildAgent) {
+        child.gate.use_clock(self.lifecycle_clock());
     }
 
     /// Continues the session's stopped harness; true when it was stopped.
@@ -335,31 +335,44 @@ impl Hub {
         let after = after.as_nanos() as u64;
         for session in self.sessions() {
             let Some(child) = self.freeze_candidate(&session) else { continue };
-            if session.used_at.load(Ordering::Relaxed).saturating_add(after) > now {
+            let used_at = session.used_at.load(Ordering::Relaxed);
+            if used_at.saturating_add(after) > now {
                 continue;
             }
-            let frozen = child.as_ref().is_some_and(|child| {
-                let quiet = self.harness_quiet(&session)
-                    && !session.closing.load(Ordering::SeqCst)
-                    && !self.continuation_pending(&session)
-                    && !child.has_exited();
-                match (quiet, child.harness_group()) {
-                    (true, Some(group)) => child.gate.freeze(self.freeze_control(), group),
-                    _ => {
-                        child.gate.mark_quiet();
-                        false
-                    }
-                }
-            });
-            match child {
-                Some(child) if frozen => {
-                    tracing::info!(session = %session.id, "hidden idle harness stopped; it continues before anything is sent to it");
-                    locked(&self.freeze.frozen).insert(session.id.clone(), child.gate.clone());
-                }
-                // In use, or written to since it was last quiet: a full period starts now.
-                _ => self.touch(&session),
+            // In use, or written to after `used_at`: a full period starts now.
+            if !child.is_some_and(|child| self.freeze_child(&session, &child, used_at)) {
+                self.touch(&session);
             }
         }
+    }
+
+    /// Stops `child`'s harness when nothing runs or waits in it and no write
+    /// began after `used_at`. The stop and its entry in `freeze.frozen` happen
+    /// under that lock, which a show takes to continue it: either the show
+    /// finds this stop, or this sees the show and stops nothing.
+    fn freeze_child(&self, session: &Session, child: &ChildAgent, used_at: u64) -> bool {
+        let quiet = self.harness_quiet(session)
+            && !session.closing.load(Ordering::SeqCst)
+            && !self.continuation_pending(session)
+            && !self.background_work_running(session)
+            && !child.has_exited();
+        let (true, Some(group)) = (quiet, child.harness_group()) else { return false };
+        let control = self.freeze_control();
+        let mut frozen = locked(&self.freeze.frozen);
+        if !self.hidden_attached(session) || !child.gate.freeze(control, group, used_at) {
+            return false;
+        }
+        frozen.insert(session.id.clone(), child.gate.clone());
+        tracing::info!(session = %session.id, "hidden idle harness stopped; it continues before anything is sent to it");
+        true
+    }
+
+    /// A Claude workflow or a background subagent still runs in the
+    /// harness's process after its turn ended (`workflow_index.rs`,
+    /// `crate::subagents`): it is never stopped.
+    fn background_work_running(&self, session: &Session) -> bool {
+        self.workflow_index.running_in(&session.id)
+            || session.subagents.lock().unwrap_or_else(|e| e.into_inner()).background_running()
     }
 
     /// Energy Saver edges: the freeze deadline follows the mode, and the pool

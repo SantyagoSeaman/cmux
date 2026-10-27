@@ -70,6 +70,9 @@ impl Hub {
                     *session.floor.undeclared_mode.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     // Its background processes ended with it (`processes.rs`).
                     self.processes_lost(&session, processes::HARNESS_EXIT);
+                    // So did its workflows and background subagents.
+                    self.workflow_index.end_session(&session.id, crate::store::now_ms());
+                    session.subagents.lock().unwrap_or_else(|e| e.into_inner()).end_background();
                     let intentional =
                         matches!(session.status(), SessionStatus::Idle | SessionStatus::Closed);
                     // An agent host's exit was logged before its ack.
