@@ -110,10 +110,7 @@ fn run_terminal_resource_wait(
         })
         .transpose()?;
     let check = || -> Result<String, ResourceError> {
-        surface
-            .try_with_terminal(|terminal| terminal.viewport_text())
-            .map_err(resource_wait_runtime_error)?
-            .map_err(resource_wait_runtime_error)
+        mux.screen_text(&surface).map_err(resource_wait_runtime_error)
     };
     loop {
         if resource_wait_stopped(canceled, writer) {

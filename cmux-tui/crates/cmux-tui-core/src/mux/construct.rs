@@ -446,6 +446,8 @@ impl Mux {
             terminal_replays: mux_work::Permits::new(terminal_adoption::ADOPTION_REPLAYS),
             restored_tab_names: Mutex::new(HashMap::new()),
             pending_terminals: Mutex::new(HashMap::new()),
+            #[cfg(unix)]
+            worker_screens: Default::default(),
             terminal_ends: Mutex::new(HashMap::new()),
             terminal_loss_causes: Mutex::new(loss_causes::LossCauses::default()),
             terminal_exit_detaches: Arc::new(TerminalExitDetachTracker::default()),

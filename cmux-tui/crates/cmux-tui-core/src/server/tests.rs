@@ -567,5 +567,7 @@ mod sizing;
 mod socket_and_render;
 mod view_leases;
 mod wire_commands;
+#[cfg(unix)]
+mod worker_screen_reads;
 mod workspace_checklist_capability;
 mod workspace_name_source;

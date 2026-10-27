@@ -342,6 +342,21 @@ pub(super) fn handle_resource_connection_message(
         ResourceOperation::OriginConfirmationIssue => {
             origin_gate::handle_issue(mux, client, &request, id, writer)
         }
+        #[cfg(unix)]
+        ResourceOperation::TerminalHistoryRead => {
+            match crate::resource_router::worker_history_read(mux, &request) {
+                Ok(Some(read)) => {
+                    let (reply_writer, latency) = (writer.clone(), span.start_async());
+                    read.start(move |result| {
+                        latency
+                            .reply(|| send_resource_response(&reply_writer, id, operation, result));
+                    });
+                    true
+                }
+                Ok(None) => routed_resource_response(mux, client, request, writer),
+                Err(error) => send_resource_response(writer, id, operation, Err(error)),
+            }
+        }
         operation if crate::git_ops::handles(operation) => {
             let (reply_mux, reply_writer, latency) =
                 (mux.clone(), writer.clone(), span.start_async());
@@ -362,18 +377,29 @@ pub(super) fn handle_resource_connection_message(
                 !crate::resource_router::requires_connection_context(request.envelope.operation),
                 "connection-owned operation fell through to the transport-independent router"
             );
-            let operation = request.envelope.operation;
-            let handled = crate::resource_router::handle_parsed_resource_request(mux, request);
-            crate::debug_spans::mark("router.answered");
-            match handled {
-                Ok(response) => {
-                    activity::note_resource_input(mux, client, operation, &response);
-                    writer.send_control(&response).is_ok()
-                }
-                // Only a response that cannot be encoded fails here.
-                Err(error) => send_resource_response(writer, id, operation, Err(error)),
-            }
+            routed_resource_response(mux, client, request, writer)
         }
+    }
+}
+
+/// Answer `request` through the transport-independent router.
+fn routed_resource_response(
+    mux: &Arc<Mux>,
+    client: u64,
+    request: crate::resource_router::ParsedResourceRequest,
+    writer: &MessageWriter,
+) -> bool {
+    let id = request.envelope.id.clone();
+    let operation = request.envelope.operation;
+    let handled = crate::resource_router::handle_parsed_resource_request(mux, request);
+    crate::debug_spans::mark("router.answered");
+    match handled {
+        Ok(response) => {
+            activity::note_resource_input(mux, client, operation, &response);
+            writer.send_control(&response).is_ok()
+        }
+        // Only a response that cannot be encoded fails here.
+        Err(error) => send_resource_response(writer, id, operation, Err(error)),
     }
 }
 

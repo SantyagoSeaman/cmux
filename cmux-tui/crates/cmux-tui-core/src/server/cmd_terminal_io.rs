@@ -196,7 +196,7 @@ pub(super) fn send(
 pub(super) fn read_screen(mux: &Arc<Mux>, surface: SurfaceId) -> anyhow::Result<Value> {
     let surface = get_surface(mux, surface)?;
     require_pty(&surface)?;
-    let text = surface.try_with_terminal(|t| t.viewport_text())??;
+    let text = mux.screen_text(&surface)?;
     Ok(json!({ "text": text }))
 }
 
@@ -235,7 +235,18 @@ pub(super) fn read_scrollback(
         let epoch = term.history_epoch();
         term.styled_history_rows(start, count).map(|rows| (start, total, epoch, rows))
     })??;
-    let runs = rows_to_runs(&rows);
+    Ok(scrollback_answer(start, total, epoch, &rows))
+}
+
+/// The `read-scrollback` answer for `rows` of history from `start`, whether
+/// the daemon or a VT worker read them (server/deferred_commands.rs).
+pub(super) fn scrollback_answer(
+    start: u32,
+    total: u32,
+    epoch: u64,
+    rows: &[Vec<ghostty_vt::Cell>],
+) -> Value {
+    let runs = rows_to_runs(rows);
     let rows = runs
         .iter()
         .enumerate()
@@ -246,7 +257,7 @@ pub(super) fn read_scrollback(
             })
         })
         .collect::<Vec<_>>();
-    Ok(json!({ "rows": rows, "start": start, "total": total, "epoch": epoch }))
+    json!({ "rows": rows, "start": start, "total": total, "epoch": epoch })
 }
 
 pub(super) fn wait_for(
@@ -265,7 +276,7 @@ pub(super) fn wait_for(
     let regex = Regex::new(&pattern).map_err(|err| anyhow::anyhow!("bad regex: {err}"))?;
     let start = Instant::now();
     let check = || -> anyhow::Result<Option<String>> {
-        let text = surface.try_with_terminal(|t| t.viewport_text())??;
+        let text = mux.screen_text(&surface)?;
         Ok(regex.is_match(&text).then_some(text))
     };
     if timeout_ms == 0 {
@@ -420,7 +431,7 @@ pub(super) fn copy(mux: &Arc<Mux>, surface: SurfaceId, mode: String) -> anyhow::
     let surface = get_surface(mux, surface)?;
     require_pty(&surface)?;
     let text = match mode.as_str() {
-        "screen" => surface.try_with_terminal(|t| t.viewport_text())??,
+        "screen" => mux.screen_text(&surface)?,
         "scrollback" => surface.try_with_terminal(|t| t.plain_text())??,
         "selection" => surface.selection_text().ok_or_else(|| anyhow::anyhow!("no selection"))?,
         other => anyhow::bail!("bad mode {other}"),

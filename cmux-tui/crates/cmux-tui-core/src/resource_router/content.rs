@@ -14,6 +14,10 @@ mod history_json;
 use history_json::history_rows_json;
 mod targeted_browser;
 use targeted_browser::targeted_browser_effect_projection;
+#[cfg(unix)]
+mod worker_history;
+#[cfg(unix)]
+pub(crate) use worker_history::worker_history_read;
 
 use super::effects::{self, EffectPreparation, PreparedEffect};
 use super::{
@@ -115,7 +119,7 @@ fn terminal_screen_read(
     request: &ParsedResourceRequest,
 ) -> Result<Value, ResourceError> {
     let (_, surface) = resolve_terminal_surface(mux, &request.selectors)?;
-    let snapshot = surface.terminal_screen_snapshot().map_err(resource_operation_error)?;
+    let snapshot = mux.screen_snapshot(&surface).map_err(resource_operation_error)?;
     Ok(json!({
         "text":snapshot.text,
         "cols":snapshot.cols,
@@ -153,16 +157,8 @@ fn terminal_history_read(
     request: &ParsedResourceRequest,
 ) -> Result<Value, ResourceError> {
     let (_, surface) = resolve_terminal_surface(mux, &request.selectors)?;
-    let before = optional_decimal(&request.fields, "before")?;
-    let limit = required_u64(&request.fields, "limit")?;
-    let limit = u16::try_from(limit).map_err(|_| {
-        validation_error(
-            "terminal history limit exceeds uint16",
-            json!({"field":"limit","value":limit}),
-        )
-    })?;
-    let styled = request.fields.get("styled").and_then(Value::as_bool).unwrap_or(true);
-    let (start, next, rows) = surface
+    let HistoryReadFields { before, limit, styled } = HistoryReadFields::of(request)?;
+    let (start, cells) = surface
         .try_with_terminal(|terminal| {
             let total = terminal.history_rows();
             // A `before` past the end (even past u32) reads the newest page.
@@ -171,20 +167,43 @@ fn terminal_history_read(
                 .map_or(total, |before| before.min(total));
             let count = u16::try_from(end).map_or(limit, |end| end.min(limit));
             let start = end.saturating_sub(u32::from(count));
-            let cells = terminal.styled_history_rows(start, count)?;
-            Ok::<_, ghostty_vt::Error>((
-                start,
-                (start > 0).then_some(start),
-                history_rows_json(&cells, styled),
-            ))
+            terminal.styled_history_rows(start, count).map(|cells| (start, cells))
         })
         .map_err(resource_operation_error)?
         .map_err(|error| resource_operation_error(error.into()))?;
-    Ok(json!({
+    Ok(history_read_value(start, &cells, styled))
+}
+
+/// The fields of one `terminal.history.read`.
+struct HistoryReadFields {
+    before: Option<u64>,
+    limit: u16,
+    styled: bool,
+}
+
+impl HistoryReadFields {
+    fn of(request: &ParsedResourceRequest) -> Result<Self, ResourceError> {
+        let before = optional_decimal(&request.fields, "before")?;
+        let limit = required_u64(&request.fields, "limit")?;
+        let limit = u16::try_from(limit).map_err(|_| {
+            validation_error(
+                "terminal history limit exceeds uint16",
+                json!({"field":"limit","value":limit}),
+            )
+        })?;
+        let styled = request.fields.get("styled").and_then(Value::as_bool).unwrap_or(true);
+        Ok(Self { before, limit, styled })
+    }
+}
+
+/// The `terminal.history.read` result for `cells` of history from `start`,
+/// whether the daemon or a VT worker read them (worker_history.rs).
+fn history_read_value(start: u32, cells: &[Vec<ghostty_vt::Cell>], styled: bool) -> Value {
+    json!({
         "start":start.to_string(),
-        "next":next.map(|value| value.to_string()),
-        "rows":rows,
-    }))
+        "next":(start > 0).then(|| start.to_string()),
+        "rows":history_rows_json(cells, styled),
+    })
 }
 
 /// Bounded plain-text window over one terminal's journaled output stream.
@@ -233,10 +252,7 @@ fn terminal_wait(mux: &Arc<Mux>, request: &ParsedResourceRequest) -> Result<Valu
         })
         .transpose()?;
     let check = || -> Result<String, ResourceError> {
-        surface
-            .try_with_terminal(|terminal| terminal.viewport_text())
-            .map_err(resource_operation_error)?
-            .map_err(|error| resource_operation_error(error.into()))
+        mux.screen_text(&surface).map_err(resource_operation_error)
     };
     let mut observed = surface
         .terminal_stream_revision()
@@ -285,10 +301,7 @@ fn terminal_copy(mux: &Arc<Mux>, request: &ParsedResourceRequest) -> Result<Valu
     let (_, surface) = resolve_terminal_surface(mux, &request.selectors)?;
     let mode = required_string(&request.fields, "mode")?;
     let text = match mode {
-        "screen" => surface
-            .try_with_terminal(|terminal| terminal.viewport_text())
-            .map_err(resource_operation_error)?
-            .map_err(|error| resource_operation_error(error.into()))?,
+        "screen" => mux.screen_text(&surface).map_err(resource_operation_error)?,
         "scrollback" => surface
             .try_with_terminal(|terminal| terminal.plain_text())
             .map_err(resource_operation_error)?

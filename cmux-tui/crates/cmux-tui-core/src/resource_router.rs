@@ -8,6 +8,8 @@ mod browser_engine;
 mod close_value;
 mod config;
 mod content;
+#[cfg(unix)]
+pub(crate) use content::worker_history_read;
 mod credential;
 mod effects;
 mod mouse;

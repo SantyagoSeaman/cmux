@@ -229,6 +229,7 @@ mod metrics_file;
 mod oracle;
 mod pinned_columns;
 mod power_source;
+mod screen_reads;
 mod sqlite_trim;
 mod workspace_name;
 use kitty_reservation::kitty_image_limits_exceed;
@@ -758,6 +759,10 @@ pub struct Mux {
     /// keyed by public terminal id (`term_…`, what the tab JSON reads), with
     /// the host terminal id. A leaf lock: nothing else is locked under it.
     pending_terminals: Mutex<HashMap<String, (String, PendingTerminal)>>,
+    /// Terminals a VT worker process parses, whose screens are read from the
+    /// worker's page (mux/screen_reads.rs, p01-process-135).
+    #[cfg(unix)]
+    worker_screens: crate::vt_worker_runtime::WorkerScreens,
     /// Typed ends (`TerminalEnd::wire_json`) of ended terminals that have no
     /// runtime surface, keyed by public terminal id. A leaf lock.
     terminal_ends: Mutex<HashMap<String, Value>>,

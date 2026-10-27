@@ -147,6 +147,15 @@ impl Surface {
         })
     }
 
+    /// The OSC 9;4 progress the terminal reported last (the metadata a worker
+    /// page read pairs with its screen, mux/screen_reads.rs).
+    pub(crate) fn terminal_osc_progress(&self) -> anyhow::Result<String> {
+        let Some(pty) = self.as_pty() else {
+            anyhow::bail!("browser surface does not have a VT terminal");
+        };
+        Ok(pty.terminal_osc_progress())
+    }
+
     pub(crate) fn subscribe_terminal_stream_change(
         &self,
     ) -> ghostty_vt::Result<TerminalStreamSubscription<'_>> {
