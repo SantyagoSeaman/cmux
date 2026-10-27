@@ -1237,7 +1237,14 @@ async fn dispatch_request(
             let limit =
                 params.get("limit").and_then(Value::as_u64).unwrap_or(3).clamp(1, 8) as usize;
             let web = super::trust_gate::for_web(conn.origin, &params);
-            let (warmed, failed) = hub.warm_sessions_report(&requested, limit, web).await;
+            let expected_stops = params
+                .get("expectedStopCounts")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter_map(|(id, count)| count.as_u64().map(|count| (id.clone(), count)))
+                .collect();
+            let (warmed, failed) = hub.warm_sessions_guarded(&requested, limit, web, &expected_stops).await;
             Ok(json!({"warmed": warmed, "failed": failed}))
         }
         method::MUX_PREWARM => {
