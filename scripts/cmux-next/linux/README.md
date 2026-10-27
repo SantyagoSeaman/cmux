@@ -80,3 +80,25 @@ python3 -I scripts/cmux-next/linux/compile-xcstrings.py --check   # change nothi
 The tables go to `Packages/macOS/CmuxNext/.build-linux/lproj/<Target>/`. Each target folder
 gets a `LinuxStringTables` link to its tables, and git ignores both. Plural and device
 variations become their `other` form. The script refuses substitutions.
+
+## Miri (miri.sh)
+
+Runs the pure crates with unsafe C ABI code under Miri and writes one receipt:
+`cmux-layout-reducer-ffi`, `cmux-rd-ffi`, `cmux-palette-ranker` and `cmux-layout-reducer`.
+Each crate goes through the Miri lane of `cmux-tui/scripts/sanitize.sh`, so a Miri error
+becomes a signed finding. The nightly is `[nightly].channel` in `tool-versions.toml`
+(`setup-tools.sh` installs it with `miri` and `rust-src`).
+
+```bash
+scripts/cmux-next/linux/miri.sh --list     # toolchain, crates and every Miri skip with its reason
+scripts/cmux-next/linux/miri.sh --check    # no build; exit 1 when a Miri skip has no reason
+scripts/cmux-next/linux/miri.sh --work-dir /work/tmp/cargo/miri   # run; receipt in WORK/miri-receipt.json
+```
+
+A test skips Miri only with `#[cfg_attr(miri, ignore = "<reason>")]`; a `cfg(miri)`,
+`cfg(not(miri))` or `cfg!(miri)` needs a `// miri: <reason>` line above it. A bare skip fails
+the run. A test that hits an operation Miri isolation refuses (a file read, `getcwd`) also
+fails it: compile the data in with `include_bytes!` or give the test an ignore with a reason.
+The receipt (`cmux.oracle.miri-receipt/1`) holds the commit, the toolchain, each crate's
+run, the findings, every skip with its reason, and the problems; `ok` is true only with no
+problem.

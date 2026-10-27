@@ -61,6 +61,10 @@ fn corpus() -> Result<Value, String> {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "ranks the 2.3 MB TypeScript corpus: over 10 min under Miri; the other corpus and handle tests run the C ABI"
+)]
 fn every_corpus_request_ranks_like_the_typescript_ranker() -> Result<(), String> {
     let corpus = corpus()?;
     let sets = corpus["sets"].as_object().ok_or("corpus has no sets")?;

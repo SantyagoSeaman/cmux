@@ -596,6 +596,10 @@ fn random_op(rng: &mut Rng, step: usize) -> Op {
 /// room-scoped), L2 (unique ids; moves conserve items), L3 (one ref per
 /// section), L4 limits, and bump the revision by one per change.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "3 min under Miri (8 seeds of random ops, no unsafe code); stable cargo test runs it"
+)]
 fn random_ops_keep_invariants() {
     for seed in [1u64, 7, 42, 1_234, 98_765, 31_337, 271_828, 3_141_592] {
         let mut rng = Rng(seed);

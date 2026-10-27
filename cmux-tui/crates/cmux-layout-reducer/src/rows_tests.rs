@@ -333,11 +333,19 @@ fn concrete(state: &LayoutState, step: &Step, next: &mut u64) -> Option<LayoutOp
 }
 
 fn cases() -> u32 {
-    std::env::var("PROPTEST_CASES").ok().and_then(|value| value.parse().ok()).unwrap_or(256)
+    // miri: 256 cases take over 20 min under Miri; 8 still run every row op through it.
+    let default = if cfg!(miri) { 8 } else { 256 };
+    std::env::var("PROPTEST_CASES").ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
+    // No failure file, as in tests.rs: none is committed, and writing one
+    // needs the file system, which Miri isolates.
+    #![proptest_config(ProptestConfig {
+        cases: cases(),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Row ops mixed with splits, moves and closes: no op result ever breaks
     /// I1-I3 or R1/R2/R4 (the reducer would reject it with

@@ -555,6 +555,10 @@ proptest! {
     })]
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "over 30 min under Miri (256 random op sequences, no unsafe code); stable cargo test runs it"
+    )]
     fn random_op_sequences_keep_invariants(
         layout in layout(),
         steps in prop::collection::vec((step(), 0..12u8), 1..=30),

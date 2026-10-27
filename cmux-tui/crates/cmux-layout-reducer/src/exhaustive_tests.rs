@@ -366,6 +366,10 @@ fn check_own_place(state: &LayoutState) {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "over 30 min under Miri (every small layout, no unsafe code); stable cargo test runs it"
+)]
 fn exhaustive_small_layouts_keep_invariants() {
     let started = std::time::Instant::now();
     let shapes = shapes();
