@@ -579,6 +579,32 @@ impl RegistryConnection {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_journal_before_lock_for_test(
+        &self,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.journal_hooks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).before_lock =
+            Some((entered, release));
+    }
+
+    /// The journal writer, before it takes this connection for a batch:
+    /// pauses there once if a test installed the hook.
+    #[cfg(test)]
+    pub(crate) fn pause_journal_before_lock_for_test(&self) {
+        let hook = self
+            .journal_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .before_lock
+            .take();
+        if let Some((entered, release)) = hook {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_journal_after_commit_admission_for_test(
         &self,
         entered: std::sync::mpsc::SyncSender<()>,

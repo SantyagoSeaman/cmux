@@ -287,7 +287,9 @@ impl RegistryConnection {
     /// read sees what earlier replies said (read-your-writes). Each wait is a
     /// `journal_wait` (`request_path`) at `site` and a `read_barrier_waits`
     /// count. Reads must not fail here: at the bound the read goes ahead
-    /// without the answer and counts `read_barrier_timeouts`.
+    /// without the answer and counts `read_barrier_timeouts`; a caller that
+    /// must not go ahead checks [`Self::unanswered_admissions`] under the
+    /// connection.
     ///
     /// One atomic load when nothing is admitted. Never on the journal writer
     /// (it answers them) and never while this thread holds the connection
@@ -323,6 +325,33 @@ impl RegistryConnection {
         if waited {
             self.admit.barrier_waited(timed_out);
         }
+    }
+
+    /// The admitted intents that still have no writer answer, taking the
+    /// answers that arrived. Zero means SQLite holds every admitted intent:
+    /// what a receipt decided on SQLite needs (`decided_admit`). Never
+    /// waits, so it is safe while this thread holds the connection. Not zero
+    /// only after a read barrier gave up at its bound; an answer the writer
+    /// sends after it released the connection is then still missing here,
+    /// so the caller refuses (retry) rather than decides.
+    pub(super) fn unanswered_admissions(&self) -> usize {
+        if !self.admit.has_unresolved() {
+            return 0;
+        }
+        let mut unsettled = self.lock_unsettled();
+        let Unsettled { receipts, degraded } = &mut *unsettled;
+        let mut unanswered = 0;
+        for entry in receipts.iter_mut().filter(|entry| entry.admitted.is_some()) {
+            if entry.resolved.is_some() {
+                continue;
+            }
+            match entry.pending.try_take() {
+                Some(answer) => entry.resolve(answer, &self.admit, degraded),
+                None => unanswered += 1,
+            }
+        }
+        receipts.retain(|entry| !entry.is_spent_admission());
+        unanswered
     }
 
     /// Journal-degraded notes of admitted intents since the last call, for

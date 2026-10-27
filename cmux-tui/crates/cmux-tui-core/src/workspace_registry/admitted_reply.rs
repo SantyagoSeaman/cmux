@@ -160,6 +160,7 @@ pub(crate) struct AdmitState {
     fallbacks_writer_not_running: AtomicU64,
     fallbacks_connection_held: AtomicU64,
     fallbacks_not_queued: AtomicU64,
+    refusals_unanswered: AtomicU64,
     read_barrier_waits: AtomicU64,
     read_barrier_timeouts: AtomicU64,
     journal_degraded: AtomicU64,
@@ -175,6 +176,9 @@ pub(crate) struct AdmitStatsSnapshot {
     pub(crate) fallbacks_writer_not_running: u64,
     pub(crate) fallbacks_connection_held: u64,
     pub(crate) fallbacks_not_queued: u64,
+    /// Decided receipts refused because an earlier admitted intent had no
+    /// writer answer, so SQLite might not hold it (`AdmittedAnswerMissing`).
+    pub(crate) refusals_unanswered: u64,
     /// Waits for an admitted intent's writer answer (cold reads, prepares).
     pub(crate) read_barrier_waits: u64,
     /// Read barriers that gave up at their bound and read without the answer.
@@ -240,6 +244,11 @@ impl AdmitState {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A receipt was not decided: an earlier admission had no answer.
+    pub(super) fn refused_unanswered(&self) {
+        self.refusals_unanswered.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(super) fn barrier_waited(&self, timed_out: bool) {
         self.read_barrier_waits.fetch_add(1, Ordering::Relaxed);
         if timed_out {
@@ -255,6 +264,7 @@ impl AdmitState {
             fallbacks_writer_not_running: load(&self.fallbacks_writer_not_running),
             fallbacks_connection_held: load(&self.fallbacks_connection_held),
             fallbacks_not_queued: load(&self.fallbacks_not_queued),
+            refusals_unanswered: load(&self.refusals_unanswered),
             read_barrier_waits: load(&self.read_barrier_waits),
             read_barrier_timeouts: load(&self.read_barrier_timeouts),
             journal_degraded: load(&self.journal_degraded),

@@ -141,6 +141,8 @@ impl Drop for RequestPathHold {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct JournalCommitHooks {
+    pub(super) before_lock:
+        Option<(std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>)>,
     pub(super) before_commit:
         Option<(std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>)>,
     pub(super) after_commit_admission:

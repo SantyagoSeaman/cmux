@@ -192,6 +192,8 @@ impl Mux {
         let writer_commit =
             crate::workspace_registry::registry_connection::JournalWriterCommitScope::enter();
         let stats = self.journal_ingress.stats();
+        #[cfg(test)]
+        self.registry_connection.pause_journal_before_lock_for_test();
         stats.set_phase(crate::diagnostics::WriterPhase::WaitingLock);
         let lock_wait_from = Instant::now();
         let connection = self.registry_connection.get_until(deadline);
@@ -337,6 +339,17 @@ impl Mux {
         release: Receiver<()>,
     ) {
         self.registry_connection.set_journal_before_commit_for_test(entered, release);
+    }
+
+    /// Pauses the journal writer's next batch before it takes the registry
+    /// connection (a writer stalled off the lock).
+    #[cfg(test)]
+    pub(crate) fn install_journal_before_lock_for_test(
+        &self,
+        entered: SyncSender<()>,
+        release: Receiver<()>,
+    ) {
+        self.registry_connection.set_journal_before_lock_for_test(entered, release);
     }
 
     #[cfg(test)]

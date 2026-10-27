@@ -6,9 +6,19 @@
 //! The receipt is decided on the request thread by the intent's own apply,
 //! in a transaction that rolls back: the writer runs the same apply later,
 //! in admit order, on the same rows. The caller holds the registry from
-//! prepare until it admits, and the read barrier of its first connection
-//! acquisition puts every earlier admitted intent in SQLite first, so the
-//! writer's answer repeats the decided one (`admitted_reply`). A refused
+//! prepare until it admits, so no admission comes in between. The read
+//! barrier of its first connection acquisition waits (bounded) for every
+//! earlier admitted intent to reach SQLite, and the decide checks, under the
+//! connection it applies on, that none is still unanswered; then the
+//! writer's answer repeats the decided one (`admitted_reply`). If one is
+//! (the barrier gave up at its bound behind a stalled writer), nothing is
+//! decided on that stale SQLite: the request is refused with
+//! [`AdmittedAnswerMissing`] (retry), counted as `refusals_unanswered`.
+//!
+//! So a rename or terminal commit that comes while an earlier admission is
+//! unanswered waits for that answer (a counted `journal_wait`); only its own
+//! writer delay is out of its reply. Deciding with no SQLite read is the
+//! in-memory ledger and admitted overlay (p05-ipc-132/133). A refused
 //! intent (replay conflict, CAS, a tombstoned id) is an error at the
 //! request, never a journal-degraded writer answer. A replayed receipt
 //! (the ledger holds the mutation, or a second exit hits the exit latch)
@@ -21,6 +31,26 @@
 
 use super::admitted_reply::FallbackReason;
 use super::*;
+
+/// A receipt that cannot be decided now: `unanswered` earlier admitted
+/// intents have no journal writer answer, so SQLite may not hold them.
+/// Nothing was admitted or written; retry once the writer catches up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdmittedAnswerMissing {
+    pub(crate) unanswered: usize,
+}
+
+impl std::fmt::Display for AdmittedAnswerMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} earlier admitted registry commit(s) have no session journal answer yet; retry",
+            self.unanswered
+        )
+    }
+}
+
+impl std::error::Error for AdmittedAnswerMissing {}
 
 impl WorkspaceRegistry {
     /// Commit one prepared terminal transition: admitted with its decided
@@ -68,10 +98,18 @@ impl WorkspaceRegistry {
         Ok(self.admit_registry_intent(intent, prepared, release_pin, settle)?.into_receipt())
     }
 
-    /// `intent`'s receipt: its apply in a transaction that rolls back.
+    /// `intent`'s receipt: its apply in a transaction that rolls back, on a
+    /// SQLite that holds every admitted intent (else `AdmittedAnswerMissing`).
     #[track_caller]
     fn decide_registry_intent(&self, intent: &RegistryIntent) -> anyhow::Result<RegistryReceipt> {
         let db = self.connection.get();
+        // The writer needs the connection this thread now holds, so no
+        // admitted intent reaches SQLite while the apply below reads.
+        let unanswered = self.connection.unanswered_admissions();
+        if unanswered > 0 {
+            self.connection.admit.refused_unanswered();
+            return Err(AdmittedAnswerMissing { unanswered }.into());
+        }
         let tx = db.unchecked_transaction()?;
         let receipt = match intent {
             RegistryIntent::Terminal(intent) => RegistryReceipt::Terminal(intent.apply(&tx)?),

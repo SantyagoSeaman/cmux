@@ -103,9 +103,11 @@ fn workspace_rename_replies_while_the_journal_writer_is_held() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Acceptance: with a 50 ms journal writer delay, the rename reply excludes
-/// the delay. Each round delays the writer's commit of that round's rename;
-/// the next round starts after the writer answered.
+/// Acceptance: with a 50 ms journal writer delay and no earlier admission
+/// still unanswered, the rename reply excludes the delay. Each round delays
+/// the writer's commit of that round's rename; the next round starts after
+/// the writer answered (back to back, see
+/// `workspace_rename_back_to_back_waits_for_the_earlier_admission`).
 #[test]
 fn workspace_rename_replies_exclude_a_50_ms_writer_delay() {
     let (mux, root, key) = renaming_mux("delay", true);
@@ -139,6 +141,89 @@ fn workspace_rename_replies_exclude_a_50_ms_writer_delay() {
     );
     assert_eq!(stats.count(BlockingKind::JournalWait), 0, "{:?}", stats.sites());
     assert!(p95 < WRITER_DELAY / 2, "the reply waited for the writer: p95 {p95:?}");
+    assert_eq!(mux.registry_connection.admit_stats().journal_degraded, 0);
+    drop(mux);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The limit of deciding on SQLite: a rename sent while an earlier admitted
+/// rename has no writer answer waits for that answer in the read barrier of
+/// its first connection acquisition (a counted journal_wait), so its receipt
+/// is decided on a SQLite that holds the earlier one. Its reply then
+/// includes what is left of the earlier writer delay. Deciding it with no
+/// SQLite read needs the in-memory ledger and overlay (p05-ipc-132/133).
+#[test]
+fn workspace_rename_back_to_back_waits_for_the_earlier_admission() {
+    let (mux, root, key) = renaming_mux("back-to-back", true);
+    let base = settle_writer(&mux);
+    let (entered, writer_entered) = sync_channel(1);
+    let (release_writer, release) = sync_channel(1);
+    mux.install_journal_before_commit_for_test(entered, release);
+    let delayer = std::thread::spawn(move || {
+        writer_entered.recv_timeout(Duration::from_secs(10)).expect("the writer took it");
+        std::thread::sleep(WRITER_DELAY);
+        release_writer.send(()).unwrap();
+    });
+    let stats = RequestPathStats::new(RequestPathMode::RECORD);
+    let (first, second, second_reply) = {
+        let _scope = RequestPathScope::enter(&stats);
+        let first = rename(&mux, &key, "first", "rename-back-1").expect("first");
+        let started = Instant::now();
+        let second = rename(&mux, &key, "second", "rename-back-2").expect("second");
+        (first, second, started.elapsed())
+    };
+    delayer.join().unwrap();
+    eprintln!("back-to-back rename reply {second_reply:?} with a {WRITER_DELAY:?} writer delay");
+    assert_eq!(first.revision, base.revision + 1);
+    assert_eq!(second.revision, first.revision + 1, "decided after the first, never a duplicate");
+    assert!(stats.count(BlockingKind::JournalWait) >= 1, "{:?}", stats.sites());
+    let snapshot = settle_writer(&mux);
+    assert_eq!(snapshot.revision, second.revision);
+    assert_eq!(stored_name(&snapshot, &key).as_deref(), Some("second"));
+    assert_eq!(mux.registry_connection.admit_stats().journal_degraded, 0);
+    drop(mux);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Red before the decide checked the barrier: with the writer stalled past
+/// the read barrier's bound on an admitted rename, the next rename was
+/// decided on a SQLite without it (it failed there with "the resource
+/// revision changed"). Now it is refused at the request with the retryable
+/// `AdmittedAnswerMissing`: nothing is admitted or degraded, and a retry
+/// after the writer answers is decided after the first.
+#[test]
+fn workspace_rename_after_a_stalled_admission_is_refused_not_decided_stale() {
+    let (mux, root, key) = renaming_mux("stalled", true);
+    let base = settle_writer(&mux);
+    let (entered, writer_entered) = sync_channel(1);
+    let (release_writer, release) = sync_channel(1);
+    mux.install_journal_before_lock_for_test(entered, release);
+    let first = rename(&mux, &key, "first", "rename-stalled-1").expect("first");
+    writer_entered.recv_timeout(Duration::from_secs(10)).expect("the writer took the rename");
+    let admits = mux.registry_connection.admit_stats();
+
+    let refused = rename(&mux, &key, "second", "rename-stalled-2");
+    let stats = mux.registry_connection.admit_stats();
+    let refused = refused.expect_err("a rename decided behind an unanswered admission");
+    assert!(refused.downcast_ref::<AdmittedAnswerMissing>().is_some(), "{refused:#}");
+    assert_eq!(stats.admitted, admits.admitted, "{stats:?}");
+    assert_eq!(stats.refusals_unanswered, admits.refusals_unanswered + 1, "{stats:?}");
+    {
+        let state = mux.state.lock().unwrap();
+        let workspace = state.workspaces.iter().find(|workspace| workspace.key == key).unwrap();
+        assert_eq!(workspace.name, "first", "a refused rename changes nothing");
+        assert_eq!(state.workspace_revision, first.revision);
+    }
+    release_writer.send(()).unwrap();
+
+    let snapshot = settle_writer(&mux);
+    assert_eq!(snapshot.revision, base.revision + 1);
+    assert_eq!(stored_name(&snapshot, &key).as_deref(), Some("first"));
+    let retried = rename(&mux, &key, "second", "rename-stalled-2").expect("retried");
+    assert_eq!((retried.revision, retried.replayed), (first.revision + 1, false));
+    let snapshot = settle_writer(&mux);
+    assert_eq!(snapshot.revision, retried.revision);
+    assert_eq!(stored_name(&snapshot, &key).as_deref(), Some("second"));
     assert_eq!(mux.registry_connection.admit_stats().journal_degraded, 0);
     drop(mux);
     let _ = fs::remove_dir_all(root);
@@ -299,6 +384,47 @@ fn commit_terminal_refusals_and_latches_admit_nothing() {
     assert_eq!(registry.terminal_snapshot().unwrap().revision, base + 2);
     assert_eq!(mux.registry_connection.admit_stats().journal_degraded, 0);
     drop(registry);
+    drop(mux);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// As for the rename: a terminal commit sent while an admitted one is
+/// stalled past the read barrier's bound is refused (retry). Red before: a
+/// second reservation was decided on the terminal revision SQLite held
+/// before the admitted one and replied that same revision.
+#[test]
+fn commit_terminal_after_a_stalled_admission_is_refused_not_decided_stale() {
+    let (mux, root, key) = renaming_mux("terminal-stalled", true);
+    let mut registry = mux.workspace_registry.lock().unwrap();
+    let base = registry.terminal_snapshot().unwrap().revision;
+    let (entered, writer_entered) = sync_channel(1);
+    let (release_writer, release) = sync_channel(1);
+    mux.install_journal_before_lock_for_test(entered, release);
+    let launching = terminal_row(&key, TerminalLifecycle::Launching);
+    let reserved = commit_row(&mut registry, "reserve", Some(base), &launching).expect("reserved");
+    assert_eq!(reserved.revision, base + 1);
+    writer_entered.recv_timeout(Duration::from_secs(10)).expect("the writer took the row");
+    let admits = mux.registry_connection.admit_stats();
+
+    let other = RegistryTerminal {
+        terminal_id: "00000000000040008000000000001342".into(),
+        ..terminal_row(&key, TerminalLifecycle::Launching)
+    };
+    let refused = commit_row(&mut registry, "reserve-other", None, &other);
+    let stats = mux.registry_connection.admit_stats();
+    let refused = refused.expect_err("a reservation decided behind an unanswered admission");
+    assert!(refused.downcast_ref::<AdmittedAnswerMissing>().is_some(), "{refused:#}");
+    assert_eq!(stats.admitted, admits.admitted, "{stats:?}");
+    assert_eq!(stats.refusals_unanswered, admits.refusals_unanswered + 1, "{stats:?}");
+    release_writer.send(()).unwrap();
+
+    let retried = commit_row(&mut registry, "reserve-other", None, &other).expect("retried");
+    assert_eq!((retried.revision, retried.replayed), (base + 2, false));
+    assert_eq!(registry.terminal_snapshot().unwrap().revision, base + 2);
+    assert!(registry.terminal_record(TERMINAL_ID).unwrap().is_some(), "the first row");
+    assert!(registry.terminal_record(&other.terminal_id).unwrap().is_some(), "the second row");
+    drop(registry);
+    assert_eq!(mux.registry_connection.admit_stats().journal_degraded, 0);
     drop(mux);
     let _ = fs::remove_dir_all(root);
 }
