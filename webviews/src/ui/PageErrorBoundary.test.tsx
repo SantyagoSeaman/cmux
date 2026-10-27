@@ -2,7 +2,7 @@
 // crash reports itself and reloads the page once (a hidden page waits until it is shown); a crash
 // again within REPEAT_WINDOW_MS shows the card with Reload. Every page root wraps the boundary.
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { act } from "react";
@@ -209,24 +209,59 @@ test("the card speaks the page's language, in its direction", () => {
   expect(element.querySelector('[role="alert"]')!.getAttribute("dir")).toBe("rtl");
 });
 
-test("every page root under pages/ renders inside PageErrorBoundary", () => {
-  const pages = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../pages");
-  const unwrapped: string[] = [];
+test("every page root a page under pages/ reaches renders inside PageErrorBoundary", () => {
+  // A page can create its root in a module outside pages/ (the diff page mounts
+  // surfaces/diffSurface.tsx and viewer-empty/mount.tsx), so the walk follows every relative
+  // import, static or dynamic, from the page files.
+  const src = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const pages = path.join(src, "pages");
+  const isSource = (name: string) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name);
+  const queue: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (entry.name !== "generated" && entry.name !== "node_modules") walk(file);
-        continue;
+      } else if (isSource(entry.name)) {
+        queue.push(file);
       }
-      // settings/testing.tsx mounts sections for tests; it is not a page root.
-      if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name) || entry.name === "testing.tsx") continue;
-      const text = readFileSync(file, "utf8");
-      const roots = text.match(/\b(?:createRoot|makeRoot)\(/g)?.length ?? 0;
-      const wrapped = text.match(/<PageErrorBoundary\b/g)?.length ?? 0;
-      if (roots > wrapped) unwrapped.push(path.relative(pages, file));
     }
   };
   walk(pages);
-  expect(unwrapped).toEqual([]);
+  const resolveImport = (from: string, specifier: string): string | null => {
+    const base = path.resolve(path.dirname(from), specifier);
+    for (const candidate of [
+      base,
+      `${base}.tsx`,
+      `${base}.ts`,
+      path.join(base, "index.tsx"),
+      path.join(base, "index.ts"),
+    ]) {
+      if (isSource(candidate) && existsSync(candidate)) return candidate;
+    }
+    return null;
+  };
+  // Roots that are not a page's: settings/testing.tsx mounts sections for tests, and
+  // viewer-empty/dev.tsx is the dev server's picker sheet (the dev bridges import it; it never ships).
+  const notPageRoots = new Set(
+    ["pages/settings/testing.tsx", "viewer-empty/dev.tsx"].map((file) => path.join(src, file)),
+  );
+  const seen = new Set<string>();
+  const unwrapped: string[] = [];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (seen.has(file) || notPageRoots.has(file)) continue;
+    seen.add(file);
+    const text = readFileSync(file, "utf8");
+    const roots = text.match(/\b(?:createRoot|makeRoot)\(/g)?.length ?? 0;
+    const wrapped = text.match(/<PageErrorBoundary\b/g)?.length ?? 0;
+    if (roots > wrapped) unwrapped.push(path.relative(src, file));
+    for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)["'](\.{1,2}\/[^"'?]+)["']/g)) {
+      const target = resolveImport(file, match[1]!);
+      if (target) queue.push(target);
+    }
+  }
+  expect(seen.has(path.join(src, "surfaces/diffSurface.tsx"))).toBe(true);
+  expect(seen.has(path.join(src, "viewer-empty/mount.tsx"))).toBe(true);
+  expect(unwrapped.sort()).toEqual([]);
 });

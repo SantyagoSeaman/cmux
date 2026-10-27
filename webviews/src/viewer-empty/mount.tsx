@@ -4,6 +4,7 @@
 import { createRoot } from "react-dom/client";
 import { createDiffViewerLabelResolver, diffViewerLanguage, loadDiffViewerLabels } from "../labels";
 import type { PageClient } from "../pages/shared/pageClient";
+import { PageErrorBoundary } from "../ui/PageErrorBoundary";
 import { UiProvider, languageDirection } from "../ui/UiProvider";
 import { DiffEmptyState } from "./DiffEmptyState";
 import { viewerEmptyStrings } from "./strings";
@@ -28,21 +29,23 @@ export async function pickDiffConfig(
   return new Promise((resolve) => {
     const root = createRoot(rootElement);
     root.render(
-      <UiProvider container={rootElement} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
-        <DiffEmptyState
-          client={client}
-          strings={strings}
-          label={label}
-          onOpened={(config) => {
-            // Unmount before the viewer renders into the same element.
-            queueMicrotask(() => {
-              root.unmount();
-              delete document.documentElement.dataset.cmuxDiffEmpty;
-              resolve(config);
-            });
-          }}
-        />
-      </UiProvider>,
+      <PageErrorBoundary page="diff">
+        <UiProvider container={rootElement} popupHost={appPopupHost(client)} dir={languageDirection(strings.language)}>
+          <DiffEmptyState
+            client={client}
+            strings={strings}
+            label={label}
+            onOpened={(config) => {
+              // Unmount before the viewer renders into the same element.
+              queueMicrotask(() => {
+                root.unmount();
+                delete document.documentElement.dataset.cmuxDiffEmpty;
+                resolve(config);
+              });
+            }}
+          />
+        </UiProvider>
+      </PageErrorBoundary>,
     );
   });
 }

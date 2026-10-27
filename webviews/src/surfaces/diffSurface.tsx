@@ -15,6 +15,7 @@ import { openPageState, type PageStateSession } from "../pages/shared/pageState"
 import { DIFF_PAGE } from "../diff-viewer/viewState";
 import { bootPageDiff } from "../diff/pageBoot";
 import { createWebviewsRouter } from "../router";
+import { PageErrorBoundary } from "../ui/PageErrorBoundary";
 import { applyDiffViewerStatusToDocument, initialDiffViewerStatus } from "../status";
 import diffViewerStyles from "../styles.css?inline";
 import gitStyles from "../agent-session/acpmux/changes/git.css?inline";
@@ -106,5 +107,9 @@ export async function renderDiffSurface(
   const router = createWebviewsRouter(() => (
     <App config={config} initialStatus={initialStatus} pageState={pageState} />
   ));
-  createRoot(rootElement).render(<RouterProvider router={router} />);
+  createRoot(rootElement).render(
+    <PageErrorBoundary page="diff">
+      <RouterProvider router={router} />
+    </PageErrorBoundary>,
+  );
 }
