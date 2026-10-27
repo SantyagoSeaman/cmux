@@ -18,7 +18,7 @@ Chrome reference (chromium/src):
 - The CQ's "(retry shards with patch)": the first retry reruns the whole shard with the same
   config, so an order-dependent failure reproduces before the case runs alone.
 
-Subcommands owned here: run, diff, merge, check, gen, rebaseline. These delegate to the
+Subcommands owned here: run, diff, parity, merge, check, gen, rebaseline. These delegate to the
 sibling script that owns them (`oracle.py <cmd> ARGS` runs `python3 -I <script> ARGS`):
 confirm, select, bisect, report, minimize, switches, route, coverage, selftest.
 
@@ -75,6 +75,16 @@ Run directory (`run --out DIR`; the format diff.py (014) reads, with the extra f
 `oracle.py rebaseline --run DIR [baselines.py options]` writes the golden cases of DIR in the
 run format baselines.py (016) reads (a `cases` list, the case name without its suite) and runs
 `baselines.py rebaseline` on it.
+
+`oracle.py parity --a-run APP_RUN --b-run HEADLESS_RUN` is product parity (3F.4, task 161): one SHA run on
+two products (headless on the VM at --jobs 200, the app on a mini), compared case by case on the cases both
+ran with a verdict. Each difference is classified: missing-facet (a facet or a checkpoint that one product
+does not provide: absent, or not-comparable there) or divergence (a facet both provide differs, or the result
+or a step differs); `--expected` rules (diff.py's format) explain a known divergence. It writes parity.json
+(cmux-oracle-parity-v1) and exits 0 with no divergence, 1 with one, 2 on bad input, 3 when refused (one
+product on both sides, two SHAs, nothing compared). Hosts may differ: a product, not a host, is compared.
+`--product headless` selects, beside its capability cases, the window cases its host can run
+(driver_headless.capable_cases, asked of the --binary as gtest is asked --gtest_list_tests).
 
 `diff` exit codes: 0 no unexplained divergence, 1 divergences, 2 bad input, 3 refused (host
 mismatch, an incomplete or mismatched shard set, nothing compared), 4 diff.py internal error.
@@ -143,8 +153,10 @@ PRODUCTS: Dict[str, frozenset] = {
     # The VM mcp session is the daemon driver's case: its own daemon, which a restart step restarts.
     "mcp": frozenset({"resource_api", "actions", "mcp", "restart"}),
     "tui": frozenset({"resource_api", "keys", "tui"}),
-    "headless": frozenset({"resource_api", "actions"}),
-    "app": frozenset({"resource_api", "actions", "keys", "gui", "chromium", "restart", "mcp"}),
+    # CmuxNextHeadless (p15-oracle-160): the app's model and control surface with no window system. resource.call
+    # cases are the daemon product's; driver_headless.capable_cases adds the window cases the host can run.
+    "headless": frozenset({"actions"}),
+    "app":frozenset({"resource_api", "actions", "keys", "gui", "chromium", "restart", "mcp"}),
 }
 DRIVER_TASKS = {
     "daemon": "p15-oracle-023",
@@ -174,6 +186,9 @@ DEFAULT_BATCH_LIMIT = {"app": 10, "headless": 10}
 DEFAULT_BUILD = {"app": "bench"}
 # Products served by the cmux-tui binary that linux_run.sh builds per SHA.
 RUST_PRODUCTS = frozenset({"daemon", "cli", "mcp", "tui"})
+# Products whose driver widens the selection by asking the product binary what it can run
+# (`capable_cases(binary) -> (case predicate, receipt note)`), as a gtest launcher asks --gtest_list_tests.
+CAPABLE_HOOKS = {"headless": "driver_headless"}
 
 DIFF_OK, DIFF_DIVERGENT, DIFF_BAD_INPUT, DIFF_HOST_MISMATCH, DIFF_INTERNAL = 0, 1, 2, 3, 4
 EXIT_REFUSED = 3
@@ -328,9 +343,13 @@ def parse_list(values: Optional[Sequence[str]]) -> List[str]:
 
 
 def select_cases(
-    cases: Sequence[Case], *, suites: Sequence[str], filters: Sequence[str], product: str, platform: str
+    cases: Sequence[Case], *, suites: Sequence[str], filters: Sequence[str], product: str, platform: str,
+    capable: Optional[Callable[[Mapping[str, Any]], bool]] = None,
 ) -> Tuple[List[Case], List[Case]]:
-    """Returns (selected, not_applicable). `suites` empty or ["all"] means every suite."""
+    """Returns (selected, not_applicable). `suites` empty or ["all"] means every suite. `capable` (a
+    CAPABLE_HOOKS driver's predicate over the case data) also selects a case the product's capabilities
+    alone do not, on any platform: such a case was written for another product (the app window), and its
+    `platforms` name where that product runs. A platform-dependent value is then a parity divergence."""
     wanted = None if not suites or "all" in suites else set(suites)
     caps = PRODUCTS[product]
     selected: List[Case] = []
@@ -340,7 +359,11 @@ def select_cases(
             continue
         if filters and not any(fnmatch.fnmatchcase(case.id, f) for f in filters):
             continue
-        if case.requires <= caps and platform in case.platforms:
+        if case.requires <= caps:
+            runs = platform in case.platforms
+        else:
+            runs = capable is not None and capable(case.data)
+        if runs:
             selected.append(case)
         else:
             not_applicable.append(case)
@@ -778,6 +801,8 @@ class RunOptions:
     expectations_root: Path = DEFAULT_EXPECTATIONS_ROOT
     # hermetic_env.ISOLATION_MODES: netns refuses a host without unprivileged user namespaces.
     isolation: str = "netns"
+    # The headless product's cmux-tui (its daemon and the `cmux` of cli steps); a path, like binary.
+    cmux_tui: Optional[str] = None
 
     @property
     def filtered(self) -> bool:
@@ -844,6 +869,7 @@ def execute(plan: Plan, options: RunOptions, open_session: SessionOpener, expect
         "ref": options.ref,
         "tag": options.tag,
         "binary": options.binary,
+        "cmux_tui": options.cmux_tui,
         "out_dir": str(options.out),
         "isolation": dict(isolation),
     }
@@ -1071,12 +1097,14 @@ def perform_run(
     dependencies: Dict[str, str],
     *,
     isolate: Callable[[str], Dict[str, Any]] = resolve_isolation,
+    capable: Optional[Tuple[Callable[[Mapping[str, Any]], bool], Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], int]:
     """Selects, shards, runs and writes receipt.json, checkpoints.jsonl, events.jsonl, index.md."""
     started = time.time()
     check_out_dir(options.out)
     selected, not_applicable = select_cases(
-        cases, suites=options.suites, filters=options.filters, product=options.product, platform=options.platform
+        cases, suites=options.suites, filters=options.filters, product=options.product, platform=options.platform,
+        capable=capable[0] if capable else None,
     )
     plan = make_plan(selected, shard=options.shard, seed=options.seed, batch_limit=options.batch_limit)
     expected = {c.id: expectation(c) if expectation else PASS_ONLY for c in plan.order}
@@ -1116,7 +1144,7 @@ def perform_run(
             rows.extend(checkpoint_rows(case.id, first.rows, attempt=first.attempt, result=first.status))
 
     config = {**options.fingerprint(), "seed": options.seed, "shard_index": options.shard[0], "jobs": options.jobs,
-              "binary": options.binary}
+              "binary": options.binary, "cmux_tui": options.cmux_tui}
     receipt = {
         "schema": RUN_SCHEMA,
         "runId": options.run_id,
@@ -1136,7 +1164,9 @@ def perform_run(
         "shards": [options.shard[0]],
         "seeds": {str(options.shard[0]): options.seed},
         "not_applicable": len(not_applicable),
-        "order": [c.id for c in plan.order],
+        "capable": None if capable is None else {
+            **capable[1], "widened": sum(1 for c in selected if not c.requires <= PRODUCTS[options.product])},
+        "order":[c.id for c in plan.order],
         "batches": len(plan.batches),
         "sessions": sessions,
         "cases": records,
@@ -1319,7 +1349,7 @@ def write_merged(view: RunView, out: Path) -> Path:
 
 # What an order-parity comparison lets differ: the order (seed), the launch sharing (batch limit)
 # and what never takes part in a merge fingerprint either.
-ORDER_KEYS = frozenset({"seed", "batch_limit", "shard_index", "jobs", "binary"})
+ORDER_KEYS = frozenset({"seed", "batch_limit", "shard_index", "jobs", "binary", "cmux_tui"})
 
 
 def comparability(a: RunView, b: RunView, *, partial: bool, order_parity: bool = False) -> Optional[str]:
@@ -1446,6 +1476,209 @@ def compare_views(a: RunView, b: RunView, *, a_dir: Path, b_dir: Path, out: Path
     if refused is not None:
         return EXIT_REFUSED
     return 0 if comparison["ok"] else 1
+
+
+# ---------------------------------------------------------------------------------------
+# Product parity (spec 3F.4): one source on two products, compared on the facets both have
+
+
+PARITY_SCHEMA = "cmux-oracle-parity-v1"
+MISSING_FACET, DIVERGENCE = "missing-facet", "divergence"
+# Results that are not a verdict to compare: a flaky case, a skipped one, one that never ran.
+PARITY_EXCLUDED = frozenset({"Flaky", "Skip", None})
+
+
+def not_comparable_reason(value: Any) -> Optional[str]:
+    """The reason of a facet a product does not provide (snapshot-v1 definitions/notComparable), else None."""
+    if isinstance(value, dict) and value.get("status") == "not-comparable":
+        return str(value.get("reason") or "not comparable")
+    return None
+
+
+def parity_outcome(result: Optional[str]) -> Optional[str]:
+    """Slow is an expectation modifier, so a Slow result is a Pass (as in diff.py)."""
+    return "Pass" if result == "Slow" else result
+
+
+class ParityCase:
+    """One case's differences: each missing facet (keyed by facet and the side without it) and each facet's first
+    divergence, with how many checkpoints repeat it."""
+
+    def __init__(self, labels: Tuple[str, str]):
+        self.labels = labels
+        self.missing: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.divergent: Dict[str, Dict[str, Any]] = {}
+        self.explained: Dict[str, Dict[str, Any]] = {}
+        self.equal: set = set()
+
+    def note_missing(self, facet: str, side: int, reason: str, step: str, checkpoint: str) -> None:
+        key = (facet, self.labels[side])
+        entry = self.missing.setdefault(key, {"class": MISSING_FACET, "facet": facet, "missing_on": self.labels[side],
+                                              "reason": reason, "step": step, "checkpoint": checkpoint, "count": 0})
+        entry["count"] += 1
+
+    def note_divergence(self, facet: str, step: str, checkpoint: str, found: Sequence[Tuple[str, Any, Any]],
+                        missing: Any) -> None:
+        pointer, a, b = found[0]
+        if facet in self.divergent:
+            self.divergent[facet]["count"] += 1
+            return
+        self.divergent[facet] = {"class": DIVERGENCE, "facet": facet, "step": step, "checkpoint": checkpoint,
+                                 "pointer": pointer, "a": None if a is missing else a, "b": None if b is missing else b,
+                                 "differences": len(found), "count": 1}
+
+    def differences(self) -> List[Dict[str, Any]]:
+        return [*self.divergent.values(), *(self.missing[k] for k in sorted(self.missing))]
+
+
+def compare_parity_case(case_id: str, a: Any, b: Any, diff_mod: Any, rules: Sequence[Any],
+                        labels: Tuple[str, str]) -> Dict[str, Any]:
+    """Compares one case of two diff.Run values facet by facet. A facet one product lacks (absent, or
+    not-comparable there) is missing-facet; a facet both products have that differs, or a different result or step,
+    is a divergence. A checkpoint one side lacks with equal results (the headless host records no turn) is
+    missing-facet for every facet; with different results, the result divergence covers it."""
+    ra, rb = parity_outcome(a.results.get(case_id)), parity_outcome(b.results.get(case_id))
+    found = ParityCase(labels)
+    result_divergence = None
+    if ra != rb:
+        result_divergence = {"class": DIVERGENCE, "facet": None, "step": None, "checkpoint": None, "pointer": "/result",
+                             "a": ra, "b": rb, "differences": 1, "count": 1}
+    points = [{(p.index, p.checkpoint): p for p in run.checkpoints.get(case_id, ())} for run in (a, b)]
+    order = sorted(set(points[0]) | set(points[1]), key=lambda k: (k[0], diff_mod.CHECKPOINT_ORDER[k[1]]))
+    for key in order:
+        pa, pb = points[0].get(key), points[1].get(key)
+        if pa is None or pb is None:
+            if result_divergence is None:
+                side, present = (0, pb) if pa is None else (1, pa)
+                found.note_missing("*", side, f"no {key[1]} checkpoint on {labels[side]}", present.step, key[1])
+            continue
+        if pa.step != pb.step:
+            found.note_divergence("/step", pa.step, key[1], [("/step", pa.step, pb.step)], diff_mod.MISSING)
+            continue
+        facets = [(s.snapshot.get("facets") if isinstance(s.snapshot, dict) else None) or {} for s in (pa, pb)]
+        for name in sorted(set(facets[0]) | set(facets[1])):
+            values = [f.get(name, diff_mod.MISSING) for f in facets]
+            reasons = [("absent from the snapshot" if v is diff_mod.MISSING else not_comparable_reason(v)) for v in values]
+            if reasons[0] and reasons[1]:
+                continue  # neither product has it: not a difference
+            if reasons[0] or reasons[1]:
+                side = 0 if reasons[0] else 1
+                found.note_missing(name, side, str(reasons[side]), pa.step, key[1])
+                continue
+            pointer = "/facets/" + name.replace("~", "~0").replace("/", "~1")
+            raw = list(diff_mod.iter_differences(values[0], values[1], pointer))
+            unexplained = []
+            for item in raw:
+                rule = next((r for r in rules if r.covers(case_id, pa.step, key[1], item[0])), None)
+                if rule is None:
+                    unexplained.append(item)
+                else:
+                    found.explained.setdefault(name, {"facet": name, **rule.label()})
+            if unexplained:
+                found.note_divergence(name, pa.step, key[1], unexplained, diff_mod.MISSING)
+            elif not raw:
+                found.equal.add(name)
+    differences = ([result_divergence] if result_divergence else []) + found.differences()
+    divergent = any(d["class"] == DIVERGENCE for d in differences)
+    status = "divergent" if divergent else MISSING_FACET if differences else "equal"
+    return {"status": status, "results": {labels[0]: ra, labels[1]: rb}, "differences": differences,
+            "explained": sorted(found.explained.values(), key=lambda e: e["facet"]),
+            "equal_facets": sorted(found.equal - set(found.divergent))}
+
+
+def product_parity(a_view: RunView, b_view: RunView, a_dir: Path, b_dir: Path, rules_files: Sequence[Path]
+                   ) -> Dict[str, Any]:
+    """The parity document of two runs of one source on two products (spec 3F.4)."""
+    diff_mod = require_sibling("diff", "p15-oracle-014")
+    labels = (str(a_view.receipt.get("product")), str(b_view.receipt.get("product")))
+    refused = None
+    if labels[0] == labels[1]:
+        refused = f"both runs are product {labels[0]}: product parity compares two products (use `diff` for one)"
+    shas = {str(v.receipt.get("sha") or "") for v in (a_view, b_view)} - {""}
+    if len(shas) > 1:
+        refused = refused or f"the runs are of different sources ({', '.join(sorted(shas))}): parity compares one SHA"
+    try:
+        a, b = diff_mod.load_run(str(a_dir)), diff_mod.load_run(str(b_dir))
+        rules = [r for path in rules_files for r in diff_mod.load_rules(str(path))]
+    except diff_mod.InputError as error:
+        raise UsageError(f"parity input: {error}") from None
+    cases: Dict[str, Dict[str, Any]] = {}
+    excluded: Dict[str, str] = {}
+    only = {labels[0]: sorted(set(a.results) - set(b.results)), labels[1]: sorted(set(b.results) - set(a.results))}
+    for case_id in sorted(set(a.results) & set(b.results)):
+        ra, rb = a.results[case_id], b.results[case_id]
+        if ra in PARITY_EXCLUDED or rb in PARITY_EXCLUDED:
+            excluded[case_id] = f"{labels[0]} {ra}, {labels[1]} {rb}"
+            continue
+        cases[case_id] = compare_parity_case(case_id, a, b, diff_mod, rules, labels)
+    by_facet: Dict[str, Dict[str, int]] = {}
+    for record in cases.values():
+        for facet in record["equal_facets"]:
+            by_facet.setdefault(facet, {"equal": 0, MISSING_FACET: 0, DIVERGENCE: 0})["equal"] += 1
+        for item in record["differences"]:
+            facet = item["facet"] or "/result"
+            by_facet.setdefault(facet, {"equal": 0, MISSING_FACET: 0, DIVERGENCE: 0})[item["class"]] += 1
+    statuses = [r["status"] for r in cases.values()]
+    if refused is None and not cases:
+        refused = "nothing compared: the runs share no case with a verdict on both products"
+    divergent = sorted(cid for cid, r in cases.items() if r["status"] == "divergent")
+    return {
+        "schema": PARITY_SCHEMA,
+        "a": {"product": labels[0], "runId": a.run_id, "sha": a.sha, "host": a.host, "platform": a_view.receipt.get("platform")},
+        "b": {"product": labels[1], "runId": b.run_id, "sha": b.sha, "host": b.host, "platform": b_view.receipt.get("platform")},
+        "refused": refused,
+        "summary": {"compared": len(cases), "equal": statuses.count("equal"),
+                    MISSING_FACET: statuses.count(MISSING_FACET), DIVERGENCE: len(divergent),
+                    "excluded": len(excluded), "only_" + labels[0]: len(only[labels[0]]),
+                    "only_" + labels[1]: len(only[labels[1]])},
+        "facets": dict(sorted(by_facet.items())),
+        "divergent": divergent,
+        "cases": cases,
+        "excluded": excluded,
+        "only": only,
+        "ok": refused is None and not divergent,
+    }
+
+
+def print_parity(document: Mapping[str, Any], out: Path) -> None:
+    a, b = document["a"]["product"], document["b"]["product"]
+    summary = document["summary"]
+    print(f"oracle parity {a} vs {b}: compared {summary['compared']}, equal {summary['equal']}, "
+          f"missing-facet only {summary[MISSING_FACET]}, divergent {summary[DIVERGENCE]}, "
+          f"excluded (flaky, skipped, not run) {summary['excluded']}, only on {a} {summary['only_' + a]}, "
+          f"only on {b} {summary['only_' + b]}")
+    for facet, counts in document["facets"].items():
+        print(f"  facet {facet}: equal {counts['equal']}, missing-facet {counts[MISSING_FACET]}, "
+              f"divergence {counts[DIVERGENCE]}")
+    for cid in document["divergent"][:20]:
+        for item in document["cases"][cid]["differences"]:
+            if item["class"] == DIVERGENCE:
+                print(f"  divergence: {cid} facet={item['facet']} step={item['step']} checkpoint={item['checkpoint']} "
+                      f"pointer={item['pointer']} a={json.dumps(item['a'], sort_keys=True)[:160]} "
+                      f"b={json.dumps(item['b'], sort_keys=True)[:160]}")
+    if document["refused"]:
+        print(f"  refused: {document['refused']}")
+    print(f"  parity: {out / 'parity.json'}")
+
+
+def cmd_parity(args: argparse.Namespace) -> int:
+    out = args.out or DEFAULT_OUT_BASE / ("parity-" + new_run_id())
+    check_out_dir(out)
+    out.mkdir(parents=True, exist_ok=True)
+    a_view, a_errors = merge_runs(args.a_run, require_complete=False)
+    b_view, b_errors = merge_runs(args.b_run, require_complete=False)
+    if a_errors or b_errors:
+        raise UsageError("; ".join(a_errors + b_errors))
+    document = product_parity(a_view, b_view, write_merged(a_view, out / "a-merged"),
+                              write_merged(b_view, out / "b-merged"), args.expected or [])
+    write_json(out / "parity.json", document)
+    if args.json:
+        print(json.dumps(document, indent=1, sort_keys=True))
+    else:
+        print_parity(document, out)
+    if document["refused"]:
+        return EXIT_REFUSED
+    return 0 if document["ok"] else 1
 
 
 # ---------------------------------------------------------------------------------------
@@ -1611,6 +1844,8 @@ def add_selection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--build", choices=BUILDS, help="expectation build modifier (default debug, app bench)")
     parser.add_argument("--binary", help="product binary for the driver (daemon: cmux-tui)")
     parser.add_argument("--tag", help="tagged app build for the app driver")
+    parser.add_argument("--cmux-tui", help="headless product: the cmux-tui of the same SHA (the host's daemon and "
+                                           "the cmux of cli steps)")
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument("--expectations-root", type=Path, default=DEFAULT_EXPECTATIONS_ROOT,
                         help="dir with Expectations.d and NeverFix.d (default tests/oracle)")
@@ -1683,6 +1918,7 @@ def options_from_args(args: argparse.Namespace, *, retry_default: Optional[int],
         flaky_out=args.flaky_out,
         expectations_root=args.expectations_root,
         isolation=args.isolation,
+        cmux_tui=getattr(args, "cmux_tui", None),
     )
     if args.retry_limit is not None:
         retry = args.retry_limit
@@ -1713,7 +1949,21 @@ def run_one(options: RunOptions, *, open_session: Optional[SessionOpener] = None
         open_session = getattr(driver, "open_session", None)
         if open_session is None:
             raise UsageError(f"driver_{options.product}.py runs no cases on this branch yet ({DRIVER_TASKS[options.product]})")
-    return perform_run(options, cases, open_session, store.expected if store else None, deps)
+    return perform_run(options, cases, open_session, store.expected if store else None, deps,
+                       capable=capable_selection(options))
+
+
+def capable_selection(options: RunOptions) -> Optional[Tuple[Callable[[Mapping[str, Any]], bool], Dict[str, Any]]]:
+    """The CAPABLE_HOOKS predicate of the product's binary; None without a hook or a binary (a dry run without
+    --binary plans the capability selection only)."""
+    module = CAPABLE_HOOKS.get(options.product)
+    if module is None or not options.binary:
+        return None
+    hook = require_sibling(module, DRIVER_TASKS[options.product])
+    try:
+        return hook.capable_cases(options.binary)
+    except ValueError as error:
+        raise UsageError(f"--product {options.product}: {error}") from None
 
 
 def print_run(receipt: Dict[str, Any], options: RunOptions, as_json: bool) -> None:
@@ -2199,6 +2449,18 @@ def build_parser() -> argparse.ArgumentParser:
                       help="on the VM, rerun both sides even when the queue has a receipt (confirm, flake checks)")
     diff.add_argument("--out", type=Path, help="comparison directory")
     diff.set_defaults(func=cmd_diff)
+
+    parity = sub.add_parser("parity", help="product parity: one SHA on two products (headless against app), each "
+                                           "difference classified missing-facet or divergence")
+    parity.add_argument("--a-run", type=Path, action="append", required=True,
+                        help="run directory of product A, usually the app (repeat for shards)")
+    parity.add_argument("--b-run", type=Path, action="append", required=True,
+                        help="run directory of product B, usually headless (repeat for shards)")
+    parity.add_argument("--expected", type=Path, action="append",
+                        help="expected differences (diff.py --expected format): explained, not divergent")
+    parity.add_argument("--out", type=Path, help="parity directory")
+    parity.add_argument("--json", action="store_true", help="print the parity document as JSON")
+    parity.set_defaults(func=cmd_parity)
 
     merge = sub.add_parser("merge", help="merge shard run directories; refuses a gap or an overlap")
     merge.add_argument("dirs", type=Path, nargs="+")
