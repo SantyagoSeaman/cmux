@@ -962,7 +962,7 @@ impl Hub {
                         session,
                         "mux",
                         "resumed",
-                        json!({"level": level, "wake": self.waking(session)}),
+                        self.wake_marked(session, json!({"level": level})),
                     );
                 }
             }
@@ -1003,7 +1003,7 @@ impl Hub {
                             session,
                             "mux",
                             "resumed",
-                            json!({"level": "exact", "wake": self.waking(session)}),
+                            self.wake_marked(session, json!({"level": "exact"})),
                         );
                         true
                     }
@@ -1048,7 +1048,7 @@ impl Hub {
                     session,
                     "mux",
                     "resumed",
-                    json!({"level": "rehydrate", "wake": self.waking(session)}),
+                    self.wake_marked(session, json!({"level": "rehydrate"})),
                 );
             }
         }

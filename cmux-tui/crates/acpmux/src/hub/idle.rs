@@ -203,6 +203,14 @@ impl Hub {
         session.hibernated_at.load(Ordering::SeqCst) != 0
     }
 
+    /// `record` (a `resumed` one) with `"wake": true` when the start is a wake (`waking`).
+    pub(super) fn wake_marked(&self, session: &Session, mut record: Value) -> Value {
+        if self.waking(session) {
+            record["wake"] = json!(true);
+        }
+        record
+    }
+
     /// A start of `session`'s agent begins (`ensure_child`): a wake when the idle exit hibernated
     /// it, timed from here.
     pub(super) fn wake_began(&self, session: &Session) -> Option<std::time::Instant> {
