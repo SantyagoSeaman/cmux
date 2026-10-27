@@ -301,6 +301,8 @@ let packageProducts: [Product] = [
     .library(name: "CmuxNextApp", targets: ["CmuxNextApp"]),
     .library(name: "CmuxNextFavicons", targets: ["CmuxNextFavicons"]),
     .library(name: "CmuxNextAppCore", targets: ["CmuxNextAppCore"]),
+    // The windowless process (p15-oracle.md section H, task 160): `swift build --product cmux-next-headless`.
+    .executable(name: "cmux-next-headless", targets: ["CmuxNextHeadless"]),
 ] + uiLayerPreviewProducts
 
 // One typed literal, joined below: `literal + [...]` over ~500 overloaded `.target` calls is past the type
@@ -1783,7 +1785,7 @@ let cmuxNextTargets: [Target] = [
         ),
         .testTarget(
             name: "CmuxNextHeadlessTests",
-            dependencies: ["CmuxNextHeadless", "CmuxNextControl", "CmuxNextSettings"],
+            dependencies: ["CmuxNextHeadless", "CmuxNextControl", "CmuxNextDaemon", "CmuxNextSettings"],
             swiftSettings: daemonSwiftSettings
         ),
         // The app's one input tap (p04-input.md section 3 (A)): typed subscriptions by event class,
@@ -2570,12 +2572,17 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
                 "CmuxNextMetrics",
                 "CmuxNextFeatures",
                 "CmuxNextSignposts",
+                "CmuxNextInputCore",
+                "CmuxNextWireDigest",
                 "CmuxNextWakeups",
                 "CmuxNextWakeupsTestSupport",
                 "CmuxNextTestSupport",
                 "CmuxNextProcessEnvironment",
                 "CCmuxAppFFILinux",
                 "CmuxNextActions",
+                "CmuxNextWireGen",
+                "CmuxNextWireGenPlugin",
+                "CmuxNextIPC",
                 "CmuxNextDaemon",
                 "CmuxNextFocus",
                 "CmuxNextTerminalGeometry",
@@ -2617,6 +2624,7 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
                 "CmuxNextChromiumRuntimeTests",
                 "CmuxNextCodeRouterTests",
                 "CmuxNextCompatTests",
+                "CmuxNextDaemonTests",
                 "CmuxNextDevicesTests",
                 "CmuxNextErrorJournalTests",
                 "CmuxNextFeaturesTests",
@@ -2632,9 +2640,10 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
                 "CmuxNextTraceTests",
                 "CmuxNextVSCodeServerTests",
                 "CmuxNextWakeupsTests",
+                "CmuxNextWireGenTests",
                 "CmuxNextWorkspaceRepairTests",
             ],
-            products: [],
+            products: ["cmux-next-headless"],
             pathDependencies: [
                 "Packages/Shared/CMUXAuthCore",
                 "Packages/Shared/CMUXMobileCore",
@@ -2659,6 +2668,7 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
                 "CmuxNextCloud": ["Crypto"],
                 "CmuxNextCodeRouter": ["Crypto"],
                 "CmuxNextDaemon": ["CZlib", "Crypto"],
+                "CmuxNextDaemonTests": ["Crypto"],
                 "CmuxNextDesignTokens": ["Crypto"],
                 "CmuxNextDevices": ["Crypto"],
                 "CmuxNextDevicesTests": ["Crypto"],

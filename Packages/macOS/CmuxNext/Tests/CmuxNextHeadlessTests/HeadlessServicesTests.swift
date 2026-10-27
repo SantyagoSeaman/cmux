@@ -5,8 +5,8 @@ import Foundation
 import Testing
 
 /// The headless composition root (p15-oracle-160): with no window it binds the control socket and serves
-/// `snapshot.get`, `action.run` and, in DEV and bench builds, `debug.oracle.snapshot` over its own registry,
-/// settings and daemon store. Without a daemon socket the topology says `failed`, never an empty connected tree.
+/// `snapshot.get`, `action.run` (its window-free settings actions) and, in DEV and bench builds,
+/// `debug.oracle.snapshot` over its own registry, settings and daemon store. Without a daemon socket the topology says `failed`, never an empty connected tree.
 /// Run: `swift test --filter CmuxNextHeadlessTests` (on Linux: scripts/cmux-next/linux/swift-tier.sh).
 @MainActor @Suite(.serialized) struct HeadlessServicesTests {
     private typealias Value = CmuxNextSettings.JSONValue
@@ -54,6 +54,20 @@ import Testing
             return
         }
         #expect(error.code == "not_found")
+        await services.stop()
+    }
+
+    @Test func aSettingsActionsWriteIsWhatTheNextReadSees() async throws {
+        let (services, directory) = try await started()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // `tabs.overflow` is agent-settable, so a socket run may write it.
+        _ = try await call(services, "action.run", ["action": "tabs.overflow.scroll"]).get()
+        // No wait between the two: the run answered after its write, and the read builds the snapshot first.
+        let read = try await call(services, "settings.get", ["path": "tabs.overflow"]).get()
+        #expect(read["value"] == "scroll")
+        let file = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "cmux.json"))) as? [String: Any]
+        #expect((file?["tabs"] as? [String: Any])?["overflow"] as? String == "scroll")
         await services.stop()
     }
 

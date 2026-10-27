@@ -7,6 +7,8 @@
       "CmuxNextMetrics",
       "CmuxNextFeatures",
       "CmuxNextSignposts",
+      "CmuxNextInputCore",
+      "CmuxNextWireDigest",
       "CmuxNextWakeups",
       "CmuxNextWakeupsTestSupport",
       "CmuxNextTestSupport",
@@ -15,6 +17,9 @@
     ],
     [
       "CmuxNextActions",
+      "CmuxNextWireGen",
+      "CmuxNextWireGenPlugin",
+      "CmuxNextIPC",
       "CmuxNextDaemon",
       "CmuxNextFocus",
       "CmuxNextTerminalGeometry",
@@ -52,7 +57,7 @@
       "CmuxNextCLIInstall"
     ]
   ],
-  "_waves": "Wave 0 adds Trace, Metrics, Features and WakeupsTestSupport to the section H list: Signposts, Wakeups and the wave 1 targets depend on them and they import only Compat, Atomics and Foundation. Wave 3 holds the UI-free targets whose dependencies are all in the tier today; task p15-oracle-226 adds the others as their blocking edges go (PhoneAccess, Stash, HostedChief, AgentIntegrations, ChiefViews, RemoteLocalhostService, AgentCursorVisibility, AppCore, SidebarActions, AgentUpdates, CrashReporting).",
+  "_waves": "Wave 0 adds Trace, Metrics, Features and WakeupsTestSupport to the section H list: Signposts, Wakeups and the wave 1 targets depend on them and they import only Compat, Atomics and Foundation. Wave 0 also holds InputCore and WireDigest, and wave 1 WireGen, its build plugin and IPC (task 160): Wakeups, Control, HangReports and Daemon depend on them, and they import only Compat, Atomics, CmuxSafeConcurrency and Foundation (IPC's FrameSink and FrameWriter import Darwin until the Compat Libc re-export of task 120 replaces it). Wave 3 holds the UI-free targets whose dependencies are all in the tier today; task p15-oracle-226 adds the others as their blocking edges go (PhoneAccess, Stash, HostedChief, AgentIntegrations, ChiefViews, RemoteLocalhostService, AgentCursorVisibility, AppCore, SidebarActions, AgentUpdates, CrashReporting).",
   "new": [
     "CmuxNextOracle",
     "CmuxNextInputModel",
@@ -88,12 +93,17 @@
       "CmuxNextMetrics",
       "CmuxNextFeatures",
       "CmuxNextSignposts",
+      "CmuxNextInputCore",
+      "CmuxNextWireDigest",
       "CmuxNextWakeups",
       "CmuxNextWakeupsTestSupport",
       "CmuxNextTestSupport",
       "CmuxNextProcessEnvironment",
       "CCmuxAppFFILinux",
       "CmuxNextActions",
+      "CmuxNextWireGen",
+      "CmuxNextWireGenPlugin",
+      "CmuxNextIPC",
       "CmuxNextDaemon",
       "CmuxNextFocus",
       "CmuxNextTerminalGeometry",
@@ -135,6 +145,7 @@
       "CmuxNextChromiumRuntimeTests",
       "CmuxNextCodeRouterTests",
       "CmuxNextCompatTests",
+      "CmuxNextDaemonTests",
       "CmuxNextDevicesTests",
       "CmuxNextErrorJournalTests",
       "CmuxNextFeaturesTests",
@@ -150,9 +161,12 @@
       "CmuxNextTraceTests",
       "CmuxNextVSCodeServerTests",
       "CmuxNextWakeupsTests",
+      "CmuxNextWireGenTests",
       "CmuxNextWorkspaceRepairTests"
     ],
-    "products": [],
+    "products": [
+      "cmux-next-headless"
+    ],
     "pathDependencies": [
       "Packages/Shared/CMUXAuthCore",
       "Packages/Shared/CMUXMobileCore",
@@ -197,6 +211,9 @@
         "CZlib",
         "Crypto"
       ],
+      "CmuxNextDaemonTests": [
+        "Crypto"
+      ],
       "CmuxNextDesignTokens": [
         "Crypto"
       ],
@@ -238,15 +255,6 @@
         "CmuxNextSidebar",
         "CmuxNextTabs"
       ],
-      "CmuxNextControl": [
-        "CmuxNextInputCore"
-      ],
-      "CmuxNextDaemon": [
-        "CmuxNextIPC"
-      ],
-      "CmuxNextHangReports": [
-        "CmuxNextInputCore"
-      ],
       "CmuxNextHeadless": [
         "CmuxNextDesign"
       ],
@@ -255,9 +263,6 @@
       ],
       "CmuxNextSignposts": [
         "CmuxNextSignpostsC"
-      ],
-      "CmuxNextWakeups": [
-        "CmuxNextInputCore"
       ]
     },
     "absent": [

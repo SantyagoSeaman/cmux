@@ -15,8 +15,9 @@ import CmuxNextOracle
 /// the same way, without the browser UI (headless/lib/browser/headless_browser_impl.cc, `HeadlessBrowserImpl`).
 ///
 /// Every owner is a stored property built here, once per process (main.swift); nothing is a shared instance
-/// (p15-oracle.md section 4, rule 4). It serves the router's built-in methods (`snapshot.get`, `action.run`,
-/// `action.list`, `settings.*`), the `after: "sync"` barrier, and in DEV and bench builds the oracle's
+/// (p15-oracle.md section 4, rule 4). It serves the router's built-in methods (`snapshot.get`, `action.run` of the
+/// settings actions that need no window (``HeadlessSettingsActions``), `action.list`, `settings.*`), the
+/// `after: "sync"` barrier, and in DEV and bench builds the oracle's
 /// `debug.oracle.*` methods over its own facet list (``makeOracleFacets()``).
 ///
 /// ```swift
@@ -114,6 +115,7 @@ final class HeadlessServices {
         registry.refusalObserver = { [turns = oracleTurns] _, _ in turns.noteRefusal() }
         control.router.register(OracleControl.methods(host: self, snapshots: control.router.snapshots, turns: oracleTurns))
         #endif
+        HeadlessSettingsActions(registry: registry, settings: settings, snapshots: control.router.snapshots, mainWork: mainWork).bind()
         registerSyncBarrier()
         // Before the first publish: without a daemon socket the first snapshot already says `failed`.
         startMirror()
