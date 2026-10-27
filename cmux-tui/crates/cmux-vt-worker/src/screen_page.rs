@@ -9,9 +9,16 @@
 //! the writer makes `seq` odd, stores the image, makes `seq` even; a reader
 //! copies the image between two equal even reads of `seq`. Both sides reach
 //! every word atomically (8-byte words), so a torn copy is only ever
-//! discarded, never undefined. The reader treats the page as untrusted
-//! (p01-process-141): it decodes the copy with every length and offset
-//! checked against the copy itself.
+//! discarded, never undefined.
+//!
+//! The reader treats the page as untrusted (p01-process-141, Chrome's
+//! `bad_message` rule): it decodes the copy with every count, length and
+//! offset checked against the copy, which is never longer than the mapping.
+//! Cell texts are laid out back to back and each is at most
+//! [`MAX_CELL_TEXT`] bytes, so a page decodes to at most its own size in
+//! text; reserved bytes and padding are zero, so layout 1 carries no field
+//! (such as a history reference) the decoder does not check. Any other
+//! value is [`PageError::Corrupt`], which ends the worker.
 //!
 //! Layout 1, little endian, every section 8-byte aligned:
 //!
@@ -24,7 +31,7 @@
 //!  40 cols u16 | rows u16 | cursor x u16 | cursor y u16
 //!  48 cell count u32 | text bytes u32
 //!  56 needed bytes u64 (status TOO_SMALL)
-//!  64 reserved, to 128
+//!  64 reserved, zero, to 128
 //! 128 row lengths: rows x u16
 //!     cells: cell count x 32 bytes
 //!     text: the cells' UTF-8, concatenated
@@ -32,7 +39,8 @@
 //!
 //! A cell is `text offset u32 | text len u32 | fg u32 | bg u32 |
 //! resolved fg u32 | resolved bg u32 | flags u16 | width u8 | underline
-//! style u8 | reserved u32`.
+//! style u8 | reserved u32 (zero)`. Cell `n`'s text starts where cell
+//! `n - 1`'s ends.
 
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
@@ -55,6 +63,10 @@ pub const CELL_BYTES: usize = 32;
 pub const MAX_GRID: u16 = 4096;
 /// The largest page the daemon makes or a reader maps.
 pub const MAX_PAGE_BYTES: usize = 64 << 20;
+/// The most UTF-8 bytes one cell's text carries; the encoder cuts a longer
+/// grapheme cluster at a character boundary.
+pub const MAX_CELL_TEXT: usize = 256;
+const OFF_RESERVED: usize = 64;
 const OFF_SEQ: usize = 8;
 /// Reads that may see a writer in progress before [`PageError::Busy`].
 const READ_ATTEMPTS: u32 = 64;
@@ -221,8 +233,9 @@ impl PageEncoder {
         self.rows.push(u16::try_from(cells.len()).unwrap_or(u16::MAX));
         for cell in cells.iter().take(usize::from(u16::MAX)) {
             let offset = u32::try_from(self.text.len()).unwrap_or(u32::MAX);
-            self.text.extend_from_slice(cell.text.as_bytes());
-            let len = u32::try_from(cell.text.len()).unwrap_or(u32::MAX);
+            let text = cell_text(&cell.text);
+            self.text.extend_from_slice(text.as_bytes());
+            let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
             self.cells.extend_from_slice(&offset.to_le_bytes());
             self.cells.extend_from_slice(&len.to_le_bytes());
             self.cells.extend_from_slice(&encode_spec(cell.fg).to_le_bytes());
@@ -278,6 +291,28 @@ impl PageEncoder {
         image.resize(pad8(image.len()), 0);
         &self.image
     }
+}
+
+/// `text` cut to at most [`MAX_CELL_TEXT`] bytes at a character boundary.
+fn cell_text(text: &str) -> &str {
+    if text.len() <= MAX_CELL_TEXT {
+        return text;
+    }
+    let mut end = MAX_CELL_TEXT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// The most bytes the image of a `cols` x `rows` screen takes: the bound
+/// on a worker's PAGE_TOO_SMALL. It may exceed [`MAX_PAGE_BYTES`], which
+/// caps the page the daemon makes.
+pub fn max_image_len(cols: u16, rows: u16) -> u64 {
+    let cells = u64::from(cols) * u64::from(rows);
+    let row_table = (u64::from(rows) * 2).next_multiple_of(8);
+    let text = (cells * MAX_CELL_TEXT as u64).next_multiple_of(8);
+    PAGE_HEADER as u64 + row_table + cells * CELL_BYTES as u64 + text
 }
 
 /// The header of `image`, saying the page needs `needed` bytes and
@@ -372,10 +407,17 @@ pub struct PageReader {
 }
 
 impl PageReader {
-    /// Map `page` (`len` bytes, as created) read-only.
+    /// Map `page` (`len` bytes, as created) read-only. The segment must
+    /// hold all `len` bytes: a read past its end would fault.
     pub fn open(page: &OwnedFd, len: usize) -> io::Result<Self> {
         if !(PAGE_HEADER..=MAX_PAGE_BYTES).contains(&len) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "screen page length"));
+        }
+        if shm::segment_len(page.as_fd())? < len as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "screen page shorter than len",
+            ));
         }
         Ok(Self { map: Mapping::map(page.as_fd(), len, false)?, copy: Vec::new() })
     }
@@ -482,9 +524,15 @@ pub fn decode(copy: &[u8]) -> Result<Screen, PageError> {
     let cell_count = header.u32().ok_or(SHORT)? as usize;
     let text_len = header.u32().ok_or(SHORT)? as usize;
     let needed = header.u64().ok_or(SHORT)?;
+    if !all_zero(copy.get(OFF_RESERVED..PAGE_HEADER).ok_or(SHORT)?) {
+        return Err(PageError::Corrupt("reserved header bytes"));
+    }
     match status {
         STATUS_SCREEN => {}
-        STATUS_TOO_SMALL => return Err(PageError::TooSmall { needed }),
+        STATUS_TOO_SMALL if needed > PAGE_HEADER as u64 => {
+            return Err(PageError::TooSmall { needed });
+        }
+        STATUS_TOO_SMALL => return Err(PageError::Corrupt("needed bytes")),
         _ => return Err(PageError::Corrupt("status")),
     }
     if cols > MAX_GRID || rows > MAX_GRID {
@@ -511,7 +559,12 @@ pub fn decode(copy: &[u8]) -> Result<Screen, PageError> {
     if text_end > copy.len() {
         return Err(PageError::Corrupt("sections past the page"));
     }
-    let text = &copy[text_at..text_end];
+    if !all_zero(&copy[rows_at + usize::from(rows) * 2..cells_at])
+        || !all_zero(copy.get(text_end..pad8(text_end)).unwrap_or_default())
+    {
+        return Err(PageError::Corrupt("padding"));
+    }
+    let mut text = Text { bytes: &copy[text_at..text_end], at: 0 };
     let mut row_lengths = Fields { bytes: copy, at: rows_at };
     let mut cells = Fields { bytes: copy, at: cells_at };
     let mut remaining = cell_count;
@@ -524,12 +577,15 @@ pub fn decode(copy: &[u8]) -> Result<Screen, PageError> {
         remaining -= len;
         let mut row = Vec::with_capacity(len);
         for _ in 0..len {
-            row.push(decode_cell(&mut cells, text)?);
+            row.push(decode_cell(&mut cells, &mut text)?);
         }
         grid.push(row);
     }
     if remaining != 0 {
         return Err(PageError::Corrupt("cells outside the rows"));
+    }
+    if text.at != text.bytes.len() {
+        return Err(PageError::Corrupt("text outside the cells"));
     }
     Ok(Screen {
         parsed,
@@ -544,7 +600,38 @@ pub fn decode(copy: &[u8]) -> Result<Screen, PageError> {
     })
 }
 
-fn decode_cell(fields: &mut Fields<'_>, text: &[u8]) -> Result<Cell, PageError> {
+fn all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|byte| *byte == 0)
+}
+
+/// The text section and where the next cell's text must start.
+struct Text<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Text<'a> {
+    /// The cell text at `offset .. offset + len`: it must start where the
+    /// previous cell's ended and be at most [`MAX_CELL_TEXT`] bytes, so the
+    /// texts of a page sum to its text section, never more.
+    fn take(&mut self, offset: usize, len: usize) -> Result<&'a str, PageError> {
+        if offset != self.at {
+            return Err(PageError::Corrupt("cell text out of order"));
+        }
+        if len > MAX_CELL_TEXT {
+            return Err(PageError::Corrupt("cell text length"));
+        }
+        let bytes = offset
+            .checked_add(len)
+            .and_then(|end| self.bytes.get(offset..end))
+            .ok_or(PageError::Corrupt("cell text outside the text"))?;
+        let text = std::str::from_utf8(bytes).map_err(|_| PageError::Corrupt("cell text UTF-8"))?;
+        self.at = offset + len;
+        Ok(text)
+    }
+}
+
+fn decode_cell(fields: &mut Fields<'_>, text: &mut Text<'_>) -> Result<Cell, PageError> {
     const SHORT: PageError = PageError::Corrupt("truncated cell");
     let offset = fields.u32().ok_or(SHORT)? as usize;
     let len = fields.u32().ok_or(SHORT)? as usize;
@@ -555,12 +642,10 @@ fn decode_cell(fields: &mut Fields<'_>, text: &[u8]) -> Result<Cell, PageError> 
     let flags = fields.u16().ok_or(SHORT)?;
     let width = decode_width(fields.u8().ok_or(SHORT)?)?;
     let underline_style = decode_underline(fields.u8().ok_or(SHORT)?)?;
-    let _reserved = fields.u32().ok_or(SHORT)?;
-    let bytes = offset
-        .checked_add(len)
-        .and_then(|end| text.get(offset..end))
-        .ok_or(PageError::Corrupt("cell text outside the text"))?;
-    let text = std::str::from_utf8(bytes).map_err(|_| PageError::Corrupt("cell text UTF-8"))?;
+    if fields.u32().ok_or(SHORT)? != 0 {
+        return Err(PageError::Corrupt("reserved cell bytes"));
+    }
+    let text = text.take(offset, len)?;
     Ok(Cell {
         text: text.to_owned(),
         width,

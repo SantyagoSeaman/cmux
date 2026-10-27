@@ -155,6 +155,95 @@ fn mutated_pages_never_read_out_of_bounds() {
     }
 }
 
+/// Byte offset of cell `index`'s record in an image of `rows` rows.
+fn cell_at(rows: usize, index: usize) -> usize {
+    PAGE_HEADER + pad8(rows * 2) + index * CELL_BYTES
+}
+
+#[test]
+fn cell_texts_must_follow_each_other() {
+    let good = image(&mut PageEncoder::default(), &rows(), 4);
+    // Every cell pointing at the first cell's text would decode to more
+    // text than the page holds (an allocation amplifier): refused.
+    let mut overlap = good.clone();
+    overlap[cell_at(2, 1)..cell_at(2, 1) + 4].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(decode(&overlap), Err(PageError::Corrupt("cell text out of order")));
+    // Text bytes no cell names.
+    let mut extra = good.clone();
+    let text_len = u32::from_le_bytes(extra[52..56].try_into().expect("word"));
+    extra[52..56].copy_from_slice(&(text_len - 1).to_le_bytes());
+    assert!(matches!(decode(&extra), Err(PageError::Corrupt(_))), "{:?}", decode(&extra));
+    let mut longer = good;
+    let last = cell_at(2, 7);
+    let len = u32::from_le_bytes(longer[last + 4..last + 8].try_into().expect("word"));
+    longer[last + 4..last + 8].copy_from_slice(&(len - 1).to_le_bytes());
+    assert_eq!(decode(&longer), Err(PageError::Corrupt("text outside the cells")));
+}
+
+#[test]
+fn reserved_bytes_and_padding_must_be_zero() {
+    let good = image(&mut PageEncoder::default(), &rows(), 4);
+    let cases: [(usize, &str); 3] = [
+        (OFF_RESERVED + 9, "reserved header bytes"),
+        (cell_at(2, 0) + 28, "reserved cell bytes"),
+        (PAGE_HEADER + 4, "padding"),
+    ];
+    for (at, what) in cases {
+        let mut bad = good.clone();
+        bad[at] = 1;
+        assert_eq!(decode(&bad), Err(PageError::Corrupt(what)));
+    }
+}
+
+#[test]
+fn a_need_no_larger_than_the_header_is_corrupt() {
+    let good = image(&mut PageEncoder::default(), &rows(), 4);
+    let mut tiny = too_small_image(&good, 0);
+    assert_eq!(decode(&tiny), Err(PageError::Corrupt("needed bytes")));
+    tiny[56..64].copy_from_slice(&4096u64.to_le_bytes());
+    assert_eq!(decode(&tiny), Err(PageError::TooSmall { needed: 4096 }));
+}
+
+#[test]
+fn a_long_grapheme_is_cut_to_the_cell_limit() {
+    let long = "e\u{301}".repeat(MAX_CELL_TEXT);
+    let rows = vec![vec![cell(&long), cell("x")]];
+    let screen = decode(&image(&mut PageEncoder::default(), &rows, 2)).expect("screen");
+    let text = &screen.cells[0][0].text;
+    assert!(text.len() <= MAX_CELL_TEXT && long.starts_with(text.as_str()), "{}", text.len());
+    assert_eq!(screen.cells[0][1].text, "x");
+}
+
+#[test]
+fn a_full_grid_of_the_longest_cells_fits_its_bound() {
+    let widest = "\u{10ffff}".repeat(MAX_CELL_TEXT);
+    let row = vec![cell(&widest); 3];
+    let rows = vec![row.clone(), row];
+    let image = image(&mut PageEncoder::default(), &rows, 3);
+    assert!(image.len() as u64 <= max_image_len(3, 2), "{} > {}", image.len(), max_image_len(3, 2));
+    assert!(decode(&image).is_ok());
+}
+
+#[test]
+fn a_reader_refuses_a_segment_shorter_than_its_length() {
+    let fd = create_page(4096).expect("page");
+    let error = PageReader::open(&fd, 8192).expect_err("short segment");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_page_segment_cannot_be_resized() {
+    use std::os::fd::AsRawFd;
+    let fd = create_page(8192).expect("page");
+    for len in [4096, 16384] {
+        // SAFETY: resizes a descriptor the test owns; the call must fail.
+        let result = unsafe { libc::ftruncate(fd.as_raw_fd(), len) };
+        assert_eq!(result, -1, "ftruncate to {len} succeeded");
+    }
+    assert_eq!(shm::segment_len(fd.as_fd()).expect("len"), 8192);
+}
+
 #[test]
 fn modes_follow_the_terminal() {
     let mut terminal = Terminal::new(10, 3, 0, ghostty_vt::Callbacks::default()).expect("terminal");

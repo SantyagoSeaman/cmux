@@ -37,6 +37,8 @@ cmux-remote-protocol = { path = "../crates/cmux-remote-protocol" }
 # Task 020 reaches the host codec, journal, output store and page listener
 # decoders through `cmux_tui_core::fuzz_entry`, behind its `fuzz` feature.
 cmux-tui-core = { path = "../crates/cmux-tui-core", features = ["fuzz"] }
+# p01-process-141: the screen page a VT worker writes and the daemon reads.
+cmux-vt-worker = { path = "../crates/cmux-vt-worker" }
 ghostty-vt = { path = "../crates/ghostty-vt" }
 bytes = "1"
 # Batch 5 (task 021): cmux-tui input schedulers and keys, cmux-config, cmux-server-core.
@@ -411,6 +413,14 @@ bench = false
 [[bin]]
 name = "page_request_head"
 path = "fuzz_targets/page_request_head.rs"
+test = false
+doc = false
+bench = false
+
+# p01-process-141: the screen page a sandboxed VT worker writes, read by the daemon.
+[[bin]]
+name = "vt_worker_page"
+path = "fuzz_targets/vt_worker_page.rs"
 test = false
 doc = false
 bench = false

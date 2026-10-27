@@ -125,6 +125,34 @@ def holder(_repo: Path) -> Iterable[bytes]:
     yield b"cmux-holder wire 1-5\n"
 
 
+def pad8(data: bytes) -> bytes:
+    return data + bytes(-len(data) % 8)
+
+
+def vt_worker_page_image(rows: list[list[bytes]], cols: int) -> bytes:
+    # cmux-vt-worker screen_page.rs layout 1: a 128-byte header, the row
+    # table, 32-byte cells, then the cells' text back to back.
+    cells = b""
+    text = b""
+    for row in rows:
+        for cell in row:
+            cells += struct.pack("<IIIIIIHBBI", len(text), len(cell), 0, 0, 0, 0, 0, 0, 0, 0)
+            text += cell
+    count = sum(len(row) for row in rows)
+    header = (b"CMVP" + struct.pack("<IQ", 1, 0) + bytes([1, 1, 1, 2])
+              + struct.pack("<IQQ", 0, 10, 1) + struct.pack("<HHHH", cols, len(rows), 0, 0)
+              + struct.pack("<IIQ", count, len(text), 0))
+    header += bytes(128 - len(header))
+    table = pad8(b"".join(struct.pack("<H", len(row)) for row in rows))
+    return pad8(header + table + cells + text)
+
+
+def vt_worker_page(_repo: Path) -> Iterable[bytes]:
+    yield vt_worker_page_image([[b"a", "é".encode(), "漢".encode(), b""], [b"z"]], 4)
+    yield vt_worker_page_image([[b" "] * 6] * 4, 6)
+    yield vt_worker_page_image([], 1)
+
+
 TARGETS: dict[str, Callable[[Path], Iterable[bytes]]] = {
     "ghostty_vt_output": terminal_corpus,
     "terminal_host_read_frame": terminal_host_frames,
@@ -132,6 +160,7 @@ TARGETS: dict[str, Callable[[Path], Iterable[bytes]]] = {
     "remote_protocol": remote_protocol,
     "config_jsonc": config_jsonc,
     "holder_decode": holder,
+    "vt_worker_page": vt_worker_page,
 }
 
 

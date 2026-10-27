@@ -84,7 +84,10 @@ impl Drop for Mapping {
     }
 }
 
-/// A new shared segment of `len` bytes (zeroed), close-on-exec.
+/// A new shared segment of `len` bytes (zeroed), close-on-exec, whose size
+/// no holder of a descriptor can change: a worker that shrank its page
+/// would make the daemon's next read of the mapping fault (SIGBUS), so the
+/// size is fixed before the descriptor leaves the daemon (p01-process-141).
 pub(crate) fn create_segment(len: usize) -> io::Result<OwnedFd> {
     let segment = new_segment()?;
     let size = libc::off_t::try_from(len)
@@ -93,18 +96,53 @@ pub(crate) fn create_segment(len: usize) -> io::Result<OwnedFd> {
     if unsafe { libc::ftruncate(segment.as_raw_fd(), size) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    fix_size(&segment)?;
     Ok(segment)
+}
+
+/// The bytes the segment behind `fd` holds now.
+pub(crate) fn segment_len(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat writes a whole `stat` for a live descriptor or fails.
+    if unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstat succeeded, so it initialized `stat`.
+    let size = unsafe { stat.assume_init() }.st_size;
+    u64::try_from(size).map_err(|_| io::Error::other("negative segment size"))
 }
 
 #[cfg(target_os = "linux")]
 fn new_segment() -> io::Result<OwnedFd> {
     // SAFETY: memfd_create returns a new descriptor or -1.
-    let fd = unsafe { libc::memfd_create(c"cmux-vt-page".as_ptr(), libc::MFD_CLOEXEC) };
+    let fd = unsafe {
+        libc::memfd_create(c"cmux-vt-page".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: a fresh descriptor this function owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Seal the memfd's size (memfd_create(2): F_SEAL_SHRINK and F_SEAL_GROW,
+/// then F_SEAL_SEAL so no holder lifts them). Writes stay allowed.
+#[cfg(target_os = "linux")]
+fn fix_size(segment: &OwnedFd) -> io::Result<()> {
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+    // SAFETY: adds seals to a memfd this process made with MFD_ALLOW_SEALING.
+    if unsafe { libc::fcntl(segment.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A POSIX shared memory object on macOS takes one `ftruncate`, the one
+/// [`create_segment`] made: XNU's `pshm_truncate` refuses any later one, so
+/// the size is already fixed.
+#[cfg(not(target_os = "linux"))]
+fn fix_size(_segment: &OwnedFd) -> io::Result<()> {
+    Ok(())
 }
 
 /// An unlinked POSIX shared memory object: only descriptors reach it.
