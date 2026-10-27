@@ -85,6 +85,7 @@ Paths are in chromium/src. Each row names what cmux takes from it.
 | Shared and iOS packages the Linux CI builds | 15 | `grep -hoE 'Packages/(Shared\|iOS\|macOS)/[A-Za-z]+' .github/workflows/swift-packages-linux.yml .github/workflows/cmux-next-terminal.yml \| sort -u \| wc -l` |
 | Settings files that import Design or Icons (block Settings on Linux) | 90 of 289 | `git grep -lE 'import CmuxNext(Design\|Icons)' -- Packages/macOS/CmuxNext/Sources/CmuxNextSettings \| wc -l; git ls-files 'Packages/macOS/CmuxNext/Sources/CmuxNextSettings/**.swift' \| wc -l` |
 | Handlers without a UI import (headless candidates) | 114 of 191 | `git grep -L -E 'import (AppKit\|SwiftUI\|WebKit\|QuartzCore)' -- 'Packages/macOS/CmuxNext/Sources/CmuxNextApp/Handlers/*.swift' \| wc -l; git ls-files 'Packages/macOS/CmuxNext/Sources/CmuxNextApp/Handlers/**.swift' \| wc -l` |
+| UI-free handlers that need no App type outside the composition root (the queue head, section 8) | 22 of 103 to move | `scripts/cmux-next/oracle/headless-handlers.py --summary` |
 
 Nondeterminism the oracle must normalize or remove at the source:
 
@@ -282,6 +283,40 @@ and `swift-shared.sh` with the compiler-error queue (004), `tier-imports.py` (00
   omnibar, `KeyRouter` and palette parts stay in `CmuxNextApp/Focus`, outside the tier, and so do the
   regressions B1-B15. Linux does not cover them until `FocusCoordinator` and its reducers move out of the app,
   and no p15 task does that yet.
+
+### Headless handler queue (162)
+
+[`headless-handlers.py`](../../scripts/cmux-next/oracle/headless-handlers.py) is MQ-headless-handlers. Its
+candidates are exactly the `git grep -L` files of section 2. For each one it lists the CmuxNextApp types the file
+uses. The types come from the [app-graph.py](../../scripts/cmux-next/app-graph.py) scan: the regex scan, or the
+index store with `--index-store`. Each type is one of three kinds:
+
+- **host**: a type of the composition root (`AppActionContext`, `AppServices`, the `AppActionContext+X` Host
+  conformances). It becomes a member of the domain's `<Domain>ActionHost`, so it does not order the queue.
+- **after**: a type that another candidate declares. That candidate moves first. A cycle is one unit.
+- **needs**: a type that the rest of the App declares, or an import of a ui-layer module. It blocks the file until
+  that type moves down or gets a host member. A member that an extension in another file adds is named
+  `Type.member`.
+
+The queue is a topological order of the `after` edges, leaf first. Among the ready files it takes the one with
+the fewest needs, then the fewest host members, then the earliest app-graph group order. The batches follow
+PL-arch slice B5 ([architecture-refactor-DESIGN.md](architecture-refactor-DESIGN.md) section 9). Each batch has
+one app-graph group, so one destination target, and at most 400 lines. A batch comes after the batches it needs.
+The handlers that B5 says PL-cef-tab touches are queued last and are never put in an earlier batch. The script
+reads their names from the B5 row, so the two plans stay one plan.
+
+| At `16504eb8a2d` (regex scan) | Count |
+| --- | --- |
+| UI-free handler files | 114 of 191 |
+| to move; stay in the App (Handlers/Infra, Host conformances) | 103; 11 |
+| no needs (the batch of task 163); also no `after` | 22; 20 |
+| cycle units; B5 PL-cef-tab files (the other two import AppKit) | 4; 3 |
+| domain batches of at most 400 lines | 37 |
+
+`headless-handlers.py --summary` prints these counts. With no flag it prints the queue (TSV), `--batches` prints
+the batches and `--json` prints both. The tests are in `python3 -I scripts/cmux-next/oracle/headless_handlers_test.py`.
+Two cycles cross destinations (`TabGroupHandlers+Moves` with `TabGroupHandlers`, and `GroupIconHandlers` with
+`IconHistory+Kinds`). Each one needs a cut through the host before the move.
 
 ## 9. Lifecycle of a refactor under the oracle
 
