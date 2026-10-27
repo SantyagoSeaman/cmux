@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 0099f55a8d73eeccd65a50020e3ff0c8be1ac82f5723a1d6b384ce58b5e9108c. */
+/* cmux-tui mux protocol 12, IR fafa58afff3f250db4a9c3ec19aaedc84dd27ee66923f409ec20e86e672d1569. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "0099f55a8d73eeccd65a50020e3ff0c8be1ac82f5723a1d6b384ce58b5e9108c" as const;
+export const SDK_IR_SHA256 = "fafa58afff3f250db4a9c3ec19aaedc84dd27ee66923f409ec20e86e672d1569" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -254,7 +254,7 @@ export const COMMAND_METADATA = {
     "constraints": [
       "A malformed request or an unknown param is agent_session.bad_request, answered before the trust check. Then only trusted local (Unix) connections pass: WebSocket clients and the remote relay are refused with agent_session.not_trusted, and a daemon without an acpmux socket answers agent_session.unavailable.",
       "The session always comes from the tab's store record: no param names a session, cwd, command, agent or MCP server.",
-      "The tab must be an agent_session tab of this store with a bound session that acpmux resolves exactly, else agent_session.unknown_tab. 8 attachments per connection and 64 per daemon (agent_session.limit).",
+      "The tab must be an agent_session tab of this store with a bound session that acpmux resolves exactly, else agent_session.unknown_tab. 32 attachments per connection and 64 per daemon (agent_session.limit).",
       "Subscribes the connection to the tab's session and answers the attach page; on a tab already attached in this mode it only pages, and on one observed it is agent_session.mode_conflict.",
       "Live records then arrive as agent-session-record, permission requests as agent-session-permission and status changes as agent-session-changed; agent-session-closed ends the attachment. A record never overtakes the attach reply. See spec/commands.md.",
       "limit is clamped to 1..500 (default 200), never refused. kinds holds at most 32 entries of 1 to 64 bytes of [a-z_.], else agent_session.bad_request. A page holds at most 8 MiB of records, the rest left for the next page with hasMore."

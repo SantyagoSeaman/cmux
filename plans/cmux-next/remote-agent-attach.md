@@ -49,7 +49,7 @@ with `after_seq` = its newest seq (the page's existing `fetchMissedEvents`). The
 `agent-session-closed` or a dropped daemon connection; the page asks for a fresh handshake and a
 fresh wire (the ended attachment's daemon connection closes). Notifications that reach the
 daemon before acpmux's attach reply (a running turn) wait in a bounded buffer of 256 and go out
-after the reply; the reader never blocks. Bounds: 8 attachments per connection, 64 per daemon, 8
+after the reply; the reader never blocks. Bounds: 32 attachments per connection, 64 per daemon, 8
 worker calls and 16 acpmux calls in flight per attachment (a prompt holds none: its end-of-turn
 reply is not waited for), pages of 500 records and 8 MiB, prompts of 64 KiB, acpmux lines of
 32 MiB, early notifications 256 and 16 MiB.

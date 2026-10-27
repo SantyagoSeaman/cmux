@@ -71,7 +71,7 @@ public final class DaemonWireStats: Sendable {
         case pageRelay
         /// One attached terminal view (`TerminalAttachment`).
         case terminalAttach
-        /// One attached agent session view (`AgentSessionAttachClient`).
+        /// A connection of one agent session view's own (`AgentSessionAttachClient` off the shared connection).
         case agentSessionAttach
         /// A journal read (`SessionJournalRead`).
         case journalRead

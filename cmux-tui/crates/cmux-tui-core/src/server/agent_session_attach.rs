@@ -43,7 +43,9 @@ pub use agent_session_trust::AGENT_SESSION_TRUST_CAPABILITY;
 
 pub const AGENT_SESSION_ATTACH_CAPABILITY: &str = "agent-session-attach-v1";
 
-pub(crate) const MAX_ATTACHMENTS_PER_CLIENT: usize = 8;
+/// Per connection: the app carries every agent pane of a machine on its one connection to this
+/// daemon (p01-process-236), so this bounds one app, not one pane.
+pub(crate) const MAX_ATTACHMENTS_PER_CLIENT: usize = 32;
 pub(crate) const MAX_ATTACHMENTS_TOTAL: usize = 64;
 /// Records per attach or events page.
 pub(crate) const MAX_PAGE: u64 = 500;

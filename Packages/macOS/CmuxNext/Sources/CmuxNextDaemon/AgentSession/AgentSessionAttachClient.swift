@@ -2,63 +2,51 @@ import CmuxNextCompat
 public import Foundation
 import os
 
-/// One agent chat tab of a session daemon, attached over a dedicated daemon connection
+/// One agent chat tab of a session daemon, attached as a stream on a connection to that daemon
 /// (`agent-session-attach-v1`, cmux-tui/spec/commands.md "Agent session attach"): how the app
-/// shows a chat whose acpmux runs on the daemon's machine. A separate socket from the control
-/// connection, so a long transcript replay never delays the tree.
+/// shows a chat whose acpmux runs on the daemon's machine.
 ///
-/// Connects on the first attach. A dropped connection ends the attachment (`closed`), and the
+/// With a `shared` carrier (the machine's ready connection, ``DaemonConnection/agentSessionCarrier()``)
+/// every agent pane of the machine is a stream on that one connection: no socket, reader thread or
+/// handshake of its own. Its events reach the page through a bounded queue
+/// (``AgentSessionEventQueue``), never on the reader thread, so a long transcript replay delays
+/// neither the tree nor another pane. A client takes a connection of its own (through `endpoint`)
+/// only where the shared one cannot carry it: no shared carrier, another pane holds the same tab's
+/// attachment there, or the daemon refuses it there (``sharedRefusals``: an older daemon's limit of
+/// 8 attachments per connection).
+///
+/// Connects on the first verb. A dropped connection ends the attachment (`closed`), and the
 /// page reconnects with a fresh client and replays from the newest seq it holds. Nothing here
 /// names a session, a folder or a command: the daemon pins the session from its tab record.
 public actor AgentSessionAttachClient {
     public typealias EndpointProvider = @Sendable () async throws -> DaemonEndpoint
+    /// The machine's shared connection as an agent carrier; nil while it has none.
+    public typealias CarrierProvider = @Sendable () async -> AgentSessionCarrier?
     /// One push for the attachment: `agent-session-record`, `-permission` or `-closed`, with
     /// the line's JSON object.
     public typealias EventHandler = @Sendable (_ event: String, _ line: Data) -> Void
 
-    /// How the daemon attachment is used. Observation has its own capability and command so a
-    /// missing observer feature can never silently fall back to a writable attach.
-    public enum Mode: Sendable, Equatable {
-        case attach
-        case observe
-
-        var capability: String {
-            switch self {
-            case .attach: return DaemonCapability.agentSessionAttach.rawValue
-            case .observe: return DaemonCapability.agentSessionObserve.rawValue
-            }
-        }
-
-        var command: DaemonCommandName {
-            switch self {
-            case .attach: return "agent-session-attach"
-            case .observe: return "agent-session-observe"
-            }
-        }
-
-        var clientInfoKind: String { command.wire }
-        var clientInfoName: String {
-            switch self {
-            case .attach: return "cmux-next agent attach"
-            case .observe: return "cmux-next agent observer"
-            }
-        }
-
-        var unsupportedMessage: String {
-            let feature = self == .observe ? "agent session observation" : "agent session attach"
-            return "the daemon does not serve \(feature)"
-        }
-    }
-
     public static let capability = DaemonCapability.agentSessionAttach.rawValue
+
+    /// Refusals of the shared connection that a connection of the client's own does not get: the
+    /// per-connection attachment limit, a shared connection the daemon does not trust for agent
+    /// verbs, and a tab the shared connection holds in the other mode.
+    static let sharedRefusals: Set<String> = ["agent_session.limit", "agent_session.not_trusted", "agent_session.mode_conflict"]
 
     private let surface: UInt64
     private let mode: Mode
     private let endpoint: EndpointProvider
+    private let shared: CarrierProvider?
     private let requestTimeout: Duration
+    private let queueLimits: AgentSessionEventQueue.Limits
     private let logger = Logger(subsystem: "com.cmuxterm.app.next", category: "agent-attach")
-    private var transport: LineTransport?
-    private var connecting: Task<LineTransport, any Error>?
+    /// The connection this client's verbs go on.
+    private var carrier: AgentSessionCarrier?
+    private var connecting: Task<AgentSessionCarrier, any Error>?
+    /// This client's attachment: its stream on `carrier`.
+    private var stream: AgentSessionStream?
+    /// The shared connection cannot carry this client: it uses a connection of its own from now on.
+    private var ownConnection = false
     private let handler = HandlerBox()
     private var closed = false
     /// The connected daemon serves `agent-session-start-v1` (read from its own `identify`).
@@ -77,20 +65,53 @@ public actor AgentSessionAttachClient {
         public init(instance: String?) { self.instance = instance }
     }
 
-    /// `surface`: the tab's surface id in the daemon's store.
+    /// - Parameters:
+    ///   - surface: The tab's surface id in the daemon's store.
+    ///   - requestTimeout: The deadline of each verb's reply.
+    ///   - mode: Attach, or observe read-only.
+    ///   - shared: The machine's connection to carry the client; nil gives it a connection of its own.
+    ///   - endpoint: Where a connection of the client's own goes.
     public init(surface: UInt64, requestTimeout: Duration = .seconds(10), mode: Mode = .attach,
-                endpoint: @escaping EndpointProvider) {
+                shared: CarrierProvider? = nil, endpoint: @escaping EndpointProvider) {
+        self.init(surface: surface, requestTimeout: requestTimeout, mode: mode, shared: shared,
+                  queueLimits: AgentSessionEventQueue.Limits(), endpoint: endpoint)
+    }
+
+    /// As the public init, with the bound of the attachment's event queue (tests).
+    init(surface: UInt64, requestTimeout: Duration, mode: Mode, shared: CarrierProvider?,
+         queueLimits: AgentSessionEventQueue.Limits, endpoint: @escaping EndpointProvider) {
         self.surface = surface
         self.mode = mode
         self.endpoint = endpoint
+        self.shared = shared
         self.requestTimeout = requestTimeout
+        self.queueLimits = queueLimits
+    }
+
+    deinit {
+        // A client dropped without close() lets go of its tab on the shared connection.
+        let owns = carrier?.ownsConnection == true
+        stream?.end(sendsDetach: !owns)
+        if owns { carrier?.transport.close() }
     }
 
     /// Subscribes and returns the attach page's JSON. Pushes go to `events` from then on.
     public func attach(afterSeq: UInt64?, beforeSeq: UInt64?, limit: Int?, kinds: [String]?,
                        events: @escaping EventHandler) async throws -> Data {
         handler.set(events)
-        return try await call(mode.command, page(afterSeq, beforeSeq, limit, kinds))
+        let params = page(afterSeq, beforeSeq, limit, kinds)
+        // On an attached tab the daemon only pages.
+        if let stream, stream.isOpen { return try await call(mode.command, params) }
+        stream = nil
+        let first = try await liveCarrier()
+        if let page = try await openAttachment(params, on: first) { return page }
+        // The shared connection cannot carry this attachment: a connection of the client's own.
+        leaveSharedConnection()
+        let own = try await liveCarrier()
+        guard let page = try await openAttachment(params, on: own) else {
+            throw DaemonError.connectionClosed(reason: "the agent attach connection closed")
+        }
+        return page
     }
 
     public func events(afterSeq: UInt64?, beforeSeq: UInt64?, limit: Int?, kinds: [String]?) async throws -> Data {
@@ -109,7 +130,7 @@ public actor AgentSessionAttachClient {
         guard mode == .attach else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "a read-only agent session cannot start a chat")
         }
-        _ = try await liveTransport()
+        _ = try await liveCarrier()
         guard servesStart else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "the daemon does not serve agent session start")
         }
@@ -135,7 +156,7 @@ public actor AgentSessionAttachClient {
         guard mode == .attach else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "a read-only agent session cannot change trust")
         }
-        _ = try await liveTransport()
+        _ = try await liveCarrier()
         guard servesTrust else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "the daemon does not serve agent session trust")
         }
@@ -167,33 +188,39 @@ public actor AgentSessionAttachClient {
         _ = try await call("agent-session-permission", params)
     }
 
+    /// Ends this client's attachment; no push after it. Sends nothing when it holds none: on a
+    /// shared connection the tab's attachment may be another pane's.
     public func detach() async {
-        _ = try? await call("agent-session-detach", [:])
+        guard let stream else { return }
+        self.stream = nil
+        await stream.detach(timeout: requestTimeout)
     }
 
     /// `agent-session-children` (`agent-session-children-v1`): the chats the attached tab's session
     /// started on the daemon's machine (`{sessions}`, acpmux summaries); the attachment then
     /// streams their changes too. A daemon without the verb lists none.
     public func children() async throws -> Data {
-        _ = try await liveTransport()
+        _ = try await liveCarrier()
         guard servesChildren else { return Data(#"{"sessions":[]}"#.utf8) }
         return try await call("agent-session-children", [:])
     }
 
     /// Reads one image from the attached session's host acpmux (`agent-session-media`).
     public func media(path: String) async throws -> Data {
-        _ = try await liveTransport()
-        return try await call("agent-session-media", ["path": path])
+        try await call("agent-session-media", ["path": path])
     }
 
-    /// Ends the attachment and the connection; no push after it.
+    /// Ends the attachment, and the connection when it is the client's own; no push after it.
     public func close() {
         closed = true
         handler.set(nil)
         connecting?.cancel()
         connecting = nil
-        transport?.close()
-        transport = nil
+        let owns = carrier?.ownsConnection == true
+        stream?.end(sendsDetach: !owns)
+        stream = nil
+        if owns { carrier?.transport.close() }
+        carrier = nil
     }
 
     // MARK: Private
@@ -207,9 +234,56 @@ public actor AgentSessionAttachClient {
         return params
     }
 
-    /// One verb on the tab; the result's `data` as JSON, or the daemon's refusal.
+    /// Opens this client's stream on `carrier` and sends the attach (or observe). Nil when the
+    /// carrier cannot carry it: the transport closed, another stream holds the tab there, or a shared
+    /// connection's refusal (``sharedRefusals``). The stream is registered before the request, so
+    /// the records that follow the reply reach it.
+    private func openAttachment(_ params: [String: any Sendable], on carrier: AgentSessionCarrier) async throws -> Data? {
+        let handler = handler
+        let opened = AgentSessionStream.open(surface: surface, on: carrier.transport, limits: queueLimits) { name, line in
+            handler.current?(name, line)
+            if name == AgentSessionStream.closedEvent { handler.set(nil) }
+        }
+        guard let opened else { return nil }
+        stream = opened
+        do {
+            return try await call(mode.command, params, on: carrier)
+        } catch let refusal as AgentSessionAttachError where !carrier.ownsConnection && Self.sharedRefusals.contains(refusal.code) {
+            logger.info("agent attach refused on the shared connection: \(refusal.code, privacy: .public)")
+            dropStream(opened)
+            return nil
+        } catch {
+            dropStream(opened)
+            throw error
+        }
+    }
+
+    /// Forgets a stream whose attach failed: the daemon opened nothing for it.
+    private func dropStream(_ dropped: AgentSessionStream) {
+        dropped.end(sendsDetach: false)
+        if stream === dropped { stream = nil }
+    }
+
+    /// From now on this client's verbs go on a connection of its own; the shared one stays open.
+    private func leaveSharedConnection() {
+        ownConnection = true
+        if carrier?.ownsConnection == false { carrier = nil }
+    }
+
+    /// One verb on the tab; the result's `data` as JSON, or the daemon's refusal. A verb the shared
+    /// connection is not trusted for, sent with no attachment there, goes on a connection of the client's own.
     private func call(_ cmd: DaemonCommandName, _ params: [String: any Sendable]) async throws -> Data {
-        let transport = try await liveTransport()
+        let current = try await liveCarrier()
+        do {
+            return try await call(cmd, params, on: current)
+        } catch let refusal as AgentSessionAttachError where !current.ownsConnection && stream == nil
+                    && refusal.code == "agent_session.not_trusted" {
+            leaveSharedConnection()
+            return try await call(cmd, params, on: try await liveCarrier())
+        }
+    }
+
+    private func call(_ cmd: DaemonCommandName, _ params: [String: any Sendable], on carrier: AgentSessionCarrier) async throws -> Data {
         var object = params
         object["cmd"] = cmd.wire
         object["surface"] = surface
@@ -217,7 +291,7 @@ public actor AgentSessionAttachClient {
         let fields = try JSONSerialization.data(withJSONObject: object)
         let response: LineTransport.Response
         do {
-            response = try await transport.request(cmd: cmd, timeout: requestTimeout) { id in
+            response = try await carrier.transport.request(cmd: cmd, timeout: requestTimeout) { id in
                 Data(#"{"id":\#(id),"#.utf8) + fields.dropFirst()
             }
         } catch DaemonError.command(_, let message, let code, let details, _) {
@@ -227,65 +301,64 @@ public actor AgentSessionAttachClient {
         return Self.data(of: response.line)
     }
 
-    private func liveTransport() async throws -> LineTransport {
+    private func liveCarrier() async throws -> AgentSessionCarrier {
         if closed { throw AgentSessionAttachError(code: "agent_session.closed", message: "closed") }
-        if let transport, !transport.isClosed { return transport }
-        transport = nil
+        if let carrier, !carrier.transport.isClosed { return carrier }
+        carrier = nil
         if let connecting { return try await connecting.value }
         let task = Task { try await self.connect() }
         connecting = task
         defer { connecting = nil }
-        let transport = try await task.value
+        let connected = try await task.value
         if closed {
-            transport.close()
+            if connected.ownsConnection { connected.transport.close() }
             throw AgentSessionAttachError(code: "agent_session.closed", message: "closed")
         }
-        self.transport = transport
-        return transport
+        carrier = connected
+        return connected
     }
 
-    private func connect() async throws -> LineTransport {
+    /// The machine's shared connection when there is one and the client may use it, else a
+    /// connection of the client's own.
+    private func connect() async throws -> AgentSessionCarrier {
+        if !ownConnection, let shared, let carrier = await shared(), !carrier.transport.isClosed {
+            try adopt(carrier.identity)
+            return carrier
+        }
+        return try await connectOwn()
+    }
+
+    /// Reads what the daemon serves; throws when it does not serve this client's mode.
+    private func adopt(_ identity: DaemonIdentity) throws {
+        guard identity.supports(mode.capability) else {
+            throw AgentSessionAttachError(code: "agent_session.unsupported", message: mode.unsupportedMessage)
+        }
+        servesStart = identity.supports(DaemonCapability.agentSessionStart.rawValue)
+        servesTrust = identity.supports(DaemonCapability.agentSessionTrust.rawValue)
+        servesKeyedReason = identity.supports(DaemonCapability.agentSessionStartKeyedReason.rawValue)
+        servesChildren = identity.supports(DaemonCapability.agentSessionChildren.rawValue)
+    }
+
+    /// A connection of this client's own. Its agent events route to the client's stream as the
+    /// shared connection's do (``LineTransport/routeAgentSession(name:line:decoder:)``).
+    private func connectOwn() async throws -> AgentSessionCarrier {
         let endpoint = try await self.endpoint()
-        let transport = try LineTransport(path: endpoint.socketPath, role: .agentSessionAttach, stats: endpoint.wireStats)
-        let handler = handler
-        let surface = surface
-        let recorder = transport.recorder
-        transport.start(
-            onEvent: { name, line, _ in
-                guard name.hasPrefix("agent-session-") else { return }
-                recorder?.decoded()  // Self.surface(of:) parses the line
-                guard Self.surface(of: line) == surface else { return }
-                handler.current?(name, line)
-                if name == "agent-session-closed" { handler.set(nil) }
-            },
-            onClose: { [logger] reason in
-                guard let current = handler.current else { return }
-                handler.set(nil)
-                logger.info("agent attach connection ended: \(String(describing: reason), privacy: .public)")
-                current("agent-session-closed", Data(#"{"event":"agent-session-closed","reason":"connection_lost"}"#.utf8))
-            })
+        let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge,
+                                                     role: .agentSessionAttach, stats: endpoint.wireStats)
+        transport.start(onEvent: { _, _, _ in }, onClose: { [logger] reason in
+            logger.info("agent attach connection ended: \(String(describing: reason), privacy: .public)")
+        })
         do {
             let identity = try await DaemonConnection.perform(IdentifyRequest(), on: transport, timeout: requestTimeout)
-            guard identity.supports(mode.capability) else {
-                transport.close()
-                throw AgentSessionAttachError(code: "agent_session.unsupported", message: mode.unsupportedMessage)
-            }
-            servesStart = identity.supports(DaemonCapability.agentSessionStart.rawValue)
-            servesTrust = identity.supports(DaemonCapability.agentSessionTrust.rawValue)
-            servesKeyedReason = identity.supports(DaemonCapability.agentSessionStartKeyedReason.rawValue)
-            servesChildren = identity.supports(DaemonCapability.agentSessionChildren.rawValue)
+            try adopt(identity)
             _ = try await DaemonConnection.perform(
                 SetClientInfoRequest(name: mode.clientInfoName, kind: mode.clientInfoKind, capabilities: []),
                 on: transport, timeout: requestTimeout)
+            return AgentSessionCarrier(transport: transport, identity: identity, ownsConnection: true)
         } catch {
             transport.close()
             throw error
         }
-        return transport
-    }
-
-    private static func surface(of line: Data) -> UInt64? {
-        ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any])?["surface"].flatMap { ($0 as? NSNumber)?.uint64Value }
     }
 
     /// The `data` member of an `ok:true` response line, as JSON.
@@ -297,30 +370,7 @@ public actor AgentSessionAttachClient {
     }
 }
 
-/// A refused attach verb: the daemon's `error_code` (`agent_session.*`) and text.
-public struct AgentSessionAttachError: Error, Sendable, Equatable {
-    public var code: String
-    public var message: String
-    /// A typed refusal's facts (the response's `data`), when it has them.
-    public var details: JSONValue? = nil
-
-    public init(code: String, message: String, details: JSONValue? = nil) {
-        self.code = code
-        self.message = message
-        self.details = details
-    }
-
-    /// `agent_session.needs_keyed_start`: whether that machine's daemon says a keyed restart of
-    /// its acpmux loses nothing (`safe_to_restart`); nil for any other refusal.
-    public var keyedRestartSafe: Bool? {
-        guard code == Self.needsKeyedStart else { return nil }
-        return details?["safe_to_restart"]?.boolValue ?? false
-    }
-
-    public static let needsKeyedStart = "agent_session.needs_keyed_start"
-}
-
-/// The current push handler, read on the transport's reader thread.
+/// The current push handler, read by the attachment's event queue.
 private final class HandlerBox: Sendable {
     private let lock = Mutex<AgentSessionAttachClient.EventHandler?>(nil)
     var current: AgentSessionAttachClient.EventHandler? { lock.withLock { $0 } }

@@ -13,6 +13,8 @@ extension LineTransport {
         var armedAt: Duration?
         var closed: TransportCloseReason?
         var sawShutdown = false
+        /// Agent session attachments by surface (LineTransport+AgentSessions.swift).
+        var agentSessions = AgentSessionRoutes()
         /// Stream-0 events routed so far (raw events and `controlStreams`
         /// lines); responses capture it as their barrier.
         var eventCount: UInt64 = 0

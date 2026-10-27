@@ -347,6 +347,7 @@ final class LineTransport: Sendable {
             return state.pending.removeAllInSendOrder()
         }
         deadlineTimer.cancel()
+        endAgentSessions(state.withLock { $0.closed } ?? reason)
         let error = Self.closedError(reason)
         for entry in unanswered {
             // A request the connection closed under never gets its reply.

@@ -236,7 +236,9 @@ extension AgentTabStore {
                 guard started else { return nil }
                 return AgentTabRefusedHost(refusal: .startUnsupported(machine: machine))
             }
-            var host = AgentTabRemoteHost(surface: tab.surface.rawValue, session: session, machine: machine, endpoint: endpoint, mainWork: services.mainWork, servesTrust: daemon.supports(DaemonCapability.agentSessionTrust.rawValue),
+            // One connection per machine carries its agent panes (daemonAgentSessionStreams); off: one per pane.
+            let shared = services.features.isEnabled(.daemonAgentSessionStreams) ? daemon.agentSessionCarrierProvider : nil
+            var host = AgentTabRemoteHost(surface: tab.surface.rawValue, session: session, machine: machine, endpoint: endpoint, shared: shared, mainWork: services.mainWork, servesTrust: daemon.supports(DaemonCapability.agentSessionTrust.rawValue),
                                            servesKeyedReason: daemon.supports(DaemonCapability.agentSessionStartKeyedReason.rawValue))
             if started {
                 // The tab may still be provisional here: each handshake reads its store surface.
@@ -253,7 +255,7 @@ extension AgentTabStore {
                 guard daemon.supports(DaemonCapability.agentSessionStart.rawValue) else { return AgentTabRefusedHost(refusal: .startUnsupported(machine: machine)) }
                 host.start = { [weak tabs] cwd, harness, personKey in
                     guard let tabs else { throw CancellationError() }
-                    return try await tabs.startRemoteChat(key, machine: machine, cwd: cwd, harness: harness, personKey: personKey, endpoint: endpoint)
+                    return try await tabs.startRemoteChat(key, machine: machine, cwd: cwd, harness: harness, personKey: personKey, shared: shared, endpoint: endpoint)
                 }
             }
             // cx-0q7o: the app's own ssh exec to that machine restarts its acpmux with a key.

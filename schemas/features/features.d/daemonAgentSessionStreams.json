@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "daemonAgentSessionStreams",
+  "owner": "PL-conn",
+  "description": "Agent chat panes of a remote machine attach as streams on the app's one connection to that machine's daemon, each with a bounded event queue, instead of each pane opening a socket, a reader thread and a handshake of its own.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "app",
+  "params": [],
+  "stories": ["agent-stream"],
+  "sticky": false,
+  "runtimeMutable": false
+}

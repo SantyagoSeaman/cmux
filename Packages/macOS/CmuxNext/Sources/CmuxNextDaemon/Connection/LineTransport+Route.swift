@@ -48,6 +48,10 @@ extension LineTransport {
                 return
             }
         }
+        // An agent attachment's event goes to its surface's receiver, not to stream 0.
+        if !streamed, let name = envelope.event, Self.agentSessionEvents.contains(name) {
+            return routeAgentSession(name: name, line: line, decoder: decoder)
+        }
         if let name = streamed ? Self.streamEvent : envelope.event {
             let index = state.withLock { state -> UInt64 in
                 if name == "daemon-shutdown" { state.sawShutdown = true }
