@@ -460,9 +460,13 @@ impl Hub {
         }
         // Boxed: a start is a deep future, and the stack a caller polls it on is not.
         let wake = self.wake_began(session);
-        let child = Box::pin(self.reach_or_start(session, profile, stops)).await;
-        self.wake_ended(session, wake, child.as_ref().err());
-        let child = child?;
+        let child = match Box::pin(self.reach_or_start(session, profile, stops)).await {
+            Ok(child) => child,
+            Err(e) => {
+                self.wake_ended(session, wake, Some(&e));
+                return Err(e);
+            }
+        };
         // Stopped while this agent started (no other start can run while this one holds the
         // spawn lock): the stop found no agent to end yet, or the start went on after it. The
         // agent is ended here and the session stays closed.
@@ -480,8 +484,11 @@ impl Hub {
             // As `kill` left it: a start above may have cleared it.
             session.closing.store(true, Ordering::SeqCst);
             self.append(session, "mux", "stopped_while_starting", json!({}));
-            return Err(stopped_while_starting());
+            let e = stopped_while_starting();
+            self.wake_ended(session, wake, Some(&e));
+            return Err(e);
         }
+        self.wake_ended(session, wake, None);
         Ok(child)
     }
 

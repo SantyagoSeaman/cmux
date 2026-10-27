@@ -531,17 +531,17 @@ def proc_table():
     return rows
 
 
-def agent_procs(home, daemon_pid, session):
+def agent_procs(home, session):
     """The pids of `session`'s agent: its host (`hosts/<id>.json`) or the daemon's child, and everything
     under it (the harness and its MCP servers)."""
     rows = proc_table()
-    roots = []
     path = os.path.join(home, "hosts", f"{session}.json")
-    if os.path.exists(path):
-        rec = json.load(open(path))
-        roots = [p for p in (rec.get("host_pid"), rec.get("harness_pid")) if p]
-    else:
-        roots = [pid for pid, (ppid, _) in rows.items() if ppid == daemon_pid]
+    if not os.path.exists(path):
+        # Not hosted: its harness is the daemon's child, and nothing names which one is this
+        # session's. Counted as unknown, never as another session's processes.
+        return None, 0
+    rec = json.load(open(path))
+    roots = [p for p in (rec.get("host_pid"), rec.get("harness_pid")) if p]
     tree = list(dict.fromkeys(roots))
     i = 0
     while i < len(tree):
@@ -568,13 +568,15 @@ def hibernate_main(args, daemon: Daemon, scratch):
             sid = r["sessionId"]
             daemon.next += 1
             acp_turn(daemon.io, daemon.io.mark(), daemon.next, sid, "Reply with ok.")
-            pids, rss = agent_procs(daemon.home, daemon.p.pid, sid)
-            chats.append({"harness": h, "sid": sid, "pids": pids, "procs": len(pids), "rss_mb": round(rss / 1024, 1),
+            pids, rss = agent_procs(daemon.home, sid)
+            chats.append({"harness": h, "sid": sid, "pids": pids or [], "procs": None if pids is None else len(pids),
+                          "rss_mb": round(rss / 1024, 1),
                           "typed": k % 2})
     print(f"hibernate: {len(chats)} chats idle for {args.idle_wait} s", file=sys.stderr, flush=True)
     time.sleep(args.idle_wait)
     for c in chats:
-        c["left"] = sum(1 for p in c.pop("pids") if alive(p))
+        pids = c.pop("pids")
+        c["left"] = sum(1 for p in pids if alive(p)) if c["procs"] is not None else None
     for c in chats:
         if c["typed"]:
             daemon.request("_acpmux/typing", {"sessionId": c["sid"], "on": True})

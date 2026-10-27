@@ -157,11 +157,13 @@ impl Hub {
                     Some(c) => c.host_record().is_some() && !c.is_alive().await,
                     None => false,
                 };
+                // Marked before the harness ends: typing or a click while it ends wakes it
+                // again, its start waiting for the spawn lock this pass holds.
+                session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
                 self.detach_child(&session).await;
                 if link_lost {
                     self.end_unadopted_host(&session).await;
                 }
-                session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
                 tracing::info!(
                     session = %session.id,
                     cause = "idle",
@@ -217,31 +219,36 @@ impl Hub {
     }
 
     /// A person typed into `session` (`_acpmux/typing` on, sent again every 5 s while typing goes
-    /// on): its idle period starts again, and a hibernated session wakes
-    /// now, so its agent is up by the time they send. Nothing for a session that was not
-    /// hibernated, is closed, already has its agent or starts one, or whose folder has no Trust
-    /// answer (`warm.rs`). The wake runs on its own task; a failure is logged and the prompt that
-    /// follows starts the agent itself (and shows its error, with Retry, if that fails too).
-    pub fn wake_for_typing(self: &Arc<Self>, session: &Arc<Session>, web: bool) {
-        // Typing is use: a chat being typed into does not hibernate meanwhile.
+    /// on, cause `typing`) or opened it on screen (`_acpmux/attach` or `_acpmux/view` visible,
+    /// cause `click`): its idle period starts again, and a hibernated session wakes now, so its
+    /// agent is up by the time they send. Nothing for a session that was not hibernated, is
+    /// closed, is watched (no agent until Take Over, `watch.rs`), or whose folder has no Trust
+    /// answer (`warm.rs`). The wake runs on its own task under the stop count read here, so a
+    /// Stop that comes first is never undone by it (`ensure_child`). A failure is logged and the
+    /// prompt that follows starts the agent itself (and shows its error, with Retry, if that
+    /// fails too).
+    pub fn wake_for(self: &Arc<Self>, session: &Arc<Session>, web: bool, cause: &'static str) {
+        // Use: a chat being typed into or opened does not hibernate meanwhile.
         self.touch(session);
+        let stops = session.stops.load(Ordering::SeqCst);
         if session.hibernated_at.load(Ordering::SeqCst) == 0
-            || session.status() != SessionStatus::Idle
-            // A watched chat starts no agent until Take Over (`watch.rs`).
+            || session.status() == SessionStatus::Closed
             || session.meta().watching.is_some()
             || self.stopping.load(Ordering::SeqCst)
-            || session.spawn_lock.try_lock().is_err()
         {
             return;
         }
         let hub = self.clone();
         let session = session.clone();
         tokio::spawn(async move {
-            if !hub.folder_trusted(&session, web).await {
+            if !hub.folder_trusted(&session, web).await
+                || session.stops.load(Ordering::SeqCst) != stops
+                || session.status() == SessionStatus::Closed
+            {
                 return;
             }
-            hub.wake_cause(&session, "typing");
-            let _ = hub.child_for(&session).await;
+            hub.wake_cause(&session, cause);
+            let _ = hub.child_for_since(&session, stops).await;
         });
     }
 }

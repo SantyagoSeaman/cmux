@@ -85,9 +85,14 @@ impl Rig {
 
     /// Idles `id` past its 2 minutes and waits until its harness and MCP server are gone.
     async fn hibernate(&self, id: &str) {
+        self.clock.advance(IDLE + Duration::from_secs(1));
+        self.hibernated(id).await;
+    }
+
+    /// Waits until `id` hibernated: its newest harness and MCP server are gone.
+    async fn hibernated(&self, id: &str) {
         let (harness, sidecar) =
             (*self.pids("harness").last().unwrap(), *self.pids("sidecar").last().unwrap());
-        self.clock.advance(IDLE + Duration::from_secs(1));
         self.until("the idle session never hibernated", || self.status(id) == "idle").await;
         self.until("the harness outlived its hibernation", || !alive(harness)).await;
         self.until("the MCP server outlived its hibernation", || !alive(sidecar)).await;
@@ -136,7 +141,9 @@ async fn an_idle_session_hibernates_after_two_minutes_even_while_shown() {
     settle().await;
     assert_eq!(r.status(&id), "ready", "hibernated before its 2 minutes");
     assert!(alive(harness) && alive(sidecar));
-    r.hibernate(&id).await;
+    // 2 minutes and 1 second after the turn.
+    r.clock.advance(Duration::from_secs(2));
+    r.hibernated(&id).await;
     let after = r.hub.events(&id, 0, 10_000).unwrap();
     let new: Vec<&str> = after[before..].iter().map(|e| e.kind.as_str()).collect();
     assert!(new.iter().all(|k| ["status", "stopped"].contains(k)), "{new:?}");
@@ -257,4 +264,46 @@ async fn a_failed_wake_fails_its_prompt_with_its_error_and_a_retry_wakes_it() {
             .await
             .unwrap();
     assert_eq!(retried["stopReason"], "end_turn");
+}
+
+/// Opening a hibernated chat on screen (a click: `_acpmux/view` visible, or an attach that
+/// shows it) wakes it; one attached hidden does not.
+#[tokio::test]
+async fn opening_a_hibernated_chat_wakes_it_and_a_hidden_attach_does_not() {
+    let mut r = rig(PermissionPolicy::ApproveAll).await;
+    let id = new_session(&mut r.c, "click").await;
+    r.c.request(method::SESSION_PROMPT, prompt(&id, "hi", None)).await.unwrap();
+    r.hibernate(&id).await;
+    let mut hidden = connect(&r.hub).await;
+    hidden
+        .request(method::MUX_ATTACH, json!({"sessionId": id, "limit": 0, "visible": false}))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(r.status(&id), "idle", "a hidden attach woke the chat");
+    assert_eq!(r.pids("harness").len(), 1);
+    r.c.request(method::MUX_VIEW, json!({"sessionId": id, "visible": true})).await.unwrap();
+    r.until("showing the chat did not wake it", || r.status(&id) == "ready").await;
+    assert_eq!(r.pids("harness").len(), 2);
+    r.hibernate(&id).await;
+    let mut shown = connect(&r.hub).await;
+    shown.request(method::MUX_ATTACH, json!({"sessionId": id, "limit": 0})).await.unwrap();
+    r.until("opening the chat did not wake it", || r.status(&id) == "ready").await;
+    assert_eq!(r.pids("harness").len(), 3);
+}
+
+/// A Stop right after typing into a hibernated chat leaves it stopped: the wake typing began
+/// never reopens it.
+#[tokio::test]
+async fn a_stop_after_typing_into_a_hibernated_chat_stays_stopped() {
+    let mut r = rig(PermissionPolicy::ApproveAll).await;
+    let id = new_session(&mut r.c, "stopped").await;
+    r.c.request(method::SESSION_PROMPT, prompt(&id, "hi", None)).await.unwrap();
+    r.hibernate(&id).await;
+    r.c.request(method::MUX_TYPING, json!({"sessionId": id, "on": true})).await.unwrap();
+    r.hub.kill(&r.hub.resolve(&id).unwrap(), false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(r.status(&id), "closed", "the typing wake reopened a stopped chat");
+    let newest = *r.pids("harness").last().unwrap();
+    r.until("the stopped chat's agent kept running", || !alive(newest)).await;
 }
