@@ -57,6 +57,9 @@ import Foundation
 //   CmuxNextOracle -> system frameworks only (the refactor oracle's facet providers, the one immutable list the
 //     composition root builds and the snapshot capture; Control serves it as debug.oracle.snapshot;
 //     every source is under DEBUG || CMUX_BENCH_HOOKS, so Release builds an empty module; p15-oracle.md section 3A)
+//   CmuxNextHeadless -> Actions, Control, Daemon, Design, Oracle, Settings, Wakeups (the windowless executable: one
+//     composition root over the registry, settings, a daemon mirror, the control socket and the oracle's facets;
+//     p15-oracle.md section H, task 160)
 //   CmuxNextInput -> InputCore, Signposts, Wakeups (the one input tap: typed subscriptions by class, phase and window;
 //     globalObserve; p04-input.md section 3 (A); PointerFrameConsumer.post(NSEvent) into Wakeups, (C);
 //     InputLatencyTracker, Chrome's EventLatency over CommitBoundary and PresentationClock, the input.latency signpost,
@@ -300,7 +303,9 @@ let packageProducts: [Product] = [
     .library(name: "CmuxNextAppCore", targets: ["CmuxNextAppCore"]),
 ] + uiLayerPreviewProducts
 
-let packageTargets: [Target] = uiLayerPreviewTargets + [
+// One typed literal, joined below: `literal + [...]` over ~500 overloaded `.target` calls is past the type
+// checker's time limit on Linux.
+let cmuxNextTargets: [Target] = [
         .target(
             name: "CmuxNextAppCore",
             dependencies: ["CmuxNextActions", "CmuxNextAgentPane", "CmuxNextBridge", "CmuxNextDaemon", "CmuxNextDaemonService", "CmuxNextSidebar"],
@@ -1764,6 +1769,23 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
             dependencies: ["CmuxNextOracle", "CmuxNextCompat"],
             swiftSettings: daemonSwiftSettings
         ),
+        // The app's model and control layers with no window (p15-oracle.md section H, task 160): one composition
+        // root, HeadlessServices, over the action registry, the settings controller, a daemon store mirroring one
+        // cmux-tui owner, the control socket and the oracle's facets. The oracle's `--product headless` and the CLI
+        // on a Linux VM drive it. Design: the settings controller's DesignSettings (task 231 moves it down).
+        .executableTarget(
+            name: "CmuxNextHeadless",
+            dependencies: [
+                "CmuxNextActions", "CmuxNextControl", "CmuxNextDaemon", "CmuxNextDesign", "CmuxNextOracle",
+                "CmuxNextSettings", "CmuxNextWakeups",
+            ],
+            swiftSettings: daemonSwiftSettings
+        ),
+        .testTarget(
+            name: "CmuxNextHeadlessTests",
+            dependencies: ["CmuxNextHeadless", "CmuxNextControl", "CmuxNextSettings"],
+            swiftSettings: daemonSwiftSettings
+        ),
         // The app's one input tap (p04-input.md section 3 (A)): typed subscriptions by event class,
         // phase and window that replace AppKit event monitors and the application object's closures.
         // The only target besides the App that sees NSEvent for input routing; core and service
@@ -2340,7 +2362,9 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
             dependencies: ["CmuxNextActions", "CmuxNextTrace", "CmuxNextMetrics", "CmuxNextWakeups", "CmuxNextTestSupport"],
             swiftSettings: uiSwiftSettings
         ),
-    ] + [appFFI]
+    ]
+
+let packageTargets: [Target] = uiLayerPreviewTargets + cmuxNextTargets + [appFFI]
 
 /// Linux SwiftPM copies an `.xcstrings` catalog into the bundle as JSON that Foundation cannot read.
 /// In the Linux mode (`CMUX_SWIFTPM_TARGET_LINUX=1`, plans/cmux-next/chrome-parity/p15-oracle.md H),
@@ -2583,26 +2607,28 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
                 "CmuxNextRemoteLocalhost",
                 "CmuxNextServerHelper",
                 "CmuxNextCLIInstall",
+                "CmuxNextOracle",
+                "CmuxNextHeadless",
                 "CZlib",
             ],
             testTargets: [
                 "CmuxNextActionsTests",
+                "CmuxNextBrowserImportTests",
                 "CmuxNextChromiumRuntimeTests",
                 "CmuxNextCodeRouterTests",
                 "CmuxNextCompatTests",
-                "CmuxNextControlTests",
-                "CmuxNextDaemonTests",
                 "CmuxNextDevicesTests",
                 "CmuxNextErrorJournalTests",
                 "CmuxNextFeaturesTests",
                 "CmuxNextFilesTests",
-                "CmuxNextHangReportsTests",
+                "CmuxNextHeadlessTests",
+                "CmuxNextHibernationTests",
                 "CmuxNextHostPressureTests",
                 "CmuxNextImportSuggestionsTests",
                 "CmuxNextKeepAwakeTests",
                 "CmuxNextMetricsTests",
                 "CmuxNextMobileTests",
-                "CmuxNextSignpostsTests",
+                "CmuxNextOracleTests",
                 "CmuxNextTraceTests",
                 "CmuxNextVSCodeServerTests",
                 "CmuxNextWakeupsTests",
@@ -2614,6 +2640,7 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
                 "Packages/Shared/CMUXMobileCore",
                 "Packages/Shared/CmuxAgentBrands",
                 "Packages/Shared/CmuxAuthRuntime",
+                "Packages/Shared/CmuxFuzzSupport",
                 "Packages/Shared/CmuxInstallAuthCore",
                 "Packages/Shared/CmuxIrxTransport",
                 "Packages/Shared/CmuxSafeConcurrency",
@@ -2626,16 +2653,19 @@ if ProcessInfo.processInfo.environment["CMUX_SWIFTPM_TARGET_LINUX"] == "1" {
             linuxDependencies: [
                 "CmuxNextBrowserCore": ["Crypto"],
                 "CmuxNextBrowserImport": ["CZlib"],
+                "CmuxNextBrowserImportTests": ["CZlib"],
                 "CmuxNextChromiumRuntime": ["Crypto"],
                 "CmuxNextChromiumRuntimeTests": ["Crypto"],
                 "CmuxNextCloud": ["Crypto"],
                 "CmuxNextCodeRouter": ["Crypto"],
                 "CmuxNextDaemon": ["CZlib", "Crypto"],
-                "CmuxNextDaemonTests": ["Crypto"],
                 "CmuxNextDesignTokens": ["Crypto"],
                 "CmuxNextDevices": ["Crypto"],
                 "CmuxNextDevicesTests": ["Crypto"],
+                "CmuxNextFeaturesTests": ["Crypto"],
+                "CmuxNextHangReports": ["Crypto"],
                 "CmuxNextMobile": ["Crypto"],
+                "CmuxNextOracle": ["Crypto"],
                 "CmuxNextRemote": ["Crypto"],
                 "CmuxNextRemoteFetch": ["CZlib"],
                 "CmuxNextRemoteLocalhost": ["Crypto"],
