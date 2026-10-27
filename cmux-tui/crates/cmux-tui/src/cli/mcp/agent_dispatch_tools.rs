@@ -457,9 +457,11 @@ fn invalid(message: String) -> Value {
     tool_error(envelope(v2_tools::invalid(message), "not_run", None))
 }
 
-/// Bridge to the linked acpmux daemon. Its request methods carry opaque JSON,
-/// so this adapter stays compatible with every registered harness.
+/// Bridge to the linked acpmux daemon, on the server's one connection
+/// (`acpmux_link.rs`). Its request methods carry opaque JSON, so this adapter
+/// stays compatible with every registered harness.
 pub(super) fn acpmux_request(
+    link: &mut super::acpmux_link::AcpmuxLink,
     method: &str,
     params: Value,
     timeout: Duration,
@@ -474,16 +476,19 @@ pub(super) fn acpmux_request(
         }
 
         crate::acp::configure_home();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(
-            |error| {
-                CallFailure::local(FailureKind::NotRun, "acpmux.unavailable", error.to_string())
-            },
-        )?;
-        let result = runtime.block_on(async {
-            let caller = super::super::caller_env::acpmux_caller();
-            let client = acpmux::deliver::connect_as(caller).await.map_err(|error| {
-                RequestError::Transport { message: error.to_string(), sent: false }
-            })?;
+        let caller = super::super::caller_env::acpmux_caller();
+        let not_sent = |message: String| RequestError::Transport { message, sent: false };
+        let result = link.client(caller, acpmux::deliver::connect_as).map_err(not_sent);
+        let result = result.and_then(|client| {
+            link.block_on(request(client, method, params, timeout))
+                .unwrap_or_else(|error| Err(not_sent(error.to_string())))
+        });
+        async fn request(
+            client: std::sync::Arc<acpmux::client::Client>,
+            method: &str,
+            params: Value,
+            timeout: Duration,
+        ) -> Result<Value, RequestError> {
             let answer = tokio::time::timeout(timeout, client.request(method, params))
                 .await
                 .map_err(|_| RequestError::Transport {
@@ -497,8 +502,8 @@ pub(super) fn acpmux_request(
                         RequestError::Transport { message: error.to_string(), sent: true }
                     }
                 })?;
-            Ok::<Value, RequestError>(answer)
-        });
+            Ok(answer)
+        }
         result.map_err(|error| match error {
             RequestError::Owner(error) => CallFailure {
                 kind: FailureKind::Rejected,
@@ -529,7 +534,7 @@ pub(super) fn acpmux_request(
     }
     #[cfg(not(unix))]
     {
-        let _ = (method, params, timeout, mutation);
+        let _ = (link, method, params, timeout, mutation);
         Err(CallFailure::local(
             FailureKind::NotRun,
             "acpmux.unavailable",

@@ -50,6 +50,10 @@ pub(super) struct Spec {
     pub socket: Option<PathBuf>,
     /// The `_meta` of its first `initialize`.
     pub initialize_meta: Option<Value>,
+    /// Its `tools/list` and `instructions` when acpmux fixed them in the spec
+    /// (acpmux `agent_tools::TOOLS_FIELD`, a tool set the daemon serves):
+    /// listed without a start, which waits for the first call.
+    pub fixed: Option<(Vec<Value>, Option<String>)>,
 }
 
 /// The servers in `value` (the env's JSON). A bad entry is left out and
@@ -83,7 +87,10 @@ pub(super) fn specs(value: Option<std::ffi::OsString>) -> Vec<Spec> {
                 .map_or(CALL_TIMEOUT, |secs| Duration::from_secs(secs.clamp(1, 24 * 3600)));
             let socket = item["socket"].as_str().map(PathBuf::from);
             let initialize_meta = item.get("initializeMeta").filter(|m| m.is_object()).cloned();
-            Some(Spec { name, command, args, env, call_timeout, socket, initialize_meta })
+            let fixed = item["tools"]
+                .as_array()
+                .map(|tools| (tools.clone(), item["instructions"].as_str().map(str::to_owned)));
+            Some(Spec { name, command, args, env, call_timeout, socket, initialize_meta, fixed })
         })
         .collect()
 }
@@ -159,7 +166,18 @@ impl Drop for Conn {
 impl Upstream {
     pub(super) fn new(spec: Spec) -> Self {
         let prefix = prefix(&spec.name);
-        Self { spec, prefix, conn: None, tools: None, instructions: None, failed: None }
+        // Fixed tools: listed now, the server starts at the first call.
+        let (tools, instructions) = match &spec.fixed {
+            Some((tools, instructions)) => (Some(tools.clone()), instructions.clone()),
+            None => (None, None),
+        };
+        Self { spec, prefix, conn: None, tools, instructions, failed: None }
+    }
+
+    /// Whether a connection or a server process is open now.
+    #[cfg(test)]
+    pub(super) fn started(&self) -> bool {
+        self.conn.is_some()
     }
 
     pub(super) fn name(&self) -> &str {

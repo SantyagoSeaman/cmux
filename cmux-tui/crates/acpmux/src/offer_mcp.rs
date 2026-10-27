@@ -8,9 +8,9 @@
 //! of a turn: one `_acpmux/offer_session` per task, all with one fresh
 //! `groupId`, which the chat shows as one card.
 
-use crate::client::Client;
 use crate::rpc::method;
 use crate::secret_mcp::error_result;
+use crate::subsession_mcp::ToolRequests;
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -20,7 +20,7 @@ pub const SESSION_ENV: &str = "ACPMUX_OFFER_SESSION";
 /// Most tasks one `suggest_tasks` call offers.
 pub const MAX_TASKS: usize = 5;
 
-fn tools() -> Value {
+pub(crate) fn tools() -> Value {
     json!([{
         "name": "offer_session",
         "description": "Offer the user a new chat, running in parallel, for work you noticed that is outside the task at hand (a bug, a follow-up, a cleanup). cmux shows the offer as a chip in this chat; if the user accepts, a new agent session starts with your prompt (in a new git worktree when worktree is true) while this chat goes on. Returns at once: do not wait for an answer, and do not do that work here. If the user starts it, it becomes your sub-session (get_session and wait_for_sessions read it) and its reply comes back to this chat as a message when its first turn ends. Offer only work the user is likely to want, at most a few per task (a chat holds at most 8 open offers). Use it for one suggestion in the middle of a turn; for follow-ups at the end of a turn, use suggest_tasks.",
@@ -77,12 +77,14 @@ pub async fn run() -> Result<()> {
         SESSION_ENV,
         tools(),
         Some(INSTRUCTIONS.to_owned()),
-        |daemon, session, params| async move { call(&daemon, &session, &params).await },
+        |daemon, session, params| async move { call(daemon.as_ref(), &session, &params).await },
     )
     .await
 }
 
-async fn call(daemon: &Client, session: &str, params: &Value) -> Value {
+/// `tools/call` for `session`: through a daemon connection (the stdio
+/// server) or in the daemon (`subsession_mcp::DaemonTools`).
+pub(crate) async fn call<D: ToolRequests>(daemon: &D, session: &str, params: &Value) -> Value {
     let mut request = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     if !request.is_object() {
         return error_result("arguments must be an object".to_owned());
@@ -104,7 +106,7 @@ async fn call(daemon: &Client, session: &str, params: &Value) -> Value {
 }
 
 /// Offers each task of `arguments.tasks` under one fresh group id.
-async fn suggest_tasks(daemon: &Client, session: &str, arguments: &Value) -> Value {
+async fn suggest_tasks<D: ToolRequests>(daemon: &D, session: &str, arguments: &Value) -> Value {
     let tasks = match arguments.get("tasks").and_then(Value::as_array) {
         Some(tasks) if (1..=MAX_TASKS).contains(&tasks.len()) => tasks,
         _ => return error_result(format!("tasks must list 1 to {MAX_TASKS} tasks")),

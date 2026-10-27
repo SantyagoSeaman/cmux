@@ -56,16 +56,22 @@ pub enum DaemonTools {
     Subsessions,
     /// `cmux-secrets`: request_secret and run_with_secret (`secret_mcp.rs`).
     Secrets,
+    /// `cmux-sessions`: offer_session and suggest_tasks (`offer_mcp.rs`).
+    Offers,
+    /// `cmux-forum`: announce, rules and ack (`forum_mcp.rs`).
+    Forum,
 }
 
 impl DaemonTools {
-    pub const ALL: [Self; 2] = [Self::Subsessions, Self::Secrets];
+    pub const ALL: [Self; 4] = [Self::Subsessions, Self::Secrets, Self::Offers, Self::Forum];
 
     /// The MCP server name the agent sees.
     pub fn server_name(self) -> &'static str {
         match self {
             Self::Subsessions => SERVER_NAME,
             Self::Secrets => crate::secret_mcp::SERVER_NAME,
+            Self::Offers => crate::offer_mcp::SERVER_NAME,
+            Self::Forum => crate::forum_mcp::SERVER_NAME,
         }
     }
 
@@ -78,6 +84,8 @@ impl DaemonTools {
         match self {
             Self::Subsessions => "subsession-mcp",
             Self::Secrets => "secret-mcp",
+            Self::Offers => "offer-mcp",
+            Self::Forum => "forum-mcp",
         }
     }
 
@@ -117,6 +125,8 @@ impl DaemonTools {
         match self {
             Self::Subsessions => SESSION_ENV,
             Self::Secrets => crate::secret_mcp::SESSION_ENV,
+            Self::Offers => crate::offer_mcp::SESSION_ENV,
+            Self::Forum => crate::forum_mcp::SESSION_ENV,
         }
     }
 
@@ -125,6 +135,8 @@ impl DaemonTools {
         match self {
             Self::Subsessions => tools(),
             Self::Secrets => crate::secret_mcp::tools(),
+            Self::Offers => crate::offer_mcp::tools(),
+            Self::Forum => crate::forum_mcp::tools(),
         }
     }
 
@@ -132,7 +144,8 @@ impl DaemonTools {
     pub fn instructions(self) -> Option<String> {
         match self {
             Self::Subsessions => Some(instructions()),
-            Self::Secrets => None,
+            Self::Offers => Some(crate::offer_mcp::INSTRUCTIONS.to_owned()),
+            Self::Secrets | Self::Forum => None,
         }
     }
 
@@ -146,6 +159,8 @@ impl DaemonTools {
         match self {
             Self::Subsessions => call(daemon, params).await,
             Self::Secrets => crate::secret_mcp::call(daemon, session, params).await,
+            Self::Offers => crate::offer_mcp::call(daemon, session, params).await,
+            Self::Forum => crate::forum_mcp::call(daemon, params).await,
         }
     }
 }

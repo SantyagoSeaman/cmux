@@ -523,3 +523,38 @@ fn discovery_rejects_linked_records_and_socket_paths_outside_the_host_namespace(
     assert_eq!(std::fs::symlink_metadata(&hosts).unwrap().permissions().mode() & 0o777, 0o700);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// p01-process-240 (acpmux-audit finding 10): a host waits for its harness's
+/// exit and watches its record on its one runtime thread (a pidfd and an
+/// inotify descriptor on the runtime), with no `waitid` thread and no
+/// record-watch thread, and still ends the harness and itself when the
+/// record is removed.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_host_runs_its_waits_on_its_one_runtime_thread() {
+    let dir = scratch("threads");
+    let record = link::spawn(&launcher(), &spec(&dir, "s-threads")).await.expect("spawn host");
+    let lock = live_lock(&dir, &record);
+    let (owner, _) = connected(&record, 0).await;
+    let mut logged = 0;
+    request(&owner, 1, "initialize", json!({"protocolVersion": 1})).await;
+    read_until(&owner, &mut logged, |e| is_response(e, 1)).await;
+    let names: Vec<String> = std::fs::read_dir(format!("/proc/{}/task", record.host_pid))
+        .expect("the host's threads")
+        .filter_map(Result::ok)
+        .filter_map(|task| std::fs::read_to_string(task.path().join("comm")).ok())
+        .map(|name| name.trim().to_owned())
+        .collect();
+    // `comm` keeps 15 bytes: `acpmux-record-watch` reads `acpmux-record-w`.
+    assert!(!names.iter().any(|n| n.starts_with("acpmux-record")), "a watch thread: {names:?}");
+    // The runtime thread and at most one idle blocking worker (left from the
+    // bootstrap's stdio); before, the record-watch thread came on top (base:
+    // ["acpmux", "tokio-rt-worker", "acpmux-record-w"]).
+    assert!(names.len() <= 2, "{} threads: {names:?}", names.len());
+    // The record watch still ends the host on the runtime: its record removed,
+    // no daemon can adopt it, so it ends like SIGTERM.
+    std::fs::remove_file(agent_host::record_path(&dir.join("hosts"), "s-threads")).unwrap();
+    wait_dead(lock).await;
+    drop(owner);
+    let _ = std::fs::remove_dir_all(&dir);
+}

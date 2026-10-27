@@ -26,6 +26,8 @@ pub mod host {
         Err(crate::platform::unsupported("the agent host"))
     }
 }
+#[cfg(unix)]
+mod exit_watch;
 pub mod link;
 pub mod program_wait;
 #[cfg(unix)]

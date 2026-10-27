@@ -14,6 +14,7 @@
 //! comma-separated allowlist, the Chief's turns) lists exactly those tools
 //! and refuses every other call, from a script too.
 
+mod acpmux_link;
 mod action_tools;
 mod agent_dispatch_tools;
 mod agent_events_tool;
@@ -81,7 +82,7 @@ pub(super) fn agent_app(
 /// The CLI's transport as a `Backend`, so the agent composite surface runs
 /// one code path for the CLI and for MCP tools.
 pub(super) fn cli_backend(global: GlobalArgs) -> impl Backend {
-    LiveBackend { global }
+    LiveBackend::new(global)
 }
 
 /// A failed owner call as the CLI prints it: the owner's error with its
@@ -219,9 +220,16 @@ pub(super) trait Backend {
 /// The CLI's transport, with the CLI's global options.
 struct LiveBackend {
     global: GlobalArgs,
+    /// The one acpmux daemon connection of this server (`acpmux_link.rs`),
+    /// used only from the thread that answers its tool calls.
+    acpmux: std::cell::RefCell<acpmux_link::AcpmuxLink>,
 }
 
 impl LiveBackend {
+    fn new(global: GlobalArgs) -> Self {
+        Self { global, acpmux: std::cell::RefCell::default() }
+    }
+
     /// The global options with the call's session.
     fn routed(&self, session: Option<&str>) -> Result<GlobalArgs, CallFailure> {
         let mut global = self.global.clone();
@@ -297,7 +305,22 @@ impl Backend for LiveBackend {
         idempotency_key: Option<&str>,
         mutation: bool,
     ) -> Result<Value, CallFailure> {
-        agent_dispatch_tools::acpmux_request(method, params, timeout, idempotency_key, mutation)
+        // One call at a time: the server answers its tool calls in order.
+        let Ok(mut link) = self.acpmux.try_borrow_mut() else {
+            return Err(CallFailure::local(
+                FailureKind::NotRun,
+                "acpmux.busy",
+                "another acpmux call of this server is running",
+            ));
+        };
+        agent_dispatch_tools::acpmux_request(
+            &mut link,
+            method,
+            params,
+            timeout,
+            idempotency_key,
+            mutation,
+        )
     }
 
     fn chat(
@@ -388,7 +411,7 @@ fn serve(global: GlobalArgs, code_mode: bool) -> i32 {
 /// and proxied servers its environment names (the caller in scope, in the
 /// shared host).
 fn client_server(global: GlobalArgs, config: PathBuf, code_mode: bool) -> Server<LiveBackend> {
-    let mut server = Server::new(LiveBackend { global }, Some(config));
+    let mut server = Server::new(LiveBackend::new(global), Some(config));
     server.list_changed = true;
     server.code_mode = code_mode;
     server.allowed = allowed_tools(caller_env::var_os(ALLOWED_TOOLS_ENV));
@@ -402,7 +425,7 @@ fn client_server(global: GlobalArgs, config: PathBuf, code_mode: bool) -> Server
 /// `cmux mcp tools [--json]`: what `serve` offers and what it leaves out.
 fn list_tools(global: GlobalArgs) -> i32 {
     let output = global.output;
-    let mut server = Server::new(LiveBackend { global }, None);
+    let mut server = Server::new(LiveBackend::new(global), None);
     let tools = server.list();
     let mut excluded = v2_tools::exclusions();
     excluded.extend(server.actions.exclusions.iter().cloned());

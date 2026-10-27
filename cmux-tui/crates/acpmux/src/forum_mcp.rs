@@ -4,9 +4,9 @@
 //! (`server/forum.rs`) over a connection that carries the session's caller
 //! token from this server's own env, so the daemon knows which session posts.
 
-use crate::client::Client;
 use crate::rpc::method;
 use crate::secret_mcp::error_result;
+use crate::subsession_mcp::ToolRequests;
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -14,7 +14,7 @@ pub const SERVER_NAME: &str = "cmux-forum";
 /// The session the tools act for, set in this server's env with its caller token.
 pub const SESSION_ENV: &str = "ACPMUX_SESSION_ID";
 
-fn tools() -> Value {
+pub(crate) fn tools() -> Value {
     json!([
         {
             "name": "announce",
@@ -54,7 +54,7 @@ pub async fn run() -> Result<()> {
         SESSION_ENV,
         tools(),
         None,
-        |daemon, _session, params| async move { call(&daemon, &params).await },
+        |daemon, _session, params| async move { call(daemon.as_ref(), &params).await },
     )
     .await
 }
@@ -107,7 +107,10 @@ pub fn rules_text(rules: &Value) -> String {
         .join("\n\n")
 }
 
-async fn call(daemon: &Client, params: &Value) -> Value {
+/// `tools/call` as the session whose caller token the connection carries:
+/// through a daemon connection (the stdio server) or in the daemon
+/// (`subsession_mcp::DaemonTools`).
+pub(crate) async fn call<D: ToolRequests>(daemon: &D, params: &Value) -> Value {
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     if !args.is_object() {
         return error_result("arguments must be an object".to_owned());

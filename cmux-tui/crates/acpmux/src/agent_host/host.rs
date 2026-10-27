@@ -351,11 +351,10 @@ impl Started {
             tokio::spawn(async move {
                 // End what the agent left running while the exited leader is
                 // still a zombie: its group id cannot be reused yet, so the
-                // kill reaches only this harness's group. Then reap it.
+                // kill reaches only this harness's group. Then reap it. The
+                // wait is on this runtime (`exit_watch.rs`), no thread.
                 if let Some(pg) = pgid
-                    && tokio::task::spawn_blocking(move || wait_exit_unreaped(pg))
-                        .await
-                        .is_ok_and(|ok| ok)
+                    && super::exit_watch::exited_unreaped(pg).await
                 {
                     // SAFETY: the unreaped leader keeps this group id ours.
                     unsafe { libc::killpg(pg, libc::SIGKILL) };
@@ -970,28 +969,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Block until process `pid` (a child of this process) has exited, without
-/// reaping it: the zombie keeps its process group id from being reused.
-/// Call it off the async runtime. False when the wait failed (for example
-/// another reaper took the child): the group id is then not proven ours.
-fn wait_exit_unreaped(pid: i32) -> bool {
-    loop {
-        // SAFETY: a zeroed siginfo_t is a valid out-parameter for waitid.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        // SAFETY: waits on this process's own child; WNOWAIT leaves it
-        // waitable, so the reaper below still gets its status.
-        let rc = unsafe {
-            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT)
-        };
-        if rc == 0 {
-            return true;
-        }
-        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return false;
-        }
-    }
-}
-
 /// The host was started in the pool directory and its record is still
 /// there (not promoted into the hosts directory).
 fn still_pooled(spec: &SpawnSpec) -> bool {
@@ -1020,29 +997,23 @@ fn record_present(spec: &SpawnSpec, nonce: &str) -> bool {
 /// (the daemon's home was deleted, or a daemon removed the record), no daemon
 /// can ever adopt this host: it ends like SIGTERM. Every event only triggers a
 /// stat; a record rewritten in place (write, then rename) is still present.
+/// The watch runs on the host's runtime (`record_watch::UntilGone`), no
+/// thread; the returned guard ends it.
 fn watch_record(
     spec: &SpawnSpec,
     nonce: &str,
     tx: mpsc::Sender<Event>,
-) -> Option<super::record_watch::DirWatch> {
+) -> Option<super::record_watch::UntilGone> {
     let watched = spec.clone();
     let own = nonce.to_owned();
-    let term = tx.clone();
     let mut dirs = vec![spec.hosts_dir.clone()];
     if spec.hosts_dir.file_name().and_then(|n| n.to_str()) == Some(POOL_DIR_NAME)
         && let Some(hosts) = spec.hosts_dir.parent()
     {
         dirs.push(hosts.to_path_buf());
     }
-    let watch = super::record_watch::DirWatch::start(&dirs, move || {
-        if record_present(&watched, &own) {
-            return false;
-        }
-        // The watch thread is not a runtime thread: a blocking send never
-        // drops the end when the event queue is full.
-        let _ = term.blocking_send(Event::Term);
-        true
-    });
+    let gone = move || !record_present(&watched, &own);
+    let watch = super::record_watch::UntilGone::start(&dirs, gone, tx.clone(), Event::Term);
     // The record may have gone before the watch began (the home deleted
     // right after the start): check once now.
     if !record_present(spec, nonce) {
@@ -1065,12 +1036,12 @@ mod tests {
     /// The leader is waited for without being reaped: while it is a zombie
     /// its process group id cannot be reused, so ending the group then can
     /// never signal another process group.
-    #[test]
-    fn waiting_for_the_leader_leaves_it_unreaped() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn waiting_for_the_leader_leaves_it_unreaped() {
         let mut child =
             std::process::Command::new("/bin/sh").args(["-c", "exit 3"]).spawn().unwrap();
         let pid = child.id() as i32;
-        assert!(super::wait_exit_unreaped(pid), "the wait failed");
+        assert!(super::super::exit_watch::exited_unreaped(pid).await, "the wait failed");
         // SAFETY: signal 0 to this test's own child only checks existence.
         assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the leader was reaped by the wait");
         assert_eq!(child.wait().unwrap().code(), Some(3), "the exit status is kept for the reaper");

@@ -393,8 +393,9 @@ async fn tool_client(hub: &Arc<Hub>, meta: &Value) -> (Client, Value) {
     (c, reply)
 }
 
-/// p07-memory-092: with `agentToolsInDaemon` on, the sub-session and secret
-/// tools are the daemon's own (`server/agent_mcp.rs`): `cmux mcp serve`
+/// p07-memory-092 and p01-process-240: with `agentToolsInDaemon` on, the
+/// sub-session, secret, offer and forum tools are the daemon's own
+/// (`server/agent_mcp.rs`): `cmux mcp serve`
 /// dials the daemon for them instead of starting two processes per agent, a
 /// harness that runs stdio servers itself gets the byte-copy relay
 /// (`mcp_relay.rs`), and each serves only the session its caller token proves.
@@ -409,6 +410,13 @@ async fn daemon_serves_the_subsession_and_secret_tools(
     let started = |list: &[Value]| list.iter().filter(|s| s.get("socket").is_none()).count();
     assert_eq!(named(&before, "cmux-subsessions")["args"], json!(["subsession-mcp"]));
     assert_eq!(named(&before, "cmux-secrets")["args"], json!(["secret-mcp"]));
+    // Their tools are fixed in the spec even so (p01-process-240): `cmux mcp
+    // serve` starts each process at its first call, never at a list.
+    for name in ["cmux-subsessions", "cmux-secrets", "cmux-sessions", "cmux-forum"] {
+        let fixed = acpmux::subsession_mcp::DaemonTools::from_server_name(name).unwrap();
+        assert_eq!(named(&before, name)["tools"], fixed.tools(), "{name}");
+    }
+    assert!(named(&before, "cmux-cua").get("tools").is_none(), "computer use lists its own");
     // SAFETY: as in the caller; no session is starting concurrently.
     unsafe { std::env::set_var("CMUX_ENABLE_FEATURES", "agentToolsInDaemon") };
 
@@ -416,19 +424,32 @@ async fn daemon_serves_the_subsession_and_secret_tools(
     // that runs them itself; `cmux mcp serve` still dials the daemon.
     let bare_id = local.new_session("fake").await;
     let bare = upstreams_of(local, &bare_id).await;
-    for (name, word) in [("cmux-subsessions", "subsession-mcp"), ("cmux-secrets", "secret-mcp")] {
+    for (name, word) in [
+        ("cmux-subsessions", "subsession-mcp"),
+        ("cmux-secrets", "secret-mcp"),
+        ("cmux-sessions", "offer-mcp"),
+        ("cmux-forum", "forum-mcp"),
+    ] {
         let spec = named(&bare, name);
         assert_eq!(spec["args"], json!([word]), "{spec}");
         assert_eq!(spec["env"]["ACPMUX_MCP_SERVER"], name, "{spec}");
         assert!(spec["socket"].is_string(), "{spec}");
+        // p01-process-240: the fixed tool list rides in the spec, so `cmux
+        // mcp serve` lists it without dialing and dials at the first call.
+        let fixed = acpmux::subsession_mcp::DaemonTools::from_server_name(name).unwrap();
+        assert_eq!(spec["tools"], fixed.tools(), "{spec}");
+        assert_eq!(spec["instructions"].as_str().map(str::to_owned), fixed.instructions());
     }
-    // secret-mcp reads its session from its own key.
+    // secret-mcp and offer-mcp read their session from their own keys.
     let secrets = named(&bare, "cmux-secrets");
     assert_eq!(secrets["env"]["ACPMUX_SECRET_SESSION"], json!(bare_id), "{secrets}");
+    let offers = named(&bare, "cmux-sessions");
+    assert_eq!(offers["env"]["ACPMUX_OFFER_SESSION"], json!(bare_id), "{offers}");
     // The relay beside the cmux binaries (the app bundle's bin, where acpmux is a link to cmux).
     let relay = fake_bin(&root.join("bin"), "acpmux-mcp-relay");
 
-    // 20 agents: each starts two processes fewer, and both tool sets name the daemon.
+    // 20 agents: each starts four processes fewer (the sub-session, secret,
+    // offer and forum servers), and every one of those tool sets names the daemon.
     let mut sessions = Vec::new();
     let (mut processes_before, mut processes_after) = (0, 0);
     for _ in 0..20 {
@@ -436,7 +457,7 @@ async fn daemon_serves_the_subsession_and_secret_tools(
         let after = upstreams_of(local, &id).await;
         processes_before += started(&before);
         processes_after += started(&after);
-        for name in ["cmux-subsessions", "cmux-secrets"] {
+        for name in ["cmux-subsessions", "cmux-secrets", "cmux-sessions", "cmux-forum"] {
             let spec = named(&after, name);
             assert_eq!(spec["command"], json!(relay), "{spec}");
             assert_eq!(spec["args"], json!([]), "{spec}");
@@ -449,7 +470,7 @@ async fn daemon_serves_the_subsession_and_secret_tools(
         }
         sessions.push((id, after));
     }
-    assert_eq!(processes_before - processes_after, 40, "20 agents drop 2 processes each");
+    assert_eq!(processes_before - processes_after, 80, "20 agents drop 4 processes each");
 
     // The tools through the daemon: listed and called as the proven session.
     let (a, a_specs) = &sessions[0];
@@ -494,8 +515,20 @@ async fn daemon_serves_the_subsession_and_secret_tools(
     bare["acpmux"].as_object_mut().unwrap().remove("callerSession");
     let (_, refused) = tool_client(hub, &bare).await;
     assert_eq!(refused["error"]["data"]["reason"], "agentTools.caller_required", "{refused}");
+    // The offer and forum tools through the daemon too, as session a.
+    let offer_meta = named(a_specs, "cmux-sessions")["initializeMeta"].clone();
+    let (mut offers, init) = tool_client(hub, &offer_meta).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "cmux-sessions", "{init}");
+    let (listed, _) = offers.call_text("tools/list", json!({})).await;
+    assert_eq!(tool_names(&listed), ["offer_session", "suggest_tasks"], "{listed}");
+    let forum_meta = named(a_specs, "cmux-forum")["initializeMeta"].clone();
+    let (mut forum, init) = tool_client(hub, &forum_meta).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "cmux-forum", "{init}");
+    let (rules, _) = forum.call_text("tools/call", json!({"name": "rules", "arguments": {}})).await;
+    assert_eq!(rules["result"]["isError"], false, "{rules}");
+
     let mut unknown = sub_meta.clone();
-    unknown["acpmux"]["mcpServer"] = json!("cmux-forum");
+    unknown["acpmux"]["mcpServer"] = json!("cmux-unknown");
     let (_, refused) = tool_client(hub, &unknown).await;
     assert_eq!(refused["error"]["data"]["reason"], "agentTools.unknown_server", "{refused}");
 

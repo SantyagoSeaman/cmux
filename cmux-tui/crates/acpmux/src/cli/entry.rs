@@ -51,7 +51,19 @@ pub fn main(args: Vec<OsString>, invocation: Invocation) -> Result<()> {
     if let Some(home) = invocation.home.clone() {
         crate::config::set_home_override(home);
     }
-    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    // An agent's MCP server (`agent_tools.rs`) is one per chat and waits on
+    // one stdin and one daemon connection: one runtime thread, as the agent
+    // host (`agent_host/host.rs`), not a worker per core. Chromium's utility
+    // processes run their service on one thread the same way
+    // (`content/utility/utility_main.cc`).
+    let mut runtime = if runs_mcp_server(&args) {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        // stdin and stdout are blocking reads and writes on this pool.
+        builder.max_blocking_threads(MCP_SERVER_BLOCKING_THREADS);
+        builder
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
     runtime.enable_all();
     let poll_watch = DaemonPollWatch::instrument(&args, &mut runtime);
     runtime.build()?.block_on(async_main(args, invocation, poll_watch))
@@ -300,6 +312,22 @@ async fn async_main(
     }
 }
 
+/// The command words of the per-chat MCP servers (`agent_tools.rs`).
+const MCP_SERVER_WORDS: [&str; 5] =
+    ["cua-mcp", "secret-mcp", "offer-mcp", "subsession-mcp", "forum-mcp"];
+
+/// The blocking pool of an MCP server's runtime: stdin, stdout and a file
+/// read at most at once.
+const MCP_SERVER_BLOCKING_THREADS: usize = 4;
+
+/// `args` (without the program name) run a per-chat MCP server, past the
+/// global flags.
+fn runs_mcp_server(args: &[OsString]) -> bool {
+    args.iter()
+        .find(|arg| !is_global_flag(arg))
+        .is_some_and(|word| MCP_SERVER_WORDS.iter().any(|w| word == *w))
+}
+
 /// Index of the first argument after the program name that is not a global
 /// flag (`--json`, `--suppress-reads`); `argv.len()` when there is none.
 fn command_index(argv: &[OsString]) -> usize {
@@ -309,6 +337,27 @@ fn command_index(argv: &[OsString]) -> usize {
 /// A flag that may come before the command word.
 fn is_global_flag(arg: &OsString) -> bool {
     arg == "--json" || arg == "--suppress-reads"
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
+    }
+
+    /// Every per-chat MCP server word, and only those, gets the one-thread runtime.
+    #[test]
+    fn only_the_per_chat_mcp_servers_run_on_one_thread() {
+        for word in MCP_SERVER_WORDS {
+            assert!(runs_mcp_server(&args(&[word])), "{word}");
+            assert!(runs_mcp_server(&args(&["--json", word])), "{word}");
+        }
+        assert!(!runs_mcp_server(&args(&["daemon", "run"])));
+        assert!(!runs_mcp_server(&args(&["ls", "secret-mcp"])));
+        assert!(!runs_mcp_server(&args(&[])));
+    }
 }
 
 #[cfg(all(test, tokio_unstable, feature = "cmux-stability"))]

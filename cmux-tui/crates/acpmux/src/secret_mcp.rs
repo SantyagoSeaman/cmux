@@ -84,6 +84,8 @@ where
             }
         }
     });
+    let daemon = Arc::new(SharedDaemon::default());
+    let mut calls = tokio::task::JoinSet::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
@@ -104,17 +106,21 @@ where
             "ping" => json!({}),
             "tools/list" => json!({"tools": tools}),
             "tools/call" => {
-                // A card waits on the person: the next request is read meanwhile. Each call
-                // connects anew, so a restarted daemon serves the next one.
+                // A card waits on the person: the next request is read meanwhile. The
+                // calls share one daemon connection, made at the first call and again
+                // only after the daemon closed it (a restart serves the next call).
                 let (tx, session, params, call) =
                     (tx.clone(), session.clone(), message["params"].clone(), call.clone());
-                tokio::spawn(async move {
-                    let result = match crate::daemon::connect(false).await {
+                let daemon = daemon.clone();
+                calls.spawn(async move {
+                    let result = match daemon.get().await {
                         Ok(daemon) => call(daemon, session, params).await,
                         Err(e) => error_result(format!("{e:#}")),
                     };
                     let _ = tx.send(response(&id, result)).await;
                 });
+                // Finished calls leave the set as the next request is read.
+                while calls.try_join_next().is_some() {}
                 continue;
             }
             other => {
@@ -127,10 +133,31 @@ where
         let _ = tx.send(response(&id, reply)).await;
     }
     // The agent closed the pipe: no one reads an answer still on its way, and
-    // ending here drops the calls' daemon connections with it.
+    // ending here drops the calls and their daemon connection with them.
+    calls.abort_all();
     drop(tx);
     writer.abort();
     Ok(())
+}
+
+/// The one daemon connection of a stdio tool server: made at its first call,
+/// shared by every call after it, and made again only once the daemon closed
+/// it. The async lock serializes only the connect, never a call.
+#[derive(Default)]
+struct SharedDaemon {
+    client: tokio::sync::Mutex<Option<Arc<Client>>>,
+}
+
+impl SharedDaemon {
+    async fn get(&self) -> Result<Arc<Client>> {
+        let mut slot = self.client.lock().await;
+        if let Some(client) = slot.as_ref().filter(|c| !c.is_closed()) {
+            return Ok(client.clone());
+        }
+        let client = crate::daemon::connect(false).await?;
+        *slot = Some(client.clone());
+        Ok(client)
+    }
 }
 
 fn response(id: &Value, result: Value) -> Value {

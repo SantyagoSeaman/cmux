@@ -98,6 +98,12 @@ pub const UPSTREAMS_ENV: &str = "CMUX_MCP_UPSTREAMS";
 pub const SOCKET_FIELD: &str = "socket";
 /// That entry's `_meta` for its first `initialize`: the caller and the server.
 pub const INITIALIZE_META_FIELD: &str = "initializeMeta";
+/// An [`UPSTREAMS_ENV`] entry's fixed `tools/list` (one of acpmux's own tool
+/// sets, `subsession_mcp::DaemonTools`): `cmux mcp serve` lists these
+/// without starting or dialing the server, and starts it on the first call.
+pub const TOOLS_FIELD: &str = "tools";
+/// That entry's MCP `instructions`, given with its fixed tools.
+pub const INSTRUCTIONS_FIELD: &str = "instructions";
 
 /// A spawn env key (`hub/spawn.rs`) with the comma-separated agent tool
 /// servers this chat turned off (`hub/tools.rs`): a folded server has no
@@ -535,12 +541,8 @@ pub fn resolve(inputs: &Inputs) -> AgentTools {
     }
     if let (true, Some(acpmux)) = (inputs.offers, &inputs.acpmux) {
         // offer_session (`offer_mcp.rs`): `for_session` names the session.
-        servers.push(McpServer {
-            name: crate::offer_mcp::SERVER_NAME.into(),
-            command: acpmux.exe.clone(),
-            args: acpmux.args_lossy(&["offer-mcp"]),
-            env: vec![],
-        });
+        let (tools, relay) = (DaemonTools::Offers, relay.as_deref());
+        servers.push(tools.server(acpmux, inputs.daemon_tools, relay));
     }
     if let (true, Some(acpmux)) = (inputs.subsessions, &inputs.acpmux) {
         // start_session and the rest (`subsession_mcp.rs`): `for_session`
@@ -551,12 +553,8 @@ pub fn resolve(inputs: &Inputs) -> AgentTools {
     if let Some(acpmux) = &inputs.acpmux {
         // announce, rules and ack (`forum_mcp.rs`, hq#2570): acts as the
         // session with its caller token, like the sub-session server.
-        servers.push(McpServer {
-            name: crate::forum_mcp::SERVER_NAME.into(),
-            command: acpmux.exe.clone(),
-            args: acpmux.args_lossy(&["forum-mcp"]),
-            env: vec![],
-        });
+        let (tools, relay) = (DaemonTools::Forum, relay.as_deref());
+        servers.push(tools.server(acpmux, inputs.daemon_tools, relay));
     }
     if let Some(cmux) = executable("cmux")
         && !inputs.cmux_json.as_deref().is_some_and(mcp_disabled)
@@ -790,6 +788,16 @@ impl AgentTools {
                 // The secret card waits for the person, not for a timer.
                 if s.name == crate::secret_mcp::SERVER_NAME {
                     spec["callTimeoutSecs"] = json!(3600);
+                }
+                // acpmux's own tool sets have fixed tools and instructions, so
+                // they go in the spec ([`TOOLS_FIELD`]): `cmux mcp serve` lists
+                // them without starting the server and starts it (or dials the
+                // daemon) at the first call, not at the harness's first list.
+                if let Some(own) = DaemonTools::from_server_name(&s.name) {
+                    spec[TOOLS_FIELD] = own.tools();
+                    if let Some(text) = own.instructions() {
+                        spec[INSTRUCTIONS_FIELD] = json!(text);
+                    }
                 }
                 // A tool set the daemon serves: `cmux mcp serve` dials the daemon itself, with
                 // the relay's handshake (no process); one that reads no `socket` runs the relay.

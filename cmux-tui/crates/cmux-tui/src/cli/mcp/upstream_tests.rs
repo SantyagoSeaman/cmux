@@ -289,3 +289,56 @@ fn a_socket_upstream_dials_the_daemon_instead_of_starting_a_process() {
     let _ = daemon.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A tool set whose tools acpmux fixed in the spec (`agent_tools::TOOLS_FIELD`)
+/// is listed with no start: no connection while the agent only lists, the
+/// daemon dialed at the first call, and every later call on that one
+/// connection (the stand-in daemon accepts a single connection).
+#[cfg(unix)]
+#[test]
+fn fixed_tools_list_with_no_start_and_every_call_shares_one_connection() {
+    let dir = std::env::temp_dir().join(format!("cmux-mcp-fixed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("daemon.py");
+    std::fs::write(&script, DAEMON_TOOLS).unwrap();
+    let socket = dir.join("d.sock");
+    let meta = json!({"acpmux": {"mcpServer": "cmux-subsessions",
+        "callerSession": {"sessionId": "s-2", "token": "t"}}});
+    let specs = upstream::specs(Some(
+        json!([{"name": "cmux-subsessions", "command": "/nonexistent/relay", "args": [],
+                "env": {}, "socket": socket, "initializeMeta": meta,
+                "tools": [{"name": "whoami", "description": "Who acts",
+                           "inputSchema": {"type": "object"}}],
+                "instructions": "Fixed rules."}])
+        .to_string()
+        .into(),
+    ));
+    let upstream = upstream::Proxied::new(upstream::Upstream::new(specs[0].clone()));
+    let inner = upstream.inner.clone();
+    let mut server = code_mode_server(Fake::with_actions());
+    server.code_mode = false;
+    server.upstreams = vec![upstream];
+    // No daemon listens yet: listing must not need one.
+    for _ in 0..3 {
+        let all = server.list();
+        let whoami = all.iter().find(|t| t["name"] == "subsessions_whoami").expect("listed");
+        assert!(whoami["description"].as_str().unwrap().contains("Fixed rules."), "{whoami}");
+    }
+    assert!(!inner.lock().unwrap().started(), "a list started the server");
+
+    let mut daemon =
+        std::process::Command::new("python3").arg(&script).arg(&socket).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !dir.join("d.sock.ready").exists() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    for _ in 0..3 {
+        let ran = call(&mut server, "subsessions_whoami", json!({}));
+        assert_eq!(ran["content"][0]["text"], "s-2", "{ran}");
+    }
+    assert!(inner.lock().unwrap().started());
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
