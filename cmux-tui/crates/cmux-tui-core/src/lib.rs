@@ -130,6 +130,8 @@ mod terminal_metadata;
 #[cfg(unix)]
 mod vt_pool;
 pub use cmux_tui_util::terminal_respawn_text;
+#[cfg(unix)]
+pub mod vt_worker_runtime;
 pub use cmux_wake as wake;
 mod work_reply;
 mod workspace_registry;
