@@ -49,6 +49,12 @@ extension AppControl {
             },
             // Main-thread CPU per frame against a 120 Hz frame (anim-perf-terminal.py).
             .mainActor("debug.main_cpu") { [probe = mainCPUProbe] call in .value(probe.handle(call.params)) },
+            // Ring output reads summed over the live terminals' lanes (bench-typing.py STRESS): at most one
+            // copy per chunk, and the ring path has no base64 or JSON stage.
+            .mainActor("debug.terminal") { [weak services] _ in
+                let report = TerminalRingReadsReport(sessions: services?.cache.terminals.values.map(\.session) ?? [])
+                return .value(JSONValue(foundation: report.foundationObject) ?? .null)
+            },
             // Main-thread time in Ghostty's display passes (bench-terminal-resize.py).
             .mainActor("debug.terminal_display") { [probe = terminalDisplayProbe] call in .value(probe.handle(call.params)) },
             // Measured animation spans (plans/cmux-next/motion.md).

@@ -57,7 +57,8 @@ public nonisolated struct TerminalRingChunk: Sendable, Equatable {
         case lapped
     }
 
-    /// Copy, then validate: one copy of `[start, end)` out of the ring (two spans when it wraps), then the
+    /// Copy, then validate: one copy of `[start, end)` out of the ring straight into the chunk's `Data` (two
+    /// spans when it wraps; a keystroke echo stays in the `Data`'s inline bytes, with no allocation), then the
     /// oldest intact offset again, with acquire. Bytes the writer started to overwrite during the copy are
     /// dropped whole, so a torn copy never reaches the parser. Chromium reads its one-writer shared memory the
     /// same way (`device/base/synchronization/one_writer_seqlock.h`: ReadBegin, copy, ReadRetry), and a Mojo
@@ -70,29 +71,51 @@ public nonisolated struct TerminalRingChunk: Sendable, Equatable {
               let count = Int(exactly: end - start), let capacityBytes = Int(exactly: capacity),
               let at = Int(exactly: start % capacity)
         else { return .lapped }
-        // SAFETY: the ring maps `capacity` data bytes while it lives and `ring` holds it. The copy is this
-        // function's own allocation: the Data that wraps it frees it, or the torn path below does.
+        // SAFETY: the ring maps `capacity` data bytes while it lives and `ring` holds it.
         let area = unsafe ring.dataArea
         // SAFETY: as above.
         guard unsafe area.count >= capacityBytes, let source = unsafe area.baseAddress else { return .lapped }
-        // SAFETY: as above.
-        let copy = unsafe UnsafeMutableRawPointer.allocate(byteCount: count, alignment: 1)
+        // SAFETY: as above; the data area holds bytes, so binding it to UInt8 for the copy is sound.
+        let bytes = unsafe source.assumingMemoryBound(to: UInt8.self)
         let first = min(count, capacityBytes - at)
-        // SAFETY: `[at, at + first)` and `[0, count - first)` lie inside the `capacity` data bytes, and the
-        // copy holds `count` bytes.
-        unsafe copy.copyMemory(from: source + at, byteCount: first)
+        var data = Data(capacity: count)
+        // SAFETY: `[at, at + first)` and `[0, count - first)` lie inside the `capacity` data bytes; `append`
+        // copies them into `data`'s own storage before it returns.
+        unsafe data.append(bytes + at, count: first)
         // SAFETY: as above; the wrapped span starts at the ring's first data byte.
-        if first < count { unsafe (copy + first).copyMemory(from: source, byteCount: count - first) }
-        guard ring.oldestIntact() <= start else {
-            // SAFETY: as above, not wrapped by any Data.
-            unsafe copy.deallocate()
-            return .lapped
-        }
-        // SAFETY: the Data takes the allocation and frees it once (a short copy Foundation keeps inline frees it
-        // at once).
-        return .copied(unsafe Data(bytesNoCopy: copy, count: count, deallocator: .custom { pointer, _ in
-            // SAFETY: the allocation above, freed once.
-            unsafe pointer.deallocate()
-        }))
+        if first < count { unsafe data.append(bytes, count: count - first) }
+        guard ring.oldestIntact() <= start else { return .lapped }
+        return .copied(data)
+    }
+}
+
+/// How output lanes read ring output (`debug.terminal`): one copy per chunk parsed, none for a chunk that
+/// lapped or was dropped. A `.ringOutput` carries only ring offsets, so the path has no base64 or JSON stage.
+public nonisolated struct TerminalRingReads: Sendable, Equatable {
+    /// Ring chunks the lane took off its queue (closed lanes skip theirs uncounted).
+    public var chunks: UInt64
+    /// Chunks copied out of the ring and parsed.
+    public var copies: UInt64
+    public var bytesCopied: UInt64
+    /// Chunks the writer overwrote before or during the copy: each told its stream once.
+    public var laps: UInt64
+    /// Chunks cut before the READY that answers a lap, dropped unread.
+    public var dropped: UInt64
+
+    public init(chunks: UInt64, copies: UInt64, bytesCopied: UInt64, laps: UInt64, dropped: UInt64) {
+        self.chunks = chunks
+        self.copies = copies
+        self.bytesCopied = bytesCopied
+        self.laps = laps
+        self.dropped = dropped
+    }
+
+    public static let zero = Self(chunks: 0, copies: 0, bytesCopied: 0, laps: 0, dropped: 0)
+
+    /// The counts of two lanes together.
+    public static func + (lhs: Self, rhs: Self) -> Self {
+        Self(chunks: lhs.chunks + rhs.chunks, copies: lhs.copies + rhs.copies,
+             bytesCopied: lhs.bytesCopied + rhs.bytesCopied, laps: lhs.laps + rhs.laps,
+             dropped: lhs.dropped + rhs.dropped)
     }
 }

@@ -30,6 +30,40 @@ import Testing
         #expect(ring.lappedChunks.isEmpty)
     }
 
+    /// The copy is the chunk's own bytes, never a view of the ring: a keystroke echo (inline in its Data), a
+    /// longer chunk and a wrapped one keep their bytes after the writer overwrites the ring.
+    @Test func aReadOwnsItsBytesWhateverTheChunkSize() {
+        let ring = TestOutputRing(capacity: 64)
+        ring.push(Array("x".utf8))
+        ring.push(Array("0123456789abcdefghijklmnopqrstuv".utf8))  // offsets 1..<33
+        var reads = [ring.chunk(0, 1).read(), ring.chunk(1, 33).read()]
+        ring.push([UInt8](repeating: 0x2E, count: 40))  // offsets 33..<73: wraps to data positions 0..<9
+        reads.append(ring.chunk(33, 73).read())
+        ring.push([UInt8](repeating: 0x21, count: 64))  // the writer moves on: every byte above is overwritten
+
+        #expect(reads == [.copied(Data("x".utf8)), .copied(Data("0123456789abcdefghijklmnopqrstuv".utf8)),
+                          .copied(Data(repeating: 0x2E, count: 40))])
+    }
+
+    /// `debug.terminal` sums the live lanes' counts and reports copies per chunk and the ring path's zero
+    /// base64 and JSON decodes.
+    @Test func debugTerminalSumsTheLanes() throws {
+        let report = TerminalRingReadsReport([
+            TerminalRingReads(chunks: 3, copies: 1, bytesCopied: 5, laps: 1, dropped: 1),
+            TerminalRingReads(chunks: 1, copies: 1, bytesCopied: 22, laps: 0, dropped: 0),
+        ])
+        #expect(report.reads == .init(chunks: 4, copies: 2, bytesCopied: 27, laps: 1, dropped: 1))
+
+        let reply = report.foundationObject
+        let ring = try #require(reply["ring"] as? [String: Double])
+        #expect(reply["lanes"] as? Double == 2)
+        #expect(ring == ["chunks": 4, "copies": 2, "bytes_copied": 27, "laps": 1, "dropped": 1,
+                         "copies_per_chunk": 0.5, "base64_decodes": 0, "json_decodes": 0])
+        #expect(TerminalRingReadsReport([]).foundationObject["ring"] as? [String: Double]
+            == ["chunks": 0, "copies": 0, "bytes_copied": 0, "laps": 0, "dropped": 0, "copies_per_chunk": 0,
+                "base64_decodes": 0, "json_decodes": 0])
+    }
+
     /// A chunk across the ring's end is still one copy: two spans into one buffer.
     @Test func aWrappedChunkIsOneCopyOfBothSpans() async {
         let ring = TestOutputRing(capacity: 16), log = ParsedLog()

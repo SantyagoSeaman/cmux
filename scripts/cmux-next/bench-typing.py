@@ -559,6 +559,19 @@ class Launched:
                       "build pass CMUX_NEXT_TRACE_FLOWS to its daemon?")
         return entry
 
+    def ring_reads(self):
+        """debug.terminal (p01-process-131): ring output reads over the live terminals' lanes, at most one copy per
+        chunk and no base64 or JSON stage; None on a build without the method."""
+        reply = self.rpc("debug.terminal", timeout=10)
+        if not isinstance(reply, dict) or "error" in reply:
+            self.note(f"debug.terminal: {reply.get('error') if isinstance(reply, dict) else reply}")
+            return None
+        ring = reply.get("ring") or {}
+        self.note(f"ring reads: lanes {reply.get('lanes')} chunks {ring.get('chunks')} copies/chunk "
+                  f"{ring.get('copies_per_chunk')} laps {ring.get('laps')} dropped {ring.get('dropped')} "
+                  f"base64 {ring.get('base64_decodes')} json {ring.get('json_decodes')}")
+        return reply
+
     def run(self):
         args = self.args
         self.app.launch()  # LaunchError (a SystemExit) with the reason
@@ -594,6 +607,7 @@ class Launched:
                 time.sleep(2.0)  # the flood runs before the first key
                 self.stress.focus_pane(typed)
                 self.report["phases"]["flood"] = self.phase("flood", pid)
+            self.report["ring_reads"] = self.ring_reads()
             self.saver.read(self.app)
         finally:
             for tab, _ in flooders:

@@ -197,24 +197,11 @@ nonisolated final class TerminalOutputLane: Sendable {
         }
     }
 
-    /// How the lane read ring output (`debug.terminal`): one copy per chunk it parsed, none for a chunk
-    /// that lapped or was dropped.
-    nonisolated struct RingReads: Sendable, Equatable {
-        /// Ring chunks the lane took off its queue (closed lanes skip theirs uncounted).
-        var chunks: UInt64
-        /// Chunks copied out of the ring and parsed.
-        var copies: UInt64
-        var bytesCopied: UInt64
-        /// Chunks the writer overwrote before or during the copy: each told its stream once.
-        var laps: UInt64
-        /// Chunks cut before the READY that answers a lap, dropped unread.
-        var dropped: UInt64
-    }
-
-    var ringReads: RingReads {
-        RingReads(chunks: ringChunks.load(ordering: .relaxed), copies: ringCopies.load(ordering: .relaxed),
-                  bytesCopied: ringBytesCopied.load(ordering: .relaxed), laps: ringLaps.load(ordering: .relaxed),
-                  dropped: ringDropped.load(ordering: .relaxed))
+    /// How this lane read ring output (``TerminalRingReads``, summed by `debug.terminal`).
+    var ringReads: TerminalRingReads {
+        TerminalRingReads(chunks: ringChunks.load(ordering: .relaxed), copies: ringCopies.load(ordering: .relaxed),
+                          bytesCopied: ringBytesCopied.load(ordering: .relaxed),
+                          laps: ringLaps.load(ordering: .relaxed), dropped: ringDropped.load(ordering: .relaxed))
     }
 
     /// Parses one chunk on the lane, inside a ``feedHangDeadline`` hang scope when there is a watcher.
