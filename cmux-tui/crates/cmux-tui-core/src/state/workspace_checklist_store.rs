@@ -9,6 +9,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::oracle_env::{IdSource, OracleEnv};
+
 /// Items one workspace may hold.
 pub(crate) const MAX_CHECKLIST_ITEMS: usize = 50;
 /// Longest accepted item text, in characters, after trimming.
@@ -96,14 +98,21 @@ fn validate_origin(origin: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn new_id(prefix: &str) -> String {
-    format!("{prefix}_{}", crate::workspace_registry::new_uuid_v4().replace('-', ""))
+/// `<prefix>_` and the 32 hex digits of a version 4 UUID drawn from `ids`.
+fn new_id(ids: &IdSource, prefix: &str) -> anyhow::Result<String> {
+    let mut bytes = [0_u8; 16];
+    ids.fill(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!("{prefix}_{hex}"))
 }
 
 /// The attachments `inputs` name: a kept id stays, a new one gets an id, and a
-/// missing name is the path's file name.
+/// missing name is the path's file name. New ids come from `ids`.
 pub(crate) fn resolve_attachments(
     inputs: &[ChecklistAttachmentInput],
+    ids: &IdSource,
 ) -> anyhow::Result<Vec<ChecklistAttachment>> {
     if inputs.len() > MAX_ITEM_ATTACHMENTS {
         return Err(bad_request(format!(
@@ -136,7 +145,7 @@ pub(crate) fn resolve_attachments(
             let id = match &input.id {
                 Some(id) if is_attachment_id(id) => id.clone(),
                 Some(_) => return Err(bad_request("attachment id must be att_ and 32 hex digits")),
-                None => new_id("att"),
+                None => new_id(ids, "att")?,
             };
             if !seen.insert(id.clone()) {
                 return Err(bad_request("an attachment id is listed twice"));
@@ -191,7 +200,8 @@ fn place(
     write_order(transaction, workspace_id, &order)
 }
 
-/// Add one item at `index` (default: last) and return its id.
+/// Add one item at `index` (default: last) and return its id; its id and
+/// times come from `env`.
 pub(crate) fn add_item(
     transaction: &Transaction<'_>,
     workspace_id: &str,
@@ -199,7 +209,7 @@ pub(crate) fn add_item(
     state: Option<&str>,
     origin: &str,
     index: Option<usize>,
-    now_ms: u64,
+    env: &OracleEnv,
 ) -> anyhow::Result<String> {
     let text = normalized_text(text)?;
     let state = state.unwrap_or("todo");
@@ -211,8 +221,8 @@ pub(crate) fn add_item(
             "a workspace checklist holds at most {MAX_CHECKLIST_ITEMS} items"
         )));
     }
-    let id = new_id("chk");
-    let now = i64::try_from(now_ms)?;
+    let id = new_id(env.ids(), "chk")?;
+    let now = i64::try_from(env.wall().unix_ms())?;
     transaction.execute(
         "INSERT INTO workspace_checklist_items(
            workspace_id, item_id, text, state, origin, attachments_json, position,
@@ -257,19 +267,20 @@ fn require_item(transaction: &Connection, workspace_id: &str, item: &str) -> any
     Ok(())
 }
 
-/// Apply `update` to one item.
+/// Apply `update` to one item, stamped with `env`'s time; new attachment
+/// ids come from `env`.
 pub(crate) fn update_item(
     transaction: &Transaction<'_>,
     workspace_id: &str,
     item: &str,
     update: &ChecklistItemUpdate,
-    now_ms: u64,
+    env: &OracleEnv,
 ) -> anyhow::Result<()> {
     if update.is_empty() {
         return Err(bad_request("update names no field (text, state, index, attachments)"));
     }
     require_item(transaction, workspace_id, item)?;
-    let now = i64::try_from(now_ms)?;
+    let now = i64::try_from(env.wall().unix_ms())?;
     if let Some(text) = &update.text {
         let text = normalized_text(text)?;
         transaction.execute(
@@ -287,7 +298,7 @@ pub(crate) fn update_item(
         )?;
     }
     if let Some(inputs) = &update.attachments {
-        let attachments = resolve_attachments(inputs)?;
+        let attachments = resolve_attachments(inputs, env.ids())?;
         transaction.execute(
             "UPDATE workspace_checklist_items SET attachments_json = ?3, updated_at_ms = ?4
              WHERE workspace_id = ?1 AND item_id = ?2",

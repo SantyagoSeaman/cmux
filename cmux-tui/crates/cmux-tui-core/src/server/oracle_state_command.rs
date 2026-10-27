@@ -1,5 +1,6 @@
-//! The `oracle-state` and `oracle-restore-preview` request lines
-//! (`crate::oracle_state`, spec/commands.md).
+//! The `oracle-state`, `oracle-restore-preview` and `oracle-advance-clock`
+//! request lines (`crate::oracle_state`, `crate::oracle_env`,
+//! spec/commands.md).
 //!
 //! They are answered before the `Command` parse, as `script-*` and
 //! `loopback-*` lines are, so the commands are not in the `Command` enum, its
@@ -20,7 +21,9 @@ use crate::Mux;
 pub(super) const COMMAND: &str = "oracle-state";
 /// The journal restore preview's `cmd` (invariant I9, p15-oracle task 205).
 pub(super) const RESTORE_PREVIEW: &str = "oracle-restore-preview";
-const COMMANDS: [&str; 2] = [COMMAND, RESTORE_PREVIEW];
+/// Moves the virtual clock (p15-oracle task 185).
+pub(super) const ADVANCE_CLOCK: &str = "oracle-advance-clock";
+const COMMANDS: [&str; 3] = [COMMAND, RESTORE_PREVIEW, ADVANCE_CLOCK];
 
 /// The `cmd` names this module answers (server/routes.rs).
 pub(in crate::server) const ROUTES: &[crate::server::routes::Route] =
@@ -30,8 +33,8 @@ pub(in crate::server) const ROUTES: &[crate::server::routes::Route] =
         entry: |line| try_handle(line.mux, line.client, line.message, line.writer),
     }];
 
-/// Answer an `oracle-state` or `oracle-restore-preview` line; `None` for any
-/// other line.
+/// Answer an `oracle-state`, `oracle-restore-preview` or
+/// `oracle-advance-clock` line; `None` for any other line.
 pub(super) fn try_handle(
     mux: &Arc<Mux>,
     client: u64,
@@ -82,6 +85,9 @@ fn answer(
         }
         return Ok(serde_json::to_value(crate::oracle_state::oracle_state(mux, client)?)?);
     }
+    if command == ADVANCE_CLOCK {
+        return advance_clock(mux, fields);
+    }
     let selector = match fields.remove("checkpoint") {
         None => "latest".to_string(),
         Some(Value::String(selector)) if !selector.is_empty() => selector,
@@ -97,6 +103,27 @@ fn answer(
     }
     let reply = crate::oracle_state::oracle_restore_preview(mux, &selector, through)?;
     Ok(serde_json::to_value(reply)?)
+}
+
+/// `oracle-advance-clock {ms}`: the virtual clock's offset from the fixture
+/// epoch after the move, and its time.
+fn advance_clock(mux: &Mux, mut fields: Map<String, Value>) -> anyhow::Result<Value> {
+    let Some(ms) = fields.remove("ms").as_ref().and_then(Value::as_u64) else {
+        anyhow::bail!("bad request: {ADVANCE_CLOCK} ms must be a uint64");
+    };
+    if let Some(field) = fields.keys().next() {
+        anyhow::bail!("bad request: {ADVANCE_CLOCK} takes no field {field:?}");
+    }
+    let Some(clock) = mux.oracle_env().virtual_clock() else {
+        anyhow::bail!(
+            "{ADVANCE_CLOCK} requires CMUX_TUI_ORACLE_SEED: this daemon runs on the system clock"
+        );
+    };
+    let offset = clock.advance(ms)?;
+    Ok(serde_json::json!({
+        "offsetMs": offset,
+        "nowMs": crate::oracle_env::FIXTURE_EPOCH_MS + offset,
+    }))
 }
 
 #[cfg(test)]

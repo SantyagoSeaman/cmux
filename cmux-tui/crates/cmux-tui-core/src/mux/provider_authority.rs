@@ -68,6 +68,17 @@ impl fmt::Display for ProviderWorkspaceAuthorityUpdateError {
 
 impl std::error::Error for ProviderWorkspaceAuthorityUpdateError {}
 
+/// Who owns the workspace lifecycle of an owner's mux (`Mux::open_owner`).
+pub enum OwnerProvider {
+    /// The session's own clients.
+    Local,
+    /// A provider, with its authority from the first control connection.
+    Managed(ProviderWorkspaceAuthority),
+    /// A provider whose authority arrives later through the root-only
+    /// management socket, for this mux generation.
+    Pending { mux_generation: String },
+}
+
 #[derive(Default)]
 pub(crate) struct ProviderWorkspaceState {
     pub(super) managed: bool,
@@ -77,6 +88,26 @@ pub(crate) struct ProviderWorkspaceState {
 }
 
 impl ProviderWorkspaceState {
+    /// Provider-owned, with its authority from the first control connection.
+    pub(super) fn managed(authority: ProviderWorkspaceAuthority) -> Self {
+        Self {
+            managed: true,
+            mux_generation: None,
+            authority_generation: 1,
+            authority: Some(authority),
+        }
+    }
+
+    /// Provider-owned, its authority installed later for `mux_generation`.
+    pub(super) fn pending(mux_generation: String) -> Self {
+        Self {
+            managed: true,
+            mux_generation: Some(mux_generation.into_boxed_str()),
+            authority_generation: 0,
+            authority: None,
+        }
+    }
+
     pub(super) fn status(&self) -> ProviderWorkspaceAuthorityStatus {
         ProviderWorkspaceAuthorityStatus {
             managed: self.managed,

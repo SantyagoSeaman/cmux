@@ -25,9 +25,9 @@ use crate::resource_router::ParsedResourceRequest;
 use crate::{Actor, Mux};
 use capture::{Include, Request, Stamp};
 use ledger::Identity;
-use record::{Checkpoint, Limits, Pin, Stored, now_ms, rfc3339};
+use record::{Checkpoint, Limits, Pin, Stored, rfc3339};
 use scan::{Layout, refused};
-use store::{Pending, Store, io_failed, mint};
+use store::{Pending, Store, io_failed};
 
 /// Pin ids with these prefixes belong to the handoff and restore owners.
 const MANAGED_PINS: [&str; 2] = ["handoff:", "restore:"];
@@ -216,8 +216,8 @@ fn capture(
     arguments: &CreateArguments,
 ) -> Result<Stored, ResourceError> {
     const OPERATION: &str = "git.checkpoint.create";
-    let checkpoint_id = mint("ckpt");
-    let created_at_ms = now_ms();
+    let checkpoint_id = store.mint_id("ckpt");
+    let created_at_ms = store.now_ms();
     let created_at = rfc3339(created_at_ms);
     let scratch = store.scratch().map_err(|error| io_failed(OPERATION, &error))?;
     let stamp = Stamp {

@@ -50,7 +50,7 @@ impl Mux {
                     self.resolve_in_state(state, crate::ResourceTarget::Workspace, selectors)?;
                 let (_, public_id) = workspace_identity(state, resolved.workspace)?;
                 let workspace = public_id.as_str();
-                let now = now_ms();
+                let env = self.oracle_env();
                 match &change {
                     WorkspaceChecklistChange::Add { text, state, origin, index } => {
                         store::add_item(
@@ -60,11 +60,11 @@ impl Mux {
                             state.as_deref(),
                             origin,
                             *index,
-                            now,
+                            env,
                         )?;
                     }
                     WorkspaceChecklistChange::Update { item, update } => {
-                        store::update_item(transaction, workspace, item, update, now)?;
+                        store::update_item(transaction, workspace, item, update, env)?;
                     }
                     WorkspaceChecklistChange::Remove { item } => {
                         store::remove_item(transaction, workspace, item)?;

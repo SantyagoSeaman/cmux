@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::time::Duration;
 
-use super::record::{self, Stored, now_ms};
+use super::record::{self, Stored};
 use super::scan;
 use super::store::Store;
 use crate::git_ops::write_run::{Bound, WriteGit};
@@ -58,7 +58,7 @@ fn delete(git: &WriteGit<'_>, reference: &str, object: &str) -> bool {
 /// own maintenance collects them.
 pub(super) fn prune(store: &Store, git: &WriteGit<'_>, repository_id: &str) {
     let Ok(records) = store.all(repository_id) else { return };
-    for checkpoint_id in record::prunable(&records, now_ms()) {
+    for checkpoint_id in record::prunable(&records, store.now_ms()) {
         let found = records.iter().find(|stored| stored.record.checkpoint_id == checkpoint_id);
         if let Some(stored) = found
             && delete(git, &stored.record.reference, &stored.record.object_id)

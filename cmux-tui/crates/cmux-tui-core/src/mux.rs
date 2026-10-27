@@ -210,6 +210,7 @@ mod event_emit;
 mod exit_settle;
 pub(crate) mod feed_local;
 mod focus;
+pub(crate) use focus::validate_client_id;
 mod frontend_projection;
 mod history_search;
 mod host_close;
@@ -270,7 +271,7 @@ mod presentation;
 mod provider_authority;
 pub(crate) use provider_authority::ProviderWorkspaceState;
 pub use provider_authority::{
-    ProviderWorkspaceAuthority, ProviderWorkspaceAuthorityStatus,
+    OwnerProvider, ProviderWorkspaceAuthority, ProviderWorkspaceAuthorityStatus,
     ProviderWorkspaceAuthorityUpdateError,
 };
 use provider_authority::{constant_time_eq, validate_mux_generation};
@@ -488,18 +489,6 @@ const WORKSPACE_NAME_MAX_BYTES: usize = 1_024;
 const TERMINAL_HOST_CLOSE_WAIT: Duration = crate::terminal_host_runtime::HOST_TERMINATE_WAIT;
 const TERMINAL_READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// A durable client install identity: non-empty, at most 128 ASCII graphic
-/// bytes. Shared by per-client focus memory and per-client notification reads.
-pub(crate) fn validate_client_id(client_id: &str) -> anyhow::Result<()> {
-    if client_id.is_empty()
-        || client_id.len() > 128
-        || !client_id.bytes().all(|byte| byte.is_ascii_graphic())
-    {
-        anyhow::bail!("bad request: invalid client_id");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 type ScreenCreatedHook = Box<dyn FnOnce(SurfaceId) + Send>;
 
@@ -573,6 +562,8 @@ pub struct Mux {
     /// (`oracle-state` `childExits.holder`, invariant I17).
     #[cfg(any(debug_assertions, feature = "oracle"))]
     oracle_holder_exits: AtomicU64,
+    /// The owner's launch switches (`crate::switches`): the stores' clock and ids.
+    switches: crate::switches::Switches,
     #[cfg(test)]
     client_resize_before_apply: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]

@@ -19,12 +19,15 @@ use sha2::{Digest, Sha256};
 use super::record::Stored;
 use super::scan::refused;
 use crate::Mux;
+use crate::oracle_env::{IdSource, OracleEnv};
 use crate::resource::ResourceError;
 
 const DIRECTORY: &str = "git-checkpoints";
 
 pub(super) struct Store {
     root: PathBuf,
+    /// The owner's clock and id source: the ids and times of the records.
+    env: OracleEnv,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -62,11 +65,21 @@ impl Store {
                 Value::Null,
             ));
         };
-        let store = Self { root: session.join(DIRECTORY) };
+        let store = Self { root: session.join(DIRECTORY), env: mux.oracle_env().clone() };
         for directory in [store.root.clone(), store.hooks(), store.root.join("journal")] {
             private_directory(&directory).map_err(|error| io_failed(operation, &error))?;
         }
         Ok(store)
+    }
+
+    /// A record id (`<prefix>_<32 hex digits>`) from the owner's id source.
+    pub(super) fn mint_id(&self, prefix: &str) -> String {
+        mint_from(self.env.ids(), prefix)
+    }
+
+    /// Milliseconds since the Unix epoch on the owner's clock; 0 before it.
+    pub(super) fn now_ms(&self) -> u64 {
+        self.env.wall().unix_ms()
     }
 
     /// An empty directory git takes as its hooks directory, so no hook runs.
@@ -145,7 +158,7 @@ impl Store {
             .entry(common)
             .or_insert_with(|| {
                 changed = true;
-                mint("repo")
+                self.mint_id("repo")
             })
             .clone();
         let worktree = identities.worktrees.get(&own).cloned();
@@ -153,7 +166,7 @@ impl Store {
             Some(worktree) if worktree.repository_id == repository_id => worktree.worktree_id,
             _ => {
                 changed = true;
-                let worktree_id = mint("wt");
+                let worktree_id = self.mint_id("wt");
                 let entry = Worktree {
                     worktree_id: worktree_id.clone(),
                     repository_id: repository_id.clone(),
@@ -267,10 +280,17 @@ impl Drop for Scratch {
     }
 }
 
-/// `<prefix>_<32 lowercase hex digits>` from the system's random source.
+/// `<prefix>_<32 lowercase hex digits>` from the system's random source, for
+/// names with no `Store` at hand: scratch directories, temporary files and
+/// the sites of the MQ-daemon-clock queue (p15-oracle.md).
 pub(in crate::git_ops) fn mint(prefix: &str) -> String {
+    mint_from(&IdSource::System, prefix)
+}
+
+/// `<prefix>_<32 lowercase hex digits>` from `ids`.
+fn mint_from(ids: &IdSource, prefix: &str) -> String {
     let mut bytes = [0_u8; 16];
-    if getrandom::fill(&mut bytes).is_err() {
+    if ids.fill(&mut bytes).is_err() {
         // Unique enough for a scratch name or an id when the random source
         // fails: the clock and the process.
         let seed = format!("{:?}{}", std::time::SystemTime::now(), std::process::id());
@@ -348,4 +368,21 @@ pub(in crate::git_ops) fn write_json(path: &Path, value: &impl Serialize) -> io:
         let _ = files::remove_file(&temporary);
     }
     result
+}
+
+/// The ids and the time a checkpoint store of `mux` mints: one repository
+/// with two worktrees, then a checkpoint id (`oracle_env` store tests).
+#[cfg(all(test, any(debug_assertions, feature = "oracle")))]
+pub(crate) fn oracle_sample(mux: &Mux) -> Value {
+    let store = Store::open(mux, "oracle.sample").expect("a persistent session");
+    let common = Path::new("/repo/.git");
+    let (repository, main) = store.identify(common, common).expect("identify main");
+    let linked = common.join("worktrees/linked");
+    let (_, linked) = store.identify(common, &linked).expect("identify linked");
+    serde_json::json!({
+        "repository": repository,
+        "worktrees": [main, linked],
+        "checkpoint": store.mint_id("ckpt"),
+        "now_ms": store.now_ms(),
+    })
 }

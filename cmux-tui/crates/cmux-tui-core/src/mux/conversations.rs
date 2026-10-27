@@ -32,7 +32,8 @@ impl Mux {
         let mut store = self.conversations.lock_store_for_sqlite().unwrap();
         if store.is_none() {
             let directory = self.session_state_directory();
-            *store = Some(ConversationStore::open(directory.as_deref())?);
+            *store =
+                Some(ConversationStore::open(directory.as_deref(), self.oracle_env().clone())?);
         }
         operation(store.as_mut().expect("conversation store opened above"))
     }

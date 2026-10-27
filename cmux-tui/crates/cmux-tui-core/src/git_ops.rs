@@ -13,6 +13,8 @@
 //! crate, which the diff sidecar links too.
 
 mod checkpoint;
+#[cfg(all(test, any(debug_assertions, feature = "oracle")))]
+pub(crate) use checkpoint::store::oracle_sample as checkpoint_oracle_sample;
 mod commit;
 mod commit_args;
 mod diff;

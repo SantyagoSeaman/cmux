@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::oracle_env::{IdSource, OracleEnv};
+
 #[path = "conversation_import.rs"]
 mod import;
 #[path = "conversation_inbox.rs"]
@@ -123,6 +125,8 @@ pub(crate) mod attachments;
 
 pub(crate) struct ConversationStore {
     connection: Connection,
+    /// The owner's clock and id source: every id and time this store writes.
+    env: OracleEnv,
     /// Attachment bytes (`attachments/` beside the store) and uploads in flight.
     attachments: attachments::Attachments,
 }
@@ -135,8 +139,9 @@ impl std::fmt::Debug for ConversationStore {
 
 impl ConversationStore {
     /// Open `conversations.sqlite3` in `directory`, or an in-memory store
-    /// when there is no directory (an in-memory session, tests).
-    pub(crate) fn open(directory: Option<&Path>) -> anyhow::Result<Self> {
+    /// when there is no directory (an in-memory session, tests), stamping
+    /// with `env`'s clock and ids.
+    pub(crate) fn open(directory: Option<&Path>, env: OracleEnv) -> anyhow::Result<Self> {
         let connection = match directory {
             Some(directory) => {
                 let path = directory.join(CONVERSATIONS_FILE);
@@ -149,12 +154,13 @@ impl ConversationStore {
             }
             None => Connection::open_in_memory()?,
         };
-        Self::initialize(connection, attachments::Attachments::open(directory)?)
+        Self::initialize(connection, attachments::Attachments::open(directory)?, env)
     }
 
     fn initialize(
         mut connection: Connection,
         attachments: attachments::Attachments,
+        env: OracleEnv,
     ) -> anyhow::Result<Self> {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
@@ -249,7 +255,7 @@ impl ConversationStore {
             params![SCHEMA_VERSION.to_string()],
         )?;
         transaction.commit()?;
-        Ok(Self { connection, attachments })
+        Ok(Self { connection, env, attachments })
     }
 
     /// Mints the credential of `participant` (an agent, or a person other than
@@ -340,8 +346,8 @@ impl ConversationStore {
         validate_idempotency_key(idempotency_key)?;
         let fingerprint =
             fingerprint(&json!({"actor": actor, "title": title, "participants": participants}))?;
-        let now_ms = crate::workspace_registry::unix_epoch_ms()?;
-        let id = new_id("conv_", now_ms)?;
+        let now_ms = self.env.wall().try_unix_ms()?;
+        let id = new_id(self.env.ids(), "conv_", now_ms)?;
         let now = format_rfc3339_millis(now_ms);
         let transaction =
             self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -440,7 +446,8 @@ impl ConversationStore {
     ) -> anyhow::Result<OpOutcome> {
         let transaction =
             self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let outcome = apply_op_in(&transaction, conversation, idempotency_key, actor, op)?;
+        let outcome =
+            apply_op_in(&transaction, &self.env, conversation, idempotency_key, actor, op)?;
         transaction.commit()?;
         Ok(outcome)
     }
@@ -455,7 +462,14 @@ impl ConversationStore {
             self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut outcomes = Vec::with_capacity(ops.len());
         for (conversation, idempotency_key, actor, op) in ops {
-            outcomes.push(apply_op_in(&transaction, conversation, idempotency_key, actor, op)?);
+            outcomes.push(apply_op_in(
+                &transaction,
+                &self.env,
+                conversation,
+                idempotency_key,
+                actor,
+                op,
+            )?);
         }
         transaction.commit()?;
         Ok(outcomes)
@@ -466,6 +480,7 @@ impl ConversationStore {
 /// writes, ledger row. The caller commits.
 fn apply_op_in(
     transaction: &Transaction<'_>,
+    env: &OracleEnv,
     conversation: &str,
     idempotency_key: &str,
     actor: &str,
@@ -473,8 +488,9 @@ fn apply_op_in(
 ) -> anyhow::Result<OpOutcome> {
     validate_idempotency_key(idempotency_key)?;
     let fingerprint = fingerprint(&json!({"actor": actor, "op": op}))?;
-    let now_ms = crate::workspace_registry::unix_epoch_ms()?;
-    let new_message_id = if op.is_send() { new_id("msg_", now_ms)? } else { String::new() };
+    let now_ms = env.wall().try_unix_ms()?;
+    let new_message_id =
+        if op.is_send() { new_id(env.ids(), "msg_", now_ms)? } else { String::new() };
     let now = format_rfc3339_millis(now_ms);
     let head = load_head(transaction, conversation)?
         .ok_or_else(|| rejected(Reject::UnknownConversation))?;
@@ -607,10 +623,10 @@ fn token_digest(token: &str) -> String {
 }
 
 /// `<prefix>` + 26 Crockford base32 characters: the current millisecond and
-/// 80 random bits.
-fn new_id(prefix: &str, now_ms: u64) -> anyhow::Result<String> {
+/// 80 random bits from `ids`.
+fn new_id(ids: &IdSource, prefix: &str, now_ms: u64) -> anyhow::Result<String> {
     let mut random = [0_u8; 10];
-    getrandom::fill(&mut random).map_err(|_| anyhow::anyhow!("conversation id randomness"))?;
+    ids.fill(&mut random).map_err(|_| anyhow::anyhow!("conversation id randomness"))?;
     Ok(encode_id(prefix, now_ms, random))
 }
 

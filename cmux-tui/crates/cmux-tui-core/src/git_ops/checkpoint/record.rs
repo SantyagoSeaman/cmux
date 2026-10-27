@@ -171,14 +171,6 @@ pub(super) fn saturate(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// Milliseconds since the Unix epoch.
-pub(super) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
-
 /// RFC 3339 in UTC with milliseconds, for example 2026-10-02T12:00:00.000Z.
 pub(super) fn rfc3339(ms: u64) -> String {
     let seconds = ms / 1000;

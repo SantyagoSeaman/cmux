@@ -66,7 +66,7 @@ impl ConversationStore {
         conversation: &str,
         messages: &[ImportedMessage],
     ) -> anyhow::Result<ImportOutcome> {
-        let now_ms = crate::workspace_registry::unix_epoch_ms()?;
+        let now_ms = self.env.wall().try_unix_ms()?;
         let now = cmux_conversation::format_rfc3339_millis(now_ms);
         let transaction =
             self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -150,7 +150,7 @@ impl ConversationStore {
             head.last_seq += 1;
             let id = match &message.id {
                 Some(id) => id.clone(),
-                None => new_id("msg_", now_ms)?,
+                None => new_id(self.env.ids(), "msg_", now_ms)?,
             };
             let human =
                 head.participant(&message.author).is_some_and(|p| p.kind == ParticipantKind::Human);
@@ -239,7 +239,7 @@ mod tests {
                 ),
             })
             .collect();
-        let mut store = ConversationStore::open(None).unwrap();
+        let mut store = ConversationStore::open(None, Default::default()).unwrap();
         let id = store.create("home-chief", "user_me", "Chief", &people).unwrap().summary.id;
         store.import(&id, &messages).unwrap();
         let head = load_head(&store.connection, &id).unwrap().unwrap();

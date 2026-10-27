@@ -1156,6 +1156,44 @@ Errors: `oracle state requires a trusted local connection`,
 session has no journal file to read), `bad request: ...`, and the reducer's
 errors (a gap in the journal, an unknown reducer version).
 
+### oracle-advance-clock
+
+| Field | Value |
+| --- | --- |
+| name | `oracle-advance-clock` |
+| status | implemented in debug builds and `--features oracle` builds only |
+| since | protocol 12, no capability |
+
+Moves the daemon's virtual clock (`plans/cmux-next/chrome-parity/p15-oracle.md`,
+task 185). A debug or `--features oracle` daemon started with
+`CMUX_TUI_ORACLE_SEED` (a non-empty UTF-8 string; any other value is a start
+error) runs the stores that take the owner's clock and id source
+(conversations, workspace checklists, git checkpoints) on a virtual clock that
+starts at the fixture epoch, 2026-01-01T00:00:00Z (1767225600000 ms), and
+moves only on this command, and mints their ids from a ChaCha20 stream keyed
+by the seed. Two daemons with the same seed that run the same requests write
+the same ids and times. Without the seed, and always in a release daemon, the
+stores use the system clock and the system's random source. Like
+`oracle-state`, a release daemon answers `bad request: unknown variant`, and
+only trusted local connections get a reply. The oracle probes for the clock
+with `ms: 0`.
+
+Params: `ms` (uint64): milliseconds to move the clock forward.
+
+Result:
+
+```text
+object{offsetMs:uint64, nowMs:uint64}
+```
+
+`offsetMs` is the clock's distance from the fixture epoch after the move and
+`nowMs` its time in milliseconds since the Unix epoch.
+
+Errors: `oracle state requires a trusted local connection`,
+`oracle-advance-clock requires CMUX_TUI_ORACLE_SEED: this daemon runs on the
+system clock`, `bad request: ...`, and `the clock exceeds the millisecond range`
+for a move past the largest millisecond count.
+
 ### trace-start, trace-stop, trace-status
 
 | Field | Value |

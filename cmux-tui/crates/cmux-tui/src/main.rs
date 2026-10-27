@@ -2387,6 +2387,9 @@ fn run_server(
             surface_options.template_workspace_name = template.workspace_name.clone();
         }
     }
+    // Parsed once here and passed to the mux: a bad value is a start error,
+    // before this process binds the session socket.
+    let switches = cmux_tui_core::switches::Switches::from_env(|name| std::env::var_os(name))?;
     let provider_management_pending = provider_management_listener.is_some();
     // Bind and serve the session socket before the restore below (registry
     // load, terminal host adoption), which can take minutes on a loaded
@@ -2405,36 +2408,21 @@ fn run_server(
     let restoring_server =
         cmux_tui_core::server::bind_session_socket(&args.session, args.socket.clone())?
             .serve_restoring()?;
-    let mux =
-        match (state_root.as_deref(), provider_workspace_authority, provider_management_pending) {
-            (Some(root), Some(authority), false) => Mux::open_persistent_provider_managed(
-                args.session.clone(),
-                surface_options,
-                root,
-                authority,
-            ),
-            (Some(root), None, true) => Mux::open_persistent_provider_managed_pending(
-                args.session.clone(),
-                surface_options,
-                root,
-                new_mux_generation()?,
-            ),
-            (Some(root), None, false) => {
-                Mux::open_persistent(args.session.clone(), surface_options, root)
-            }
-            (None, Some(authority), false) => {
-                Ok(Mux::new_provider_managed(args.session.clone(), surface_options, authority))
-            }
-            (None, None, true) => Mux::new_provider_managed_pending(
-                args.session.clone(),
-                surface_options,
-                new_mux_generation()?,
-            ),
-            (None, None, false) => Ok(Mux::new(args.session.clone(), surface_options)),
-            (_, Some(_), true) => {
-                unreachable!("conflicting provider authority inputs rejected above")
-            }
-        };
+    let provider = match (provider_workspace_authority, provider_management_pending) {
+        (Some(authority), false) => cmux_tui_core::OwnerProvider::Managed(authority),
+        (None, true) => {
+            cmux_tui_core::OwnerProvider::Pending { mux_generation: new_mux_generation()? }
+        }
+        (None, false) => cmux_tui_core::OwnerProvider::Local,
+        (Some(_), true) => unreachable!("conflicting provider authority inputs rejected above"),
+    };
+    let mux = Mux::open_owner(
+        args.session.clone(),
+        surface_options,
+        state_root.as_deref(),
+        provider,
+        switches,
+    );
     let mux = match mux {
         Ok(mux) => mux,
         Err(error) => {

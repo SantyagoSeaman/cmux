@@ -63,6 +63,8 @@ use cmux_tui_util::machine_name;
 mod model;
 mod mux;
 pub mod net_keepalive;
+/// The owner's wall clock and id source (p15-oracle task 185).
+mod oracle_env;
 /// `oracle-state` (p15-oracle task 021): debug and `--features oracle` builds only.
 #[cfg(any(debug_assertions, feature = "oracle"))]
 mod oracle_state;
@@ -107,6 +109,8 @@ mod sidebar_resource;
 pub mod sizing_policy;
 mod state;
 pub mod store_schemas;
+/// The owner's launch switches, parsed once at owner start (p15-oracle tasks 020, 185).
+pub mod switches;
 use cmux_tui_util::stream_interrupt;
 #[cfg(unix)]
 mod holder_runtime;
@@ -190,8 +194,8 @@ pub use mux::{
 };
 pub use mux::{
     DEFAULT_TERMINAL_REAP_GRACE, IDLE_CLOSE_REAP_INTERVAL, IdleTerminalReaper,
-    MAX_TERMINAL_REAP_GRACE, TerminalReaper, start_idle_terminal_reaper, start_terminal_reaper,
-    validate_terminal_reap_grace,
+    MAX_TERMINAL_REAP_GRACE, OwnerProvider, TerminalReaper, start_idle_terminal_reaper,
+    start_terminal_reaper, validate_terminal_reap_grace,
 };
 pub use pairing::{PairingChallenge, PairingDecision, PairingError};
 pub use program_status::ShownProgramStatus;

@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// A durable client install identity: non-empty, at most 128 ASCII graphic
+/// bytes. Shared by per-client focus memory and per-client notification reads.
+pub(crate) fn validate_client_id(client_id: &str) -> anyhow::Result<()> {
+    if client_id.is_empty()
+        || client_id.len() > 128
+        || !client_id.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        anyhow::bail!("bad request: invalid client_id");
+    }
+    Ok(())
+}
+
 impl Mux {
     pub(super) fn pane_navigation_layout(
         screen: &Screen,

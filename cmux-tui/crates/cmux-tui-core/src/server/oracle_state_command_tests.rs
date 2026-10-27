@@ -199,3 +199,36 @@ fn oracle_state_reports_the_muxs_switch_arms() {
     let reply = reply_to(&mux, &local, json!({"id": 1, "cmd": COMMAND}));
     assert_eq!(reply["data"]["switches"], json!({"terminal-holder": "new"}), "{reply}");
 }
+
+/// `oracle-advance-clock {ms}` moves a seeded daemon's virtual clock and is
+/// refused on the system clock, which is how the oracle driver probes for it.
+#[test]
+fn oracle_advance_clock_moves_only_a_seeded_virtual_clock() {
+    let wall = Mux::new_for_test("oracle-advance-clock-wall", SurfaceOptions::default());
+    let local = connection(&wall, ClientTransport::Unix);
+    let refused = reply_to(&wall, &local, json!({"id": 1, "cmd": ADVANCE_CLOCK, "ms": 0}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("CMUX_TUI_ORACLE_SEED"), "{refused}");
+
+    let seeded = crate::switches::Switches::seeded("advance");
+    let mux = Mux::new_for_test_with_switches("oracle-advance-clock", None, seeded);
+    let local = connection(&mux, ClientTransport::Unix);
+    let epoch = crate::oracle_env::FIXTURE_EPOCH_MS;
+    let probe = reply_to(&mux, &local, json!({"id": 2, "cmd": ADVANCE_CLOCK, "ms": 0}));
+    assert_eq!(probe["data"], json!({"offsetMs": 0, "nowMs": epoch}), "{probe}");
+    let moved = reply_to(&mux, &local, json!({"id": 3, "cmd": ADVANCE_CLOCK, "ms": 1500}));
+    assert_eq!(moved["data"], json!({"offsetMs": 1500, "nowMs": epoch + 1500}), "{moved}");
+    assert_eq!(mux.oracle_env().wall().unix_ms(), epoch + 1500);
+
+    for bad in [json!({"ms": "1"}), json!({}), json!({"ms": 1, "to": 2})] {
+        let mut request = bad.clone();
+        request["id"] = json!(4);
+        request["cmd"] = json!(ADVANCE_CLOCK);
+        let reply = reply_to(&mux, &local, request);
+        assert!(reply["error"].as_str().unwrap().starts_with("bad request"), "{bad}: {reply}");
+    }
+    let web = connection(&mux, ClientTransport::WebSocket);
+    let remote = reply_to(&mux, &web, json!({"id": 5, "cmd": ADVANCE_CLOCK, "ms": 1}));
+    assert_eq!(remote["ok"], false, "{remote}");
+    assert_eq!(mux.oracle_env().wall().unix_ms(), epoch + 1500, "a refused move leaves it");
+}

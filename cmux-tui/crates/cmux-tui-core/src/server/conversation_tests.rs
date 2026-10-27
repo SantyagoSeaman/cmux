@@ -397,8 +397,11 @@ fn conversation_store_file_persists_across_reopen() {
     let directory = mux.session_state_directory().unwrap();
     drop(mux);
     assert!(directory.join(crate::conversation_store::CONVERSATIONS_FILE).is_file());
-    let mut store =
-        crate::conversation_store::ConversationStore::open(Some(directory.as_path())).unwrap();
+    let mut store = crate::conversation_store::ConversationStore::open(
+        Some(directory.as_path()),
+        Default::default(),
+    )
+    .unwrap();
     let (summary, messages) = store.snapshot(&conversation, 10).unwrap();
     assert_eq!(summary.rev, 2);
     assert_eq!(summary.title, "mux");
@@ -544,8 +547,11 @@ fn conversation_search_drops_the_v1_index() {
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join(crate::conversation_store::CONVERSATIONS_FILE);
     {
-        let store =
-            crate::conversation_store::ConversationStore::open(Some(root.as_path())).unwrap();
+        let store = crate::conversation_store::ConversationStore::open(
+            Some(root.as_path()),
+            Default::default(),
+        )
+        .unwrap();
         drop(store);
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
@@ -557,8 +563,11 @@ fn conversation_search_drops_the_v1_index() {
             )
             .unwrap();
     }
-    let mut store =
-        crate::conversation_store::ConversationStore::open(Some(root.as_path())).unwrap();
+    let mut store = crate::conversation_store::ConversationStore::open(
+        Some(root.as_path()),
+        Default::default(),
+    )
+    .unwrap();
     let participants: Vec<cmux_conversation::Participant> =
         serde_json::from_value(participants()).unwrap();
     let created = store.create("create-old", "user_local", "old", &participants).unwrap();

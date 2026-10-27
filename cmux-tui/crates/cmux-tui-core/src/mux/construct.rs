@@ -2,6 +2,7 @@
 //! the shared `from_workspace_registry` bootstrap, and test constructors.
 
 use super::*;
+use crate::switches::Switches;
 
 impl Mux {
     #[track_caller]
@@ -26,12 +27,7 @@ impl Mux {
         Self::new_with_test_surface_runtime(
             session,
             surface_options,
-            ProviderWorkspaceState {
-                managed: true,
-                mux_generation: None,
-                authority_generation: 1,
-                authority: Some(authority),
-            },
+            ProviderWorkspaceState::managed(authority),
             false,
         )
     }
@@ -49,12 +45,7 @@ impl Mux {
         Ok(Self::new_with_test_surface_runtime(
             session,
             surface_options,
-            ProviderWorkspaceState {
-                managed: true,
-                mux_generation: Some(mux_generation.into_boxed_str()),
-                authority_generation: 0,
-                authority: None,
-            },
+            ProviderWorkspaceState::pending(mux_generation),
             false,
         ))
     }
@@ -109,12 +100,7 @@ impl Mux {
             session,
             surface_options,
             registry,
-            ProviderWorkspaceState {
-                managed: true,
-                mux_generation: None,
-                authority_generation: 1,
-                authority: Some(authority),
-            },
+            ProviderWorkspaceState::managed(authority),
             false,
         )
     }
@@ -134,12 +120,7 @@ impl Mux {
             session,
             surface_options,
             registry,
-            ProviderWorkspaceState {
-                managed: true,
-                mux_generation: Some(mux_generation.into_boxed_str()),
-                authority_generation: 0,
-                authority: None,
-            },
+            ProviderWorkspaceState::pending(mux_generation),
             false,
         )
     }
@@ -159,11 +140,53 @@ impl Mux {
             provider_workspace,
             test_surface_runtime,
             crate::memory::MemorySetup::from_env(),
+            Switches::default(),
         )
     }
 
-    /// [`Self::from_workspace_registry`] with the memory registry and the
-    /// scrollback pressure feature given (tests inject both).
+    /// The mux of an owner process, with the launch switches the owner start
+    /// parsed (`Switches::from_env`): persistent under `state_root`, else in
+    /// memory, its workspace lifecycle owned as `provider` says.
+    #[track_caller]
+    pub fn open_owner(
+        session: impl Into<String>,
+        surface_options: SurfaceOptions,
+        state_root: Option<&Path>,
+        provider: OwnerProvider,
+        switches: Switches,
+    ) -> anyhow::Result<Arc<Self>> {
+        let session = session.into();
+        let provider_workspace = match provider {
+            OwnerProvider::Local => ProviderWorkspaceState::default(),
+            OwnerProvider::Managed(authority) => ProviderWorkspaceState::managed(authority),
+            OwnerProvider::Pending { mux_generation } => {
+                validate_mux_generation(&mux_generation)?;
+                ProviderWorkspaceState::pending(mux_generation)
+            }
+        };
+        let registry = match state_root {
+            Some(root) => WorkspaceRegistry::open(root, &session)?,
+            None => WorkspaceRegistry::in_memory(&session)?,
+        };
+        Self::from_workspace_registry_with(
+            session,
+            surface_options,
+            registry,
+            provider_workspace,
+            false,
+            crate::memory::MemorySetup::from_env(),
+            switches,
+        )
+    }
+
+    /// The owner's clock and id source (`Switches::oracle_env`).
+    pub(crate) fn oracle_env(&self) -> &crate::oracle_env::OracleEnv {
+        self.switches.oracle_env()
+    }
+
+    /// [`Self::from_workspace_registry`] with the memory registry, the
+    /// scrollback pressure feature and the launch switches given (the owner
+    /// start passes its switches; tests inject the rest).
     #[track_caller]
     fn from_workspace_registry_with(
         session: String,
@@ -172,6 +195,7 @@ impl Mux {
         provider_workspace: ProviderWorkspaceState,
         #[cfg_attr(not(test), allow(unused_variables))] test_surface_runtime: bool,
         memory_setup: crate::memory::MemorySetup,
+        switches: Switches,
     ) -> anyhow::Result<Arc<Self>> {
         let snapshot = registry.snapshot()?;
         let topology = registry.resource_topology_snapshot()?;
@@ -269,6 +293,7 @@ impl Mux {
             oracle_switches: OnceLock::new(),
             #[cfg(any(debug_assertions, feature = "oracle"))]
             oracle_holder_exits: AtomicU64::new(0),
+            switches,
             #[cfg(test)]
             client_resize_before_apply: Mutex::new(None),
             #[cfg(test)]
@@ -566,6 +591,7 @@ impl Mux {
             ProviderWorkspaceState::default(),
             false,
             memory_setup,
+            Switches::default(),
         )
     }
 
@@ -588,8 +614,36 @@ impl Mux {
             ProviderWorkspaceState::default(),
             true,
             memory_setup,
+            Switches::default(),
         )
         .expect("in-memory workspace registry must load")
+    }
+
+    /// A test mux with the test surface runtime and the launch switches the
+    /// test sets: persistent under `state_root`, else in memory.
+    #[cfg(all(test, any(debug_assertions, feature = "oracle")))]
+    #[track_caller]
+    pub(crate) fn new_for_test_with_switches(
+        session: impl Into<String>,
+        state_root: Option<&Path>,
+        switches: Switches,
+    ) -> Arc<Self> {
+        let session = session.into();
+        let registry = match state_root {
+            Some(root) => WorkspaceRegistry::open(root, &session),
+            None => WorkspaceRegistry::in_memory(&session),
+        }
+        .expect("workspace registry must open");
+        Self::from_workspace_registry_with(
+            session,
+            SurfaceOptions::default(),
+            registry,
+            ProviderWorkspaceState::default(),
+            true,
+            crate::memory::MemorySetup::from_env(),
+            switches,
+        )
+        .expect("workspace registry must load")
     }
 
     #[cfg(test)]
@@ -616,12 +670,7 @@ impl Mux {
         Self::new_with_test_surface_runtime(
             session,
             surface_options,
-            ProviderWorkspaceState {
-                managed: true,
-                mux_generation: None,
-                authority_generation: 1,
-                authority: Some(authority),
-            },
+            ProviderWorkspaceState::managed(authority),
             true,
         )
     }

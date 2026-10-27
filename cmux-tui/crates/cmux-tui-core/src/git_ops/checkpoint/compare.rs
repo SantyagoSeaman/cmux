@@ -18,9 +18,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::capture::{self, Include, Request, Stamp};
-use super::record::{Limits, now_ms, rfc3339};
+use super::record::{Limits, rfc3339};
 use super::scan::{self, failed};
-use super::store::{Scratch, Store, io_failed, mint};
+use super::store::{Scratch, Store, io_failed};
 use super::{Target, not_found, target, writer};
 use crate::Mux;
 use crate::git_ops::diff;
@@ -64,7 +64,7 @@ pub(super) fn diff(
             (value, *to_complete)
         }
         None => {
-            let (live, live_complete) = live_files(&git, &target, &scratch)?;
+            let (live, live_complete) = live_files(store, &git, &target, &scratch)?;
             let to_tree = files_tree(&git, &scratch, "live", &live)?;
             let value = diff::between(repository, from_tree, to_tree, &request.fields, OPERATION)?;
             (value, live_complete)
@@ -116,12 +116,13 @@ fn files_tree(
 /// The working tree now, captured as a checkpoint would be (every eligible
 /// untracked file, default limits) but never published: its object id.
 fn live_files(
+    store: &Store,
     git: &WriteGit<'_>,
     target: &Target,
     scratch: &Scratch,
 ) -> Result<(String, bool), ResourceError> {
-    let checkpoint_id = mint("live");
-    let created_at = rfc3339(now_ms());
+    let checkpoint_id = store.mint_id("live");
+    let created_at = rfc3339(store.now_ms());
     let stamp = Stamp {
         checkpoint_id: &checkpoint_id,
         repository_id: &target.repository_id,
