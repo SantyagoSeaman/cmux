@@ -29,6 +29,8 @@ base64.workspace = true
 bytes.workspace = true
 cmux-pty.workspace = true
 cmux-link.workspace = true
+# The schema-generated lane routes (mux_lanes) and the binary frame header.
+cmux-ipc.workspace = true
 cmux-remote-protocol.workspace = true
 cmux-tui-core.workspace = true
 cmux-wg = { workspace = true, optional = true }

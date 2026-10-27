@@ -20,11 +20,17 @@
 //!   daemon expands them into its request params and `Command` variants for
 //!   the families `server-families.json` lists, with its `refused_fields`
 //!   and `boxed` variants.
+//! - `remote_lanes.rs` (task 152): the lane each framed command and event
+//!   rides over cmux-remote, by the rules of build-support/remote_lanes.rs
+//!   and the reviewed exceptions in `remote-lanes.json`; `src/remote_lanes.rs`
+//!   includes it.
 
 #[path = "build-support/client_requests.rs"]
 mod client_requests;
 #[path = "build-support/method_tables.rs"]
 mod method_tables;
+#[path = "build-support/remote_lanes.rs"]
+mod remote_lanes;
 #[path = "src/schema_digest.rs"]
 mod schema_digest;
 #[path = "build-support/server_families.rs"]
@@ -39,6 +45,7 @@ const TABLE_FIXTURE_SDK: &str = "../../spec/fixtures/ipc-method-tables/sdk-schem
 const TABLE_FIXTURE_RESOURCE: &str =
     "../../spec/fixtures/ipc-method-tables/resource-operations-v2.json";
 const SERVER_FAMILIES: &str = "server-families.json";
+const REMOTE_LANES: &str = "remote-lanes.json";
 
 /// Why generation failed; cargo prints it as the build script's error.
 struct BuildError(String);
@@ -115,6 +122,7 @@ fn main() -> Result<(), BuildError> {
     println!("cargo:rerun-if-changed=build-support/method_tables.rs");
     println!("cargo:rerun-if-changed=build-support/client_requests.rs");
     println!("cargo:rerun-if-changed=build-support/server_families.rs");
+    println!("cargo:rerun-if-changed=build-support/remote_lanes.rs");
     let manifest = PathBuf::from(env("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(env("OUT_DIR")?);
     let schemas = Schemas::read(&manifest, SDK_SCHEMA, RESOURCE_OPERATIONS)?;
@@ -122,6 +130,7 @@ fn main() -> Result<(), BuildError> {
     write(&out_dir, "method_tables.rs", &method_tables(&schemas, "TABLES")?)?;
     write(&out_dir, "client_requests.rs", &client_requests(&schemas.sdk)?)?;
     write(&out_dir, "server_families.rs", &server_families(&manifest, &schemas)?)?;
+    write(&out_dir, "remote_lanes.rs", &remote_lanes(&manifest, &schemas)?)?;
     let fixture = Schemas::read(&manifest, TABLE_FIXTURE_SDK, TABLE_FIXTURE_RESOURCE)?;
     write(&out_dir, "method_tables_fixture.rs", &method_tables(&fixture, "FIXTURE_TABLES")?)
 }
@@ -189,4 +198,14 @@ fn server_families(manifest: &Path, schemas: &Schemas) -> Result<String, BuildEr
     server_families::box_variants(&mut families, &list.doc)
         .map_err(|e| BuildError(format!("{}: {e}", list.path.display())))?;
     Ok(server_families::emit(&families))
+}
+
+/// `static REMOTE_LANES: RemoteLanes`, the routes `src/remote_lanes.rs`
+/// includes. A schema entry or an exception the rules refuse fails the build
+/// with its JSON path.
+fn remote_lanes(manifest: &Path, schemas: &Schemas) -> Result<String, BuildError> {
+    let lanes = SchemaFile::read(manifest.join(REMOTE_LANES))?;
+    let routes = remote_lanes::read(&schemas.sdk.doc, &schemas.resource.doc, &lanes.doc)
+        .map_err(|e| BuildError(format!("remote lanes: {e}")))?;
+    Ok(remote_lanes::emit(&routes, "REMOTE_LANES"))
 }

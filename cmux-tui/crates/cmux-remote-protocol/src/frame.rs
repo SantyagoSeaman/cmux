@@ -9,6 +9,15 @@ const MAGIC: [u8; 4] = *b"CMXR";
 const HEADER_BYTES: usize = 60;
 pub const MAX_WIRE_FRAME_BYTES: usize = HEADER_BYTES + MAX_FRAME_PAYLOAD;
 
+/// A wire lane: an ordered stream with its own send priority.
+///
+/// The lanes speak the schema's priority vocabulary (cmux-ipc `PriorityHint`,
+/// spec/sdk-schema.json `priority`): `Interactive` is the schema's `input`,
+/// `Control` and `Bulk` are the same words, and the schema's `background`
+/// rides `Bulk`, the lowest lane, because a fifth lane byte is an
+/// `UnknownLane` to every protocol-5 peer. `Tunnel` carries only port-forward
+/// streams and has no schema priority. cmux-remote's mux lane classifier maps
+/// each command and event through the schema-generated routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[repr(u8)]
@@ -28,6 +37,17 @@ impl Lane {
             Self::Control => 1,
             Self::Tunnel => 2,
             Self::Bulk => 3,
+        }
+    }
+
+    /// The lane's word in the schema priority vocabulary (`tunnel` is the
+    /// one lane without a schema priority).
+    pub const fn priority_name(self) -> &'static str {
+        match self {
+            Self::Interactive => "input",
+            Self::Control => "control",
+            Self::Bulk => "bulk",
+            Self::Tunnel => "tunnel",
         }
     }
 
@@ -66,7 +86,8 @@ impl FromStr for Lane {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "interactive" => Ok(Self::Interactive),
+            // `input` is the schema's word for the interactive lane.
+            "interactive" | "input" => Ok(Self::Interactive),
             "control" => Ok(Self::Control),
             "bulk" => Ok(Self::Bulk),
             "tunnel" => Ok(Self::Tunnel),
@@ -426,6 +447,16 @@ mod tests {
         invalid = frame;
         invalid.flags = FrameFlags::SESSION_CLOSE;
         assert_eq!(invalid.encode(), Err(FrameDecodeError::InvalidSessionClose));
+    }
+
+    #[test]
+    fn lanes_parse_from_display_and_priority_names() {
+        for lane in Lane::ALL {
+            assert_eq!(lane.to_string().parse::<Lane>(), Ok(lane));
+            assert_eq!(lane.priority_name().parse::<Lane>(), Ok(lane));
+        }
+        assert_eq!(Lane::Interactive.priority_name(), "input");
+        assert!("background".parse::<Lane>().is_err());
     }
 
     #[test]

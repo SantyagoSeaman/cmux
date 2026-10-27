@@ -28,6 +28,9 @@
 //! arrive in order: the holder link uses it, and so do the daemon's frame lanes.
 //! It is the only module with `unsafe` (libc `sendmsg`/`recvmsg`).
 //!
+//! [`remote_lanes`] is the lane each command and event rides over
+//! cmux-remote, generated from the schema and `remote-lanes.json`.
+//!
 //! [`lane_writer`] is the outbound priority policy (design 3.4): input
 //! streams, then the one control FIFO, then bulk, then background, with
 //! per-stream turns, a starvation bound, chunking and a byte bound.
@@ -68,6 +71,7 @@ pub mod frame;
 pub mod lane_writer;
 pub mod methods;
 pub mod reader;
+pub mod remote_lanes;
 pub mod schema;
 mod schema_digest;
 mod server_families;
@@ -85,6 +89,7 @@ pub use methods::{
     Ordering, Payload,
 };
 pub use reader::{FrameReader, MAX_JSON_LINE, Message, ReaderLimits};
+pub use remote_lanes::{Refine, RefineField, RemoteLanes, RemoteRoute, RouteRule};
 pub use schema::{SCHEMA_IDENTITY, SchemaIdentity};
 
 #[cfg(test)]
