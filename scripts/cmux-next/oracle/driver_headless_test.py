@@ -37,7 +37,16 @@ import oracle  # noqa: E402
 from driver_app_test import FakeApp, Recorder, case, identity_canonicalizer, step  # noqa: E402
 
 SHA = "b" * 40
-ACTIONS = frozenset({"workspace.new", "workspace.rename"})
+ACTIONS = frozenset({"workspace.new", "workspace.rename", "splitRight"})
+METHODS = frozenset({"action.run", "snapshot.get", "debug.oracle.snapshot", "debug.oracle.settle",
+                     "debug.oracle.wait_for", "debug.focus"})
+FACETS = frozenset({"topology", "daemon", "focus", "settings", "terminals", "tabs"})
+HOST = driver_headless.HostCapabilities(ACTIONS, METHODS, FACETS)
+
+
+def listing(**overrides: Any) -> str:
+    return json.dumps({"actions": sorted(ACTIONS), "methods": sorted(METHODS), "facets": sorted(FACETS),
+                       **overrides})
 
 
 def executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -51,13 +60,13 @@ class SelectionTests(unittest.TestCase):
     def test_window_cases_of_host_actions_and_cli_run_headless(self) -> None:
         runs = case(step("new", "action.run", args={"action": "workspace.new"}), step("s", "snapshot"),
                     requires=["actions", "gui"])
-        self.assertTrue(driver_headless.headless_capable(runs, ACTIONS))
+        self.assertTrue(driver_headless.headless_capable(runs, HOST))
         tour = case(step("c", "cli", args={"argv": ["tree", "--json"]}), step("s", "settle"), requires=["gui"])
-        self.assertTrue(driver_headless.headless_capable(tour, ACTIONS))
+        self.assertTrue(driver_headless.headless_capable(tour, HOST))
 
     def test_keys_chromium_web_overlays_and_unbound_actions_do_not(self) -> None:
         def capable(*steps, **extra) -> bool:
-            return driver_headless.headless_capable(case(*steps, **extra), ACTIONS)
+            return driver_headless.headless_capable(case(*steps, **extra), HOST)
 
         new = step("new", "action.run", args={"action": "workspace.new"})
         self.assertFalse(capable(new, step("k", "key", args={"keys": ["cmd+n"]}), requires=["actions", "gui", "keys"]))
@@ -69,15 +78,64 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(capable(step("r", "resource.call", args={}), requires=["resource_api"]))
         self.assertFalse(capable(requires=["gui"]))
 
-    def test_capable_cases_asks_the_host_for_its_actions(self) -> None:
-        listing = Recorder(stdout=json.dumps({"actions": sorted(ACTIONS)}))
-        predicate, note = driver_headless.capable_cases("/x/CmuxNextHeadless", run=listing)
-        self.assertEqual(listing.calls[0]["argv"], ["/x/CmuxNextHeadless", "--list-actions"])
-        self.assertEqual(note["actions"], 2)
+    def test_cli_steps_need_a_bound_action_a_served_method_and_no_routing(self) -> None:
+        """The step shapes of tours/core.json and tours/home.json."""
+        def cli(*argv: str) -> bool:
+            return driver_headless.headless_capable(case(step("c", "cli", args={"argv": list(argv)}),
+                                                         requires=["gui"]), HOST)
+
+        self.assertTrue(cli("action", "run", "splitRight"))
+        self.assertTrue(cli("--json", "action", "run", "splitRight"))
+        self.assertFalse(cli("action", "run", "appStore.show", "--tab", "features", "--focus"))
+        self.assertFalse(cli("--json", "action", "run", "commandPalette"))
+        self.assertFalse(cli("action", "run"))
+        self.assertTrue(cli("--json", "app", "call", "debug.focus"))
+        self.assertFalse(cli("app", "call", "debug.home.sidebar_fixture", '{"search":true}'))
+        self.assertFalse(cli("app", "call", "debug.appearance", '{"mode":"dark"}'))
+        self.assertTrue(cli("settings", "set", "appearance.theme", "Soft Blue"))
+        self.assertTrue(cli("--idempotency-key", "k1", "workspace", "new", "--name", "Docs"))
+        for routed in (["--socket", "/tmp/x", "tree"], ["--session=main", "tree"], ["--app-socket", "/x", "tree"],
+                       ["--machine", "m", "tree"], ["--all-sessions", "workspace", "list"], ["--json"]):
+            self.assertFalse(cli(*routed), routed)
+
+    def test_a_wait_on_a_facet_the_host_lacks_is_not_selected(self) -> None:
+        def waits(pointer: str) -> bool:
+            return driver_headless.headless_capable(case(step("c", "cli", args={"argv": ["tree"]},
+                                                              waitFor={"pointer": pointer, "predicate": "exists",
+                                                                       "maxMs": 1000}), requires=["gui"]), HOST)
+
+        self.assertTrue(waits("/topology/workspaces"))
+        self.assertTrue(waits("/terminals/0/rows"))
+        for gui in ("/layout/screens/0/workspace", "/webviews/pages", "/windows/0", "/overlays/palette", "/ax"):
+            self.assertFalse(waits(gui), gui)
+        self.assertFalse(waits("/history/0"), "a facet the host does not list")
+        self.assertFalse(waits("topology"), "a malformed pointer")
+
+    def test_capable_cases_asks_the_host_for_its_capabilities(self) -> None:
+        listed = Recorder(stdout=listing())
+        predicate, note = driver_headless.capable_cases("/x/CmuxNextHeadless", run=listed,
+                                                        shell_exists=lambda path: True)
+        self.assertEqual(listed.calls[0]["argv"], ["/x/CmuxNextHeadless", "--list-actions"])
+        self.assertEqual((note["actions"], note["methods"], note["facets"]), (3, 6, sorted(FACETS)))
         self.assertTrue(predicate(case(step("n", "action.run", args={"action": "workspace.new"}))))
-        for bad in (Recorder(stdout="not json"), Recorder(stdout='{"actions": [1]}'), Recorder(returncode=3)):
+        bad_outputs = ("not json", '{"actions": [1], "methods": [], "facets": []}', listing(methods=None),
+                       listing(facets="topology"))
+        for bad in (*(Recorder(stdout=o) for o in bad_outputs), Recorder(returncode=3)):
             with self.assertRaises(driver_headless.HostRefused):
-                driver_headless.capable_cases("/x/CmuxNextHeadless", run=bad)
+                driver_headless.capable_cases("/x/CmuxNextHeadless", run=bad, shell_exists=lambda path: True)
+
+    def test_a_host_that_lists_no_settle_or_wait_for_is_refused(self) -> None:
+        for method in ("debug.oracle.settle", "debug.oracle.wait_for"):
+            run = Recorder(stdout=listing(methods=sorted(METHODS - {method})))
+            with self.assertRaises(driver_headless.HostRefused) as caught:
+                driver_headless.capable_cases("/x/CmuxNextHeadless", run=run, shell_exists=lambda path: True)
+            self.assertIn(method, str(caught.exception))
+
+    def test_a_machine_without_the_app_shell_is_refused(self) -> None:
+        with self.assertRaises(driver_headless.HostRefused) as caught:
+            driver_headless.capable_cases("/x/CmuxNextHeadless", run=Recorder(stdout=listing()),
+                                          shell_exists=lambda path: False)
+        self.assertIn("/bin/zsh", str(caught.exception))
 
     def test_oracle_selection_widens_through_the_hook_and_records_it(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -97,7 +155,7 @@ class SelectionTests(unittest.TestCase):
                 (corpus / f"{cid}.json").write_text(json.dumps({**data, "id": cid.split("/")[1]}))
             loaded, errors = oracle.load_corpus(corpus)
             self.assertEqual(errors, [])
-            predicate = lambda data: driver_headless.headless_capable(data, ACTIONS)  # noqa: E731
+            predicate = lambda data: driver_headless.headless_capable(data, HOST)  # noqa: E731
             selected, _ = oracle.select_cases(loaded, suites=["all"], filters=[], product="headless", platform="linux",
                                               capable=predicate)
             self.assertEqual([c.id for c in selected], ["actions/new"],
@@ -142,6 +200,12 @@ class NoRecorderHost(FakeApp):
     m_debug_oracle_turns = None  # type: ignore[assignment]
 
 
+class NoSettleHost(FakeApp):
+    """A host built short of the contract: no debug.oracle.settle."""
+
+    m_debug_oracle_settle = None  # type: ignore[assignment]
+
+
 class SessionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -166,7 +230,7 @@ class SessionTests(unittest.TestCase):
                 "ref": SHA, "out_dir": self.tmp.name}
         return driver_headless.HeadlessSession({**base, **ctx}, make_host=make, canonicalizer=identity_canonicalizer(),
                                                run=self.run_proc, host=lambda: {"os": "Linux", "arch": "x86_64"},
-                                               root_base=Path(self.tmp.name) / "o")
+                                               root_base=Path(self.tmp.name) / "o", shell_exists=lambda path: True)
 
     def test_action_case_records_checkpoints_as_the_headless_product(self) -> None:
         session = self.session()
@@ -208,17 +272,35 @@ class SessionTests(unittest.TestCase):
         result = session.run_case(case(step("c", "cli", args={"argv": ["tree", "--json"]})), {"case_id": "tours/c"})
         self.assertEqual(result["status"], "Pass", result["message"])
         call = self.run_proc.calls[0]
-        self.assertEqual(call["argv"], ["cmux", "--app-socket", FakeApp.socket_path, "tree", "--json"])
+        daemon = str(session.paths.root / "d.sock")
+        self.assertEqual(call["argv"], ["cmux", "--app-socket", FakeApp.socket_path, "--socket", daemon, "tree",
+                                        "--json"])
         self.assertEqual(call["executable"], str(self.tui))
         self.assertEqual(call["stdin"], subprocess.DEVNULL)
 
-    def test_a_host_without_a_recorder_leaves_turn_checkpoints_out(self) -> None:
+    def test_a_host_without_a_recorder_takes_turn_checkpoints_not_comparable(self) -> None:
         session = self.session(host_class=NoRecorderHost)
         self.addCleanup(session.close)
-        result = session.run_case(case(driver_app_test.NEW_WORKSPACE), {"case_id": "actions/c"})
+        only_turn = step("again", "action.run", args={"action": "workspace.new"}, checkpoint=["turn"])
+        result = session.run_case(case(driver_app_test.NEW_WORKSPACE, only_turn, step("s", "snapshot")),
+                                  {"case_id": "actions/c"})
         self.assertEqual(result["status"], "Pass", result["message"])
-        self.assertEqual([c["checkpoint"] for c in result["checkpoints"]], ["before", "settled"])
-        self.assertIn("turn checkpoint not taken", result["message"])
+        self.assertEqual([(c["step"], c["checkpoint"]) for c in result["checkpoints"]],
+                         [("new", "before"), ("new", "turn"), ("new", "settled"), ("again", "turn"), ("s", "settled")],
+                         "a turn-only step keeps its place, so the step indexes match the app run's")
+        for checkpoint in result["checkpoints"]:
+            if checkpoint["checkpoint"] == "turn":
+                self.assertEqual({v["status"] for v in checkpoint["snapshot"]["facets"].values()}, {"not-comparable"})
+        self.assertIn("turn checkpoint not comparable", result["message"])
+        self.assertIn("new, again", result["message"])
+
+    def test_a_host_without_settle_fails_the_case_naming_the_contract(self) -> None:
+        session = self.session(host_class=NoSettleHost)
+        self.addCleanup(session.close)
+        result = session.run_case(case(driver_app_test.NEW_WORKSPACE), {"case_id": "actions/c"})
+        self.assertEqual((result["status"], result.get("step")), ("Crash", "setup"))
+        self.assertIn("serves no debug.oracle.settle", result["message"])
+        self.assertIn("CmuxNextHeadless contract", result["message"])
 
     def test_session_refuses_a_wrong_binary_a_missing_cmux_tui_and_no_sha(self) -> None:
         other = executable(Path(self.tmp.name) / "bin" / "cmux-tui-other")
@@ -226,6 +308,14 @@ class SessionTests(unittest.TestCase):
                     {"ref": "main"}, {"switches": {"x": "new"}}):
             with self.assertRaises(driver_headless.HostRefused, msg=ctx):
                 self.session(**ctx)
+
+    def test_a_machine_without_the_app_shell_refuses_the_session(self) -> None:
+        with self.assertRaises(driver_headless.HostRefused):
+            driver_headless.HeadlessSession({"run_id": "r", "product": "headless", "binary": str(self.binary),
+                                             "cmux_tui": str(self.tui), "ref": SHA, "out_dir": self.tmp.name},
+                                            make_host=lambda *a: FakeApp(a[0], a[3], {}), run=self.run_proc,
+                                            canonicalizer=identity_canonicalizer(), host=lambda: {},
+                                            root_base=Path(self.tmp.name) / "o", shell_exists=lambda path: False)
 
     def test_daemon_facet_is_not_comparable_when_the_host_daemon_is_gone(self) -> None:
         session = self.session()
@@ -240,7 +330,9 @@ STUB_HOST = textwrap.dedent('''\
     import json, os, signal, socket, subprocess, sys
     argv = sys.argv[1:]
     if argv == ["--list-actions"]:
-        print(json.dumps({{"actions": ["workspace.new"]}}))
+        print(json.dumps({{"actions": ["workspace.new"], "facets": ["topology"],
+                          "methods": ["action.run", "debug.oracle.settle", "debug.oracle.snapshot",
+                                      "debug.oracle.wait_for"]}}))
         sys.exit(0)
     opts = dict(zip(argv[::2], argv[1::2]))
     if os.environ.get("STUB_NO_READY"):
@@ -291,7 +383,9 @@ class PortTests(unittest.TestCase):
         self.assertEqual(reply["result"], {"cwd": os.path.realpath(self.paths.home), "home": str(self.paths.home)})
         self.assertEqual(port.daemon_socket(), str(self.paths.root / "d.sock"))
         self.assertEqual(port.cli_env(), {"PATH": os.environ["PATH"], "HOME": str(self.paths.home),
-                                          "CMUX_NEXT_CONFIG_FILE": "/x"})
+                                          "CMUX_NEXT_CONFIG_FILE": "/x",
+                                          "CMUX_TUI_SOCKET": str(self.paths.root / "d.sock")},
+                         "the CLI reaches the session's own daemon, not the runner's default session")
         child = os.pidfd_open(int(Path(str(self.paths.root / "d.sock") + ".child").read_text()))
         self.addCleanup(os.close, child)
         started = time.monotonic()
@@ -314,7 +408,8 @@ class PortTests(unittest.TestCase):
         self.assertFalse(port.alive())
 
     def test_list_actions_reads_the_stub(self) -> None:
-        self.assertEqual(driver_headless.list_actions(str(self.binary)), frozenset({"workspace.new"}))
+        host = driver_headless.list_actions(str(self.binary))
+        self.assertEqual((host.actions, host.facets), (frozenset({"workspace.new"}), frozenset({"topology"})))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -324,20 +419,26 @@ class PortTests(unittest.TestCase):
 class ProductDriver:
     """A fake product: `facets(case_id, checkpoint)` gives each checkpoint's facets, `status` each case's result."""
 
-    def __init__(self, facets, status=None, checkpoints=("before", "turn", "settled")):
+    def __init__(self, facets, status=None, checkpoints=("before", "turn", "settled"), stops=None):
         self.facets = facets
         self.status = status or {}
         self.checkpoints = checkpoints
+        # case id -> (the step a non-Pass result stopped at, its [(step, checkpoint)] stream)
+        self.stops = stops or {}
 
     def open_session(self, ctx):
         return self
 
     def run_case(self, data, ctx):
         cid = ctx["case_id"]
-        return {"status": self.status.get(cid, "Pass"), "message": "",
-                "checkpoints": [{"step": "s1", "checkpoint": c, "snapshot": {"meta": {"product": "x"},
-                                                                             "facets": self.facets(cid, c)}}
-                                for c in self.checkpoints]}
+        stop, stream = self.stops.get(cid, (None, [("s1", c) for c in self.checkpoints]))
+        result = {"status": self.status.get(cid, "Pass"), "message": "",
+                  "checkpoints": [{"step": s, "checkpoint": c, "snapshot": {"meta": {"product": "x"},
+                                                                            "facets": self.facets(cid, c)}}
+                                  for s, c in stream]}
+        if stop:
+            result["step"] = stop
+        return result
 
     def close(self):
         pass
@@ -438,7 +539,32 @@ class ParityTests(unittest.TestCase):
         self.assertEqual(doc["cases"]["actions/same"]["status"], "missing-facet")
         fails = doc["cases"]["actions/fails"]["differences"]
         self.assertEqual([d["pointer"] for d in fails if d["class"] == "divergence"], ["/result"])
-        self.assertFalse([d for d in fails if d["facet"] == "*"], "a different result covers the checkpoints it cut")
+
+    def test_a_settled_checkpoint_on_one_side_only_is_a_divergence(self) -> None:
+        self.write_runs(headless_checkpoints=("before", "turn"))
+        _, doc = self.parity()
+        same = doc["cases"]["actions/same"]
+        self.assertEqual(same["status"], "divergent")
+        self.assertEqual([(d["class"], d["pointer"], d["checkpoint"], d["a"], d["b"]) for d in same["differences"]],
+                         [("divergence", "/checkpoint", "settled", "s1", None)])
+
+    def test_equal_failures_at_different_steps_are_a_divergence(self) -> None:
+        app = ProductDriver(self.app_facets, status={"actions/fails": "Failure"},
+                            stops={"actions/fails": ("s2", [("s1", "before"), ("s1", "settled"), ("s2", "before")])})
+        self.run_product("app", app)
+        headless = ProductDriver(self.headless_facets, status={"actions/fails": "Failure"},
+                                 stops={"actions/fails": ("s1", [("s1", "before")])})
+        self.run_product("headless", headless, filters=["actions/same", "actions/fails"])
+        code, doc = self.parity()
+        self.assertEqual(code, 1)
+        fails = doc["cases"]["actions/fails"]
+        self.assertEqual(fails["status"], "divergent")
+        self.assertEqual(fails["results"], {"app": "Failure", "headless": "Failure"})
+        self.assertEqual([(d["pointer"], d["a"], d["b"]) for d in fails["differences"] if d["class"] == "divergence"],
+                         [("/result/step", "s2", "s1"), ("/checkpoint", "s1", None)])
+        self.assertFalse([d for d in fails["differences"] if d["class"] == "missing-facet" and d["facet"] == "*"],
+                         "checkpoints the failing side never reached are not a missing facet")
+        self.assertEqual(doc["divergent"], ["actions/fails"])
 
     def test_expected_rules_explain_a_divergence(self) -> None:
         self.write_runs()

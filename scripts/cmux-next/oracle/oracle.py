@@ -78,11 +78,13 @@ run format baselines.py (016) reads (a `cases` list, the case name without its s
 
 `oracle.py parity --a-run APP_RUN --b-run HEADLESS_RUN` is product parity (3F.4, task 161): one SHA run on
 two products (headless on the VM at --jobs 200, the app on a mini), compared case by case on the cases both
-ran with a verdict. Each difference is classified: missing-facet (a facet or a checkpoint that one product
-does not provide: absent, or not-comparable there) or divergence (a facet both provide differs, or the result
-or a step differs); `--expected` rules (diff.py's format) explain a known divergence. It writes parity.json
-(cmux-oracle-parity-v1) and exits 0 with no divergence, 1 with one, 2 on bad input, 3 when refused (one
-product on both sides, two SHAs, nothing compared). Hosts may differ: a product, not a host, is compared.
+ran with a verdict. Each difference is classified: missing-facet (a facet one product does not provide:
+absent, or not-comparable there; or a turn checkpoint one product does not take at a step it ran) or
+divergence (a facet both provide differs, the result differs, equal non-Pass results stop at different steps,
+a step differs, or any other checkpoint is on one side only); `--expected` rules (diff.py's format) explain a
+known divergence. It writes parity.json (cmux-oracle-parity-v1) and exits 0 with no divergence, 1 with one, 2 on bad input, 3 when refused (one
+product on both sides, two SHAs, nothing compared). Hosts may differ: a product, not a host, is compared (the
+headless driver refuses a machine without the app launch's shell, so terminals compare the same shell).
 `--product headless` selects, beside its capability cases, the window cases its host can run
 (driver_headless.capable_cases, asked of the --binary as gtest is asked --gtest_list_tests).
 
@@ -1139,6 +1141,9 @@ def perform_run(
             record["leaked_state"] = leaks
         if first is not None and first.environment is not None:
             record["environment"] = first.environment
+        if first is not None and first.step:
+            # Where the first attempt stopped (a Failure, Crash or Timeout): parity compares it between products.
+            record["step"] = first.step
         records[case.id] = record
         if first is not None:
             rows.extend(checkpoint_rows(case.id, first.rows, attempt=first.attempt, result=first.status))
@@ -1531,26 +1536,41 @@ class ParityCase:
         return [*self.divergent.values(), *(self.missing[k] for k in sorted(self.missing))]
 
 
+def failing_step(view: RunView, case_id: str) -> Optional[str]:
+    """The step a case's non-Pass first attempt stopped at (its receipt record's `step`)."""
+    step = ((view.receipt.get("cases") or {}).get(case_id) or {}).get("step")
+    return step if isinstance(step, str) else None
+
+
 def compare_parity_case(case_id: str, a: Any, b: Any, diff_mod: Any, rules: Sequence[Any],
-                        labels: Tuple[str, str]) -> Dict[str, Any]:
+                        labels: Tuple[str, str], failing: Tuple[Optional[str], Optional[str]] = (None, None)
+                        ) -> Dict[str, Any]:
     """Compares one case of two diff.Run values facet by facet. A facet one product lacks (absent, or
-    not-comparable there) is missing-facet; a facet both products have that differs, or a different result or step,
-    is a divergence. A checkpoint one side lacks with equal results (the headless host records no turn) is
-    missing-facet for every facet; with different results, the result divergence covers it."""
+    not-comparable there) is missing-facet; a facet both products have that differs, a different result, the same
+    non-Pass result at a different step (`failing`: each record's step), a different step at one index, or a
+    checkpoint only one side has, is a divergence (as in diff.py compare_case). The one exception: a turn checkpoint
+    one side lacks at a step it ran (a host with no turn recorder) is missing-facet for every facet."""
     ra, rb = parity_outcome(a.results.get(case_id)), parity_outcome(b.results.get(case_id))
     found = ParityCase(labels)
     result_divergence = None
     if ra != rb:
         result_divergence = {"class": DIVERGENCE, "facet": None, "step": None, "checkpoint": None, "pointer": "/result",
                              "a": ra, "b": rb, "differences": 1, "count": 1}
+    elif ra != "Pass" and failing[0] != failing[1]:
+        result_divergence = {"class": DIVERGENCE, "facet": None, "step": failing[0], "checkpoint": None,
+                             "pointer": "/result/step", "a": failing[0], "b": failing[1], "differences": 1, "count": 1}
     points = [{(p.index, p.checkpoint): p for p in run.checkpoints.get(case_id, ())} for run in (a, b)]
+    steps = [{index: point.step for (index, _), point in side.items()} for side in points]
     order = sorted(set(points[0]) | set(points[1]), key=lambda k: (k[0], diff_mod.CHECKPOINT_ORDER[k[1]]))
     for key in order:
         pa, pb = points[0].get(key), points[1].get(key)
         if pa is None or pb is None:
-            if result_divergence is None:
-                side, present = (0, pb) if pa is None else (1, pa)
-                found.note_missing("*", side, f"no {key[1]} checkpoint on {labels[side]}", present.step, key[1])
+            side, present = (0, pb) if pa is None else (1, pa)
+            if key[1] == "turn" and steps[side].get(key[0]) == present.step:
+                found.note_missing("*", side, f"no turn checkpoint on {labels[side]}", present.step, key[1])
+            else:
+                found.note_divergence("/checkpoint", present.step, key[1],
+                                      [("/checkpoint", pa and pa.step, pb and pb.step)], diff_mod.MISSING)
             continue
         if pa.step != pb.step:
             found.note_divergence("/step", pa.step, key[1], [("/step", pa.step, pb.step)], diff_mod.MISSING)
@@ -1610,7 +1630,8 @@ def product_parity(a_view: RunView, b_view: RunView, a_dir: Path, b_dir: Path, r
         if ra in PARITY_EXCLUDED or rb in PARITY_EXCLUDED:
             excluded[case_id] = f"{labels[0]} {ra}, {labels[1]} {rb}"
             continue
-        cases[case_id] = compare_parity_case(case_id, a, b, diff_mod, rules, labels)
+        failing = tuple(failing_step(view, case_id) for view in (a_view, b_view))
+        cases[case_id] = compare_parity_case(case_id, a, b, diff_mod, rules, labels, failing)
     by_facet: Dict[str, Dict[str, int]] = {}
     for record in cases.values():
         for facet in record["equal_facets"]:

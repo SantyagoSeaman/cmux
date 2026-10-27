@@ -15,15 +15,22 @@ and a headless run and an app run of one case are comparable checkpoint by check
 Host contract (what task 160's executable serves; this driver is its only launcher):
     CmuxNextHeadless --socket CONTROL --daemon-socket DAEMON --cmux-tui CMUX_TUI --ready-fd N
         starts `CMUX_TUI --headless --socket DAEMON` as its daemon, serves the app's newline-JSON control
-        protocol on CONTROL (action.run, snapshot.get, debug.oracle.snapshot; the debug.oracle settle, wait_for,
-        recorder and turns methods when its Control has them), then writes one JSON line
+        protocol on CONTROL, then writes one JSON line
         {"ready": {"socket": CONTROL, "daemonSocket": DAEMON}} to fd N and closes it. SIGTERM ends the host
         and its daemon. Environment: the bench launch's fixed variables (bench_env.fixed_env), HOME and
         CMUX_NEXT_ORACLE_ROOT (normalize.app_environment), CMUX_NEXT_CONFIG_FILE (the app driver's oracle
         config over the bench config defaults), CMUX_NEXT_CHIEF_HOME and CMUX_NEXT_TEST_WINDOW_FRAME (the
         model window's frame, the same frame the app driver gives the app window).
     CmuxNextHeadless --list-actions
-        writes {"actions": [action id, ...]} to stdout: the actions HeadlessServices binds.
+        writes {"actions": [...], "methods": [...], "facets": [...]} to stdout: the action ids HeadlessServices
+        binds, the control methods it serves (what `cmux app call METHOD` can reach) and the snapshot facets it
+        provides (the debug.oracle.snapshot {"list": true} entries with `provided`).
+Required methods (REQUIRED_METHODS): action.run, debug.oracle.snapshot, debug.oracle.settle and
+debug.oracle.wait_for (CmuxNextControl's OracleControl, OracleSettleControl and OracleWaitCondition): the case
+runner settles at setup and after every settled checkpoint, and waits on every waitFor. A host that lists fewer is
+refused before selection; one that refuses one of them anyway fails the case as a Crash that names this contract.
+The turn recorder (debug.oracle.recorder and turns) is optional: without it a turn checkpoint is taken with every
+facet not-comparable.
 The ready line comes on an inherited pipe, so the launch waits on the host's own signal and never polls a
 socket file (chrome --remote-debugging-pipe, content/browser/devtools/devtools_pipe_handler.cc, hands the
 child inherited fds for the same reason). The host runs in its own process group, and close() ends the whole
@@ -32,19 +39,29 @@ group, so no daemon or terminal host outlives the session (invariant I6).
 Selection. A headless case is one the host can run with no window system:
 - every case of the product's capabilities (oracle.py PRODUCTS["headless"]: actions), and
 - an action or cli case written for the app window (requires at most actions and gui) whose steps are only
-  action.run, cli, settle and snapshot, whose every action.run names an action the host binds (`--list-actions`),
-  with no overlay target and no web fixture. `capable_cases(binary)` is that rule; oracle.py asks for it before it
+  action.run, cli, settle and snapshot, with no overlay target and no web fixture, where every action the case
+  runs is one the host binds (an action.run step, and a cli `action run ID`), every cli `app call METHOD` names a
+  method the host serves, no cli step routes itself (--socket, --session, --machine, --app-socket,
+  --all-sessions: the driver gives the CLI the session's sockets), and every waitFor reads a facet the host
+  provides that is not GUI-only (GUI_FACETS: a wait on a facet the host does not have could only time out).
+  `capable_cases(binary)` is that rule; oracle.py asks for it before it
   selects (chromium/src base/test/launcher/unit_test_launcher.cc asks the test binary for its tests with
   --gtest_list_tests the same way). Such a case runs on the VM although it says `platforms: [mac]`: that is where
   the app runs, and the host runs on Linux and macOS.
-A GUI-only facet (ax, layout, webviews) comes back not comparable from the host; `oracle.py parity` reports it as
+A GUI-only facet (GUI_FACETS) comes back not comparable from the host; `oracle.py parity` reports it as
 missing-facet, never as a divergence.
 
-`cli` steps run the cmux-tui of the run (`--cmux-tui`) as `cmux --app-socket CONTROL`, the bundle's own CLI path.
+Terminals run the app launch's shell (bench_env SHELL, zsh): a machine without it is refused, so the terminals
+facet compares the products and not the hosts' shells.
+
+`cli` steps run the cmux-tui of the run (`--cmux-tui`) as `cmux --app-socket CONTROL --socket DAEMON`: the app's
+scopes on the host's control socket, the daemon's on the session's own daemon (a bare cmux-tui on Linux has no app
+bundle to find it by, and would reach the runner's default session).
 The host has no keys, no MCP and no restart, so key, mcp, kill and restart steps (and resource.call, the daemon
 product's) refuse the case as a Crash before any launch. A turn checkpoint the host cannot record (its Control has
-no recorder, or reads none of the step's facets in a perform turn) is left out and named in the result message;
-`oracle.py parity` reports the missing checkpoint as missing-facet.
+no recorder, or reads none of the step's facets in a perform turn) is taken with every facet not-comparable and
+named in the result message: the step indexes stay those of the app run, and `oracle.py parity` reports each such
+facet as missing-facet.
 
 Chrome reference (chromium/src): headless/ (headless_shell: the browser without its UI, driven by the same
 DevTools protocol as chrome) and third_party/blink/tools/run_wpt_tests.py (one suite, products chrome and
@@ -70,6 +87,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
@@ -85,16 +103,21 @@ import webfixture  # noqa: E402 - sibling loopback server (p15-oracle-222)
 from driver_app import (  # noqa: E402
     RECORDER,
     REQUEST_S,
+    SETTLE,
     SNAPSHOT,
+    WAIT_FOR,
     AppGone,
     AppLaunchFailed,
     AppSession,
+    Capture,
     CaseError,
     CaseRun,
     LaunchSpec,
     OraclePaths,
     control_request,
+    decode_pointer,
     host_meta,
+    not_comparable,
     read_daemon_facet,
 )
 
@@ -115,25 +138,54 @@ OTHER_PRODUCTS = {
 }
 # A case written for the app window runs here when it needs nothing more than these and its steps are HEADLESS_OPS.
 WIDENED_REQUIRES = frozenset({"actions", "gui"})
+# The control methods the case runner calls on every case (Required methods in the module doc).
+REQUIRED_METHODS = frozenset({"action.run", SNAPSHOT, SETTLE, WAIT_FOR})
+# Facets of the window system: the host reports them not-comparable, so a wait on one never comes true.
+GUI_FACETS = frozenset({"layout", "windows", "overlays", "webviews", "ax"})
+# The CLI global flags (cmux-tui src/cli.rs GlobalArgs) a cli step may carry; the routing ones it may not.
+CLI_FLAGS = frozenset({"--json", "--jsonl", "--quiet"})
+CLI_VALUE_FLAGS = frozenset({"--idempotency-key"})
 LAUNCH_S = 120.0
 LIST_S = 30.0
 QUIT_S = 10.0
 CONFIG_NAME = "cmux-next.json"
 CONTROL_NAME, DAEMON_NAME = "c.sock", "d.sock"
 SHA = re.compile(r"^[0-9a-f]{40}$")
-DEFAULT_SHELL = "/bin/zsh"
 
 
 class HostRefused(ValueError):
-    """The binary is not a CmuxNextHeadless the driver may launch, or it gave no action list."""
+    """The binary is not a CmuxNextHeadless the driver may launch, it gave no capability list, or this machine
+    lacks what the app launch has (its shell)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
 # Selection
 
 
-def list_actions(binary: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> FrozenSet[str]:
-    """The actions the host binds (`CmuxNextHeadless --list-actions`)."""
+@dataclass(frozen=True)
+class HostCapabilities:
+    """What `CmuxNextHeadless --list-actions` reports: bound action ids, served control methods, provided facets."""
+
+    actions: FrozenSet[str]
+    methods: FrozenSet[str]
+    facets: FrozenSet[str]
+
+    def digest(self) -> str:
+        text = json.dumps({"actions": sorted(self.actions), "methods": sorted(self.methods),
+                           "facets": sorted(self.facets)}, sort_keys=True)
+        return hashlib.sha256(text.encode()).hexdigest()
+
+
+def name_list(listing: Mapping[str, Any], key: str, binary: str) -> FrozenSet[str]:
+    values = listing.get(key)
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise HostRefused(f"{binary} --list-actions: `{key}` is not a list of names")
+    return frozenset(values)
+
+
+def list_actions(binary: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> HostCapabilities:
+    """The host's actions, methods and facets (`CmuxNextHeadless --list-actions`); refuses a host that lacks one
+    of REQUIRED_METHODS."""
     try:
         done = run([binary, "--list-actions"], capture_output=True, text=True, timeout=LIST_S,
                    stdin=subprocess.DEVNULL)
@@ -142,15 +194,61 @@ def list_actions(binary: str, run: Callable[..., subprocess.CompletedProcess] = 
     if done.returncode != 0:
         raise HostRefused(f"{binary} --list-actions exited {done.returncode}: {done.stderr.strip()[-300:]}")
     try:
-        actions = json.loads(done.stdout)["actions"]
-    except (ValueError, KeyError, TypeError):
-        raise HostRefused(f"{binary} --list-actions printed no {{\"actions\": [...]}} object") from None
-    if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
-        raise HostRefused(f"{binary} --list-actions: `actions` is not a list of ids")
-    return frozenset(actions)
+        listing = json.loads(done.stdout)
+    except ValueError:
+        listing = None
+    if not isinstance(listing, dict):
+        raise HostRefused(f"{binary} --list-actions printed no {{\"actions\", \"methods\", \"facets\"}} object")
+    host = HostCapabilities(*(name_list(listing, key, binary) for key in ("actions", "methods", "facets")))
+    lacking = sorted(REQUIRED_METHODS - host.methods)
+    if lacking:
+        raise HostRefused(f"{binary} serves no {', '.join(lacking)}: the case runner calls them on every case "
+                          "(driver_headless.py, Required methods)")
+    return host
 
 
-def headless_capable(case: Mapping[str, Any], actions: FrozenSet[str]) -> bool:
+def cli_command(argv: Any) -> Optional[List[str]]:
+    """A cli step's argv after its global flags; None when it routes itself or is malformed."""
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        return None
+    rest = list(argv)
+    while rest and rest[0].startswith("-"):
+        flag, inline = rest[0].split("=", 1)[0], "=" in rest[0]
+        if flag in CLI_FLAGS and not inline:
+            rest = rest[1:]
+        elif flag in CLI_VALUE_FLAGS:
+            rest = rest[1:] if inline else rest[2:]
+        else:
+            return None
+    return rest
+
+
+def cli_capable(argv: Any, host: HostCapabilities) -> bool:
+    """A cli step the host serves: `action run ID` of a bound action, `app call METHOD` of a served method."""
+    command = cli_command(argv)
+    if not command:
+        return False
+    if command[:2] == ["action", "run"]:
+        return len(command) > 2 and command[2] in host.actions
+    if command[:2] == ["app", "call"]:
+        return len(command) > 2 and command[2] in host.methods
+    return True
+
+
+def wait_capable(wait: Any, host: HostCapabilities) -> bool:
+    """No waitFor, or one on a facet the host provides that is not GUI-only."""
+    if not wait:
+        return True
+    if not isinstance(wait, Mapping) or not isinstance(wait.get("pointer"), str):
+        return False
+    try:
+        parts = decode_pointer(wait["pointer"])
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] not in GUI_FACETS and parts[0] in host.facets
+
+
+def headless_capable(case: Mapping[str, Any], host: HostCapabilities) -> bool:
     """Whether a case written for the app window runs on the host (see Selection in the module doc)."""
     if not set(case.get("requires") or ()) <= WIDENED_REQUIRES:
         return False
@@ -164,19 +262,26 @@ def headless_capable(case: Mapping[str, Any], actions: FrozenSet[str]) -> bool:
             return False
         if "overlay" in (step.get("target") or {}):
             return False
-        if step["op"] == "action.run" and (step.get("args") or {}).get("action") not in actions:
+        args = step.get("args") or {}
+        if step["op"] == "action.run" and args.get("action") not in host.actions:
+            return False
+        if step["op"] == "cli" and not cli_capable(args.get("argv"), host):
+            return False
+        if not wait_capable(step.get("waitFor"), host):
             return False
     return True
 
 
-def capable_cases(binary: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
+def capable_cases(binary: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+                  shell_exists: Callable[[str], bool] = os.path.exists
                   ) -> Tuple[Callable[[Mapping[str, Any]], bool], Dict[str, Any]]:
-    """oracle.py's selection hook for --product headless: the rule over the host's action list, and what the
-    receipt records about it."""
-    actions = list_actions(binary, run)
-    note = {"source": f"{HOST_NAME} --list-actions", "actions": len(actions),
-            "digest": hashlib.sha256("\n".join(sorted(actions)).encode()).hexdigest()}
-    return (lambda case: headless_capable(case, actions)), note
+    """oracle.py's selection hook for --product headless: the rule over the host's capabilities, and what the
+    receipt records about them. A machine without the app launch's shell is refused before any selection."""
+    check_shell(load_bench_env(), shell_exists)
+    host = list_actions(binary, run)
+    note = {"source": f"{HOST_NAME} --list-actions", "actions": len(host.actions), "methods": len(host.methods),
+            "facets": sorted(host.facets), "digest": host.digest()}
+    return (lambda case: headless_capable(case, host)), note
 
 
 def check_steps(case: Mapping[str, Any]) -> None:
@@ -198,6 +303,11 @@ def headless_launch_spec(case: Mapping[str, Any]) -> LaunchSpec:
 # The host, behind one seam (tests pass a fake)
 
 
+def daemon_path(paths: OraclePaths) -> str:
+    """The session's own daemon socket: the host's --daemon-socket and the CLI's --socket."""
+    return str(paths.root / DAEMON_NAME)
+
+
 def load_bench_env() -> Any:
     """scripts/perf-lab/bench_env.py, loaded by path (`python3 -I` puts no script folder on sys.path)."""
     if "bench_env" in sys.modules:
@@ -211,18 +321,25 @@ def load_bench_env() -> Any:
     return module
 
 
+def check_shell(bench: Any, shell_exists: Callable[[str], bool] = os.path.exists) -> str:
+    """The app launch's shell (bench_env SHELL); refuses a machine without it: the terminals facet holds the
+    shell's rows, and another shell would be a difference of the hosts, not of the products."""
+    shell = str(bench.fixed_env().get("SHELL") or "")
+    if not shell or not shell_exists(shell):
+        raise HostRefused(f"this machine has no {shell or 'SHELL'}, the shell of the app launch (bench_env.py): "
+                          "install it so both products' terminals run the same shell")
+    return shell
+
+
 def host_environment(paths: OraclePaths, config_file: Path, window: Tuple[int, int, int, int],
-                     bench_env: Any = None, shell_exists: Callable[[str], bool] = os.path.exists) -> Dict[str, str]:
-    """The host's environment: the app launch's fixed variables and hermetic prefixes, nothing inherited but PATH,
-    USER and TMPDIR (no CMUX variable of the runner's own terminal reaches it)."""
+                     bench_env: Any = None) -> Dict[str, str]:
+    """The host's environment: the app launch's fixed variables (its shell too) and hermetic prefixes, nothing
+    inherited but PATH, USER and TMPDIR (no CMUX variable of the runner's own terminal reaches it)."""
     import normalize
 
     bench = bench_env or load_bench_env()
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "USER": os.environ.get("USER", ""),
            "TMPDIR": os.environ.get("TMPDIR", "/tmp"), **bench.fixed_env()}
-    if not shell_exists(env.get("SHELL", DEFAULT_SHELL)):
-        # A Linux VM has no zsh; terminals hash their rows, and parity runs both products on one host anyway.
-        env["SHELL"] = "/bin/sh"
     env.update(normalize.app_environment(normalize.Context(root=paths.roots, home=(str(paths.home),))))
     env.update({"CMUX_NEXT_CONFIG_FILE": str(config_file), "CMUX_NEXT_CHIEF_HOME": str(paths.root / "chief"),
                 "CMUX_NEXT_TEST_WINDOW_FRAME": ",".join(str(v) for v in window)})
@@ -276,7 +393,7 @@ class HeadlessPort:
         self.process: Optional[subprocess.Popen] = None
         self.env: Dict[str, str] = {}
         self.control = str(root.root / CONTROL_NAME)
-        self.daemon = str(root.root / DAEMON_NAME)
+        self.daemon = daemon_path(root)
 
     def launch(self, spec: LaunchSpec) -> None:
         for path in (self.control, self.daemon):
@@ -321,10 +438,11 @@ class HeadlessPort:
         return self.cmux_tui
 
     def cli_env(self) -> Dict[str, str]:
-        """The host's HOME, config file and PATH for the CLI, and no other CMUX variable (a terminal's
-        CMUX_SOCKET_PATH would send the CLI elsewhere)."""
+        """The host's HOME, config file and PATH for the CLI, the session's daemon as CMUX_TUI_SOCKET, and no other
+        CMUX variable (a terminal's CMUX_SOCKET_PATH would send the CLI elsewhere)."""
         env = {k: v for k, v in self.env.items() if not k.startswith("CMUX")}
         env["CMUX_NEXT_CONFIG_FILE"] = self.env["CMUX_NEXT_CONFIG_FILE"]
+        env["CMUX_TUI_SOCKET"] = self.daemon
         return env
 
     def daemon_socket(self) -> Optional[str]:
@@ -362,32 +480,56 @@ class HeadlessPort:
 
 
 class HeadlessCaseRun(CaseRun):
-    """driver_app's CaseRun on the host: its own ops only, the CLI as `cmux`, product `headless` in the meta, and
-    a turn checkpoint the host cannot record left out (named in the message)."""
+    """driver_app's CaseRun on the host: its own ops only, the CLI as `cmux` on the session's two sockets, product
+    `headless` in the meta, a turn checkpoint the host cannot record taken with every facet not-comparable (named in
+    the message), and a required method the host refuses reported as a break of its contract."""
 
     def __init__(self, session: "HeadlessSession", case: Mapping[str, Any], ctx: Mapping[str, Any]):
         super().__init__(session, case, ctx)
+        # The steps whose turn checkpoint was taken not comparable, and the running step's unarmed turn (the
+        # captures index it goes to and the step's facets).
         self.turnless: List[str] = []
+        self.unarmed: Optional[Tuple[int, Tuple[str, ...]]] = None
 
     def run(self) -> Dict[str, Any]:
         result = super().run()
         if self.turnless:
-            note = f"turn checkpoint not taken (the host records no turn of these facets): {', '.join(self.turnless)}"
+            steps = ", ".join(self.turnless)
+            note = f"turn checkpoint not comparable (the host records no turn of these facets): {steps}"
             result["message"] = "; ".join(filter(None, [result.get("message"), note]))
         return result
 
+    def call(self, method: str, params: Mapping[str, Any], step: str, timeout: Optional[float] = None
+             ) -> Dict[str, Any]:
+        reply = super().call(method, params, step, timeout)
+        if method in REQUIRED_METHODS and (reply.get("error") or {}).get("code") == "method_not_found":
+            raise CaseError("Crash", f"the host serves no {method}, which the CmuxNextHeadless contract requires "
+                                     "(driver_headless.py, Required methods; p15-oracle-160)", step)
+        return reply
+
     def arm(self, facets: Sequence[str], step: str) -> Optional[Tuple[int, int]]:  # type: ignore[override]
         if not any(f in self.session.armable for f in facets):
-            self.turnless.append(step)
+            self.unarmed = (len(self.state.captures), tuple(facets))
             return None
         return super().arm(facets, step)
 
+    def run_step(self, index: int, step: Mapping[str, Any]) -> None:
+        """The step, then the turn checkpoint the host could not record, put after the step's `before`."""
+        self.unarmed = None
+        super().run_step(index, step)
+        if self.unarmed is not None:
+            at, facets = self.unarmed
+            values = {name: not_comparable("the headless host records no perform turn") for name in facets}
+            self.state.captures.insert(at, Capture(index, step["id"], "turn", self.snapshot(index, "turn", values)))
+            self.turnless.append(step["id"])
+
     def run_cli(self, argv: List[str], stdin: Optional[str], step: str) -> subprocess.CompletedProcess:
-        """The run's cmux-tui as `cmux --app-socket CONTROL`, bounded like the app driver's CLI."""
+        """The run's cmux-tui as `cmux --app-socket CONTROL --socket DAEMON`, bounded like the app driver's CLI."""
         bound = driver_app.CLI_S * self.scale
         feed: Dict[str, Any] = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         try:
-            return self.session.run([CLI_ARGV0, "--app-socket", self.app.socket_path, *argv],
+            return self.session.run([CLI_ARGV0, "--app-socket", self.app.socket_path,
+                                     "--socket", daemon_path(self.session.paths), *argv],
                                     executable=self.app.cli_path, env=self.app.cli_env(), capture_output=True,
                                     text=True, timeout=bound, **feed)
         except subprocess.TimeoutExpired:
@@ -429,7 +571,8 @@ class HeadlessSession(AppSession):
                  run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
                  read_daemon: Callable[[str, Mapping[str, Any]], Dict[str, Any]] = read_daemon_facet,
                  host: Callable[[], Dict[str, str]] = host_meta, root_base: Path = Path("/tmp/o"),
-                 web_fixture: Callable[[], Any] = webfixture.WebFixture, bench_env: Any = None):
+                 web_fixture: Callable[[], Any] = webfixture.WebFixture, bench_env: Any = None,
+                 shell_exists: Callable[[str], bool] = os.path.exists):
         if session_ctx.get("switches") or session_ctx.get("arm") not in (None, "default"):
             raise HostRefused("switch arms reach the host with p15-oracle-049; this driver runs the default arm")
         if Path(str(session_ctx.get("binary") or "")).name != HOST_NAME:
@@ -440,6 +583,7 @@ class HeadlessSession(AppSession):
         ref = session_ctx.get("ref")
         if not (isinstance(ref, str) and SHA.match(ref)):
             raise HostRefused("the headless product needs --ref FULL_SHA: a host executable records no build sha")
+        check_shell(bench_env or load_bench_env(), shell_exists)
         self.sha = ref
         self.build = str(session_ctx.get("build") or "debug")
         self.canonicalize, self.schema_doc = canonicalizer or driver_app.normalize_canonicalizer(
@@ -513,7 +657,9 @@ def cmd_run_case(args: argparse.Namespace) -> int:
 
 
 def cmd_list_actions(args: argparse.Namespace) -> int:
-    print(json.dumps({"actions": sorted(list_actions(args.binary))}, indent=1))
+    host = list_actions(args.binary)
+    print(json.dumps({"actions": sorted(host.actions), "methods": sorted(host.methods),
+                      "facets": sorted(host.facets)}, indent=1))
     return 0
 
 
