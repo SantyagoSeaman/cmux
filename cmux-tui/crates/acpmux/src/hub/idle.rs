@@ -57,6 +57,9 @@ impl Hub {
             && !session.harness_turn.load(Ordering::SeqCst)
             && session.queued() == 0
             && session.pending_permissions().is_empty()
+            // A Claude chat with turns but none stored would wake as a fresh conversation with
+            // its transcript restored into the prompt (`claude_resume_refusal`): kept awake.
+            && !(session.meta().claude_unstored && session.meta().turn_count > 0)
             // A process still running in the background (a dev server, a
             // watcher) ends with the harness: never reap it for idleness.
             && !self.any_process_running(session)
@@ -162,10 +165,15 @@ impl Hub {
                 // between the deadline read above and the mark either sees the mark (and wakes
                 // it) or moved `last_active`, read again here after the mark (both SeqCst): then
                 // the session is in use and stays up.
+                // What the agent sent and the reader already queued (a turn Claude Code starts
+                // itself, its `system/init`) is handled first and counts: drained, then every gate
+                // read again. Output it has not written yet is the holder's to report.
                 let seen = session.last_active.load(Ordering::SeqCst);
                 session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
+                Self::drain_inbound(&session).await;
                 if session.last_active.load(Ordering::SeqCst) != seen
                     || seen.saturating_add(idle) > now
+                    || !self.idle_eligible(&session)
                 {
                     session.hibernated_at.store(0, Ordering::SeqCst);
                     continue;

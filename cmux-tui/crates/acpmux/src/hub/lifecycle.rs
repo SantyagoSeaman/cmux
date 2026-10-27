@@ -703,18 +703,25 @@ impl Hub {
             && let Some(sid) = existing_sid.take()
         {
             tracing::info!(session = %session.id, agent_session = %sid, "starting a fresh Claude conversation: {why}");
-            self.append(
-                session,
-                "mux",
-                "resume_failed",
-                json!({"error": format!("Claude conversation {sid} {why}, so a fresh one starts")}),
-            );
+            // A chat woken from hibernation before its first turn has nothing to restore: it
+            // starts fresh with no row and no restored transcript (`idle.rs`).
+            let untouched = self.waking(session) && meta.turn_count == 0;
+            if !untouched {
+                self.append(
+                    session,
+                    "mux",
+                    "resume_failed",
+                    json!({"error": format!("Claude conversation {sid} {why}, so a fresh one starts")}),
+                );
+            }
             {
                 let mut m = session.meta.lock().unwrap();
                 m.agent_session_id = None;
                 m.claude_unstored = false;
             }
-            session.rehydrate.store(true, Ordering::SeqCst);
+            if !untouched {
+                session.rehydrate.store(true, Ordering::SeqCst);
+            }
         }
         // The --permission-mode acpmux started a Claude process in.
         let mut started_mode = None;

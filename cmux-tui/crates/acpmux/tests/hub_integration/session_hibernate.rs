@@ -317,3 +317,32 @@ async fn a_stop_after_typing_into_a_hibernated_chat_stays_stopped() {
     let newest = *r.pids("harness").last().unwrap();
     r.until("the stopped chat's agent kept running", || !alive(newest)).await;
 }
+
+/// A Claude chat hibernated before its first turn wakes as a fresh conversation with nothing to
+/// restore: no `resume_failed` row and no restored transcript in its first prompt.
+#[tokio::test]
+async fn an_untouched_claude_chat_wakes_with_no_row_and_nothing_restored() {
+    let root = std::env::temp_dir().join(format!("acpmux-hib-claude-{}", uuid::Uuid::now_v7()));
+    let claude = root.join("claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let (hub, mut c) = super::fork_through::claude_setup(&claude, &[]).await;
+    let clock = ManualClock::new();
+    hub.set_clock(clock.clone());
+    hub.set_idle_child(Some(IDLE));
+    let id = new_session(&mut c, "untouched").await;
+    let status = || hub.session_summary(&hub.resolve(&id).unwrap())["status"].clone();
+    clock.advance(IDLE + Duration::from_secs(1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while status() != "idle" {
+        assert!(std::time::Instant::now() < deadline, "the untouched chat never hibernated");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let reply = c.request(method::SESSION_PROMPT, prompt(&id, "hi", None)).await.unwrap();
+    assert_eq!(reply["stopReason"], "end_turn");
+    let events = hub.events(&id, 0, 10_000).unwrap();
+    assert!(!events.iter().any(|e| e.kind == "resume_failed"), "a resume_failed row");
+    let sent = events.iter().filter(|e| e.dir == "out").map(|e| e.msg.to_string());
+    assert!(!sent.into_iter().any(|m| m.contains("restored_transcript")), "a transcript restored");
+    hub.shutdown_all().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
