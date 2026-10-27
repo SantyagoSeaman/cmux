@@ -25,15 +25,19 @@ every kill and its recovery; its p99 must be <= --ping-p99-ms (250 ms) and no pi
   acpmux             the app's acpmux daemon: the app answers and the terminals keep working.
   daemon             the app's cmux-tui daemon: a new daemon connects, every terminal pane re-attaches and a typed
                      echo runs.
-  gpu-crash-loop     (p10-stability-164, only with --only) Chromium's GPU process 12 times in 60 s, each new one as
-                     it starts: the app keeps its pid. Chrome takes the next GPU mode after 3 crashes in one
-                     (GpuProcessHost::RecordProcessCrash) and, with no mode left, GpuDataManagerImplPrivate::
-                     FallBackToNextGpuMode (content/browser/gpu/gpu_data_manager_impl_private.cc) ends the browser
-                     process, which is the app ("GPU process isn't usable. Goodbye."). The fork's switch
-                     cmux-gpu-unusable-no-fatal (CEFSwitches.gpuUnusableNoFatal) turns that step into GPU off:
-                     Chromium starts no GPU process again and the page's script still answers. The row says whether
-                     the app pid stayed (`app`: unchanged, changed or gone) and whether the GPU process came back
-                     (`gpu`: running or off). GPU off lasts for the app's life, so no other fault runs after it.
+  gpu-crash-loop     (p10-stability-164, only with --only) Chromium's GPU process, each new one as it starts, 12
+                     times in 60 s and then on until none starts (at most 24 slots): the app keeps its pid. Chrome
+                     takes the next GPU mode after 3 crashes in one (GpuProcessHost::RecordProcessCrash) and, with no
+                     mode left, GpuDataManagerImplPrivate::FallBackToNextGpuMode
+                     (content/browser/gpu/gpu_data_manager_impl_private.cc) ends the browser process, which is the
+                     app ("GPU process isn't usable. Goodbye."). The fork's switch cmux-gpu-unusable-no-fatal
+                     (CEFSwitches.gpuUnusableNoFatal, sent with the default-off feature chromiumGpuUnusableNoFatal:
+                     launch the app with CMUX_ENABLE_FEATURES=chromiumGpuUnusableNoFatal) turns that step into GPU
+                     off: Chromium starts no GPU process again and the page's script still answers. The row says
+                     whether the app pid stayed (`app`: unchanged, changed or gone) and whether the GPU process came
+                     back (`gpu`: running or off). Only `unchanged` with `off` passes: a GPU process that still
+                     starts means Chromium never reached its last mode, where stock Chromium and the patch differ.
+                     GPU off lasts for the app's life, so no other fault runs after it.
 
 Every fault also needs the app's pid unchanged, every main-thread ping answered with p99 <= the limit, and no crash
 report (.ips) of the app's processes written from the fault's start. A fault the app cannot offer (no acpmux, no
@@ -105,16 +109,16 @@ FAULTS = {  # in run order, the least disruptive first; the daemon last
               "back, or kept the same shell under a new holder; other holders and shells untouched",
     "acpmux": "app answers; terminals keep working (a typed echo runs)",
     "daemon": "app answers; a new daemon connects; every terminal pane re-attaches and a typed echo runs",
-    "gpu-crash-loop": "app keeps its pid through 12 GPU process kills in 60 s; Chromium starts a new GPU process each "
-                      "time, or after its last GPU mode turns GPU off (cmux-gpu-unusable-no-fatal) and starts none; "
-                      "the page's script answers",
+    "gpu-crash-loop": "app keeps its pid while each new GPU process is killed until Chromium's last GPU mode turns "
+                      "GPU off (cmux-gpu-unusable-no-fatal) and it starts none; the page's script answers",
 }
 # Faults only `--only` runs, with why: each changes the app for the rest of its life.
 OPT_IN = {
     "gpu-crash-loop": "GPU off lasts for the app's life; run --only gpu-crash-loop by itself",
 }
-GPU_LOOP_KILLS = 12  # GPU process kills in one gpu-crash-loop (p10-stability-164)
-GPU_LOOP_S = 60.0  # s the kills are spread over: 3 crashes per mode, well inside Chrome's 5 min forgiveness
+GPU_LOOP_KILLS = 12  # GPU process kills in one gpu-crash-loop (p10-stability-164): 3 crashes in each of 4 modes
+GPU_LOOP_MAX_SLOTS = 24  # kill slots after which a GPU process that still starts fails the loop
+GPU_LOOP_S = 60.0  # s the first GPU_LOOP_KILLS kills are spread over, well inside Chrome's 5 min forgiveness
 GPU_RESTART_S = 10.0  # s a new GPU process may take to start before the slot counts as GPU off
 DEV_BUNDLE = "com.cmuxterm.app.debug"
 TAGGED_SOCKET = re.compile(r"^cmux-debug-[\w.-]+\.sock$")
@@ -382,7 +386,8 @@ class Chaos:
     def __init__(self, rpc, procs, url, *, kill=None, reports=None, ping_limit_ms=PING_P99_MS,
                  ping_bound_ms=PING_BOUND_MS, ping_hang_ms=PING_HANG_MS, ping_every=PING_EVERY, key_every=KEY_EVERY,
                  pre_s=0.5, post_s=1.0, report_settle_s=REPORT_SETTLE_S, step_s=STEP_S, patience=1.0,
-                 gpu_loop_kills=GPU_LOOP_KILLS, gpu_loop_s=GPU_LOOP_S, gpu_restart_s=GPU_RESTART_S):
+                 gpu_loop_kills=GPU_LOOP_KILLS, gpu_loop_max_slots=GPU_LOOP_MAX_SLOTS, gpu_loop_s=GPU_LOOP_S,
+                 gpu_restart_s=GPU_RESTART_S):
         self.rpc, self.procs, self.url = rpc, procs, url
         self.kill_pid = kill or (lambda pid: os.kill(pid, signal.SIGKILL))
         self.reports = reports or (lambda since: [])
@@ -390,7 +395,8 @@ class Chaos:
         self.ping_every, self.key_every = ping_every, key_every
         self.pre_s, self.post_s, self.report_settle_s, self.step_s = pre_s, post_s, report_settle_s, step_s
         self.patience = patience  # scales every recovery wait (tests)
-        self.gpu_loop_kills, self.gpu_loop_s, self.gpu_restart_s = gpu_loop_kills, gpu_loop_s, gpu_restart_s
+        self.gpu_loop_kills, self.gpu_loop_max_slots = gpu_loop_kills, gpu_loop_max_slots
+        self.gpu_loop_s, self.gpu_restart_s = gpu_loop_s, gpu_restart_s
         self.pinger = self.typist = None
         self.pings_at_kill = None  # the pinger's count when the first kill was sent
         self.window_start = None  # time.monotonic() when the first kill() began: pings sent before it are setup's
@@ -703,9 +709,11 @@ class Chaos:
             "new_gpu": fresh, "crash_page": seen, "page_answers": bool(answers)}
 
     def fault_gpu_crash_loop(self):
-        """gpu_loop_kills kills of Chromium's GPU process, one per slot of gpu_loop_s / gpu_loop_kills, each of the
-        GPU process that started since the last kill. A slot with no new GPU process within gpu_restart_s kills
-        nothing: Chromium turned the GPU off. The loop stops once the app is gone (Chromium's LOG(FATAL))."""
+        """Kills of Chromium's GPU process, one per slot of gpu_loop_s / gpu_loop_kills, each of the GPU process that
+        started since the last kill. A slot with no new GPU process within gpu_restart_s kills nothing. The slots go
+        on past gpu_loop_kills while a GPU process still starts, up to gpu_loop_max_slots slots, and stop at the
+        first empty slot after that, once the app is gone (Chromium's LOG(FATAL)), or at the cap. Only GPU off with
+        the app unchanged passes: that is Chromium's last mode reached and the fork's switch taking it."""
         tab = self.page("cef")
         if not self.procs.chromium("gpu-process"):
             return False, {"why": "Chromium runs no GPU process"}
@@ -717,12 +725,14 @@ class Chaos:
 
         began = time.monotonic()
         with self.typing():
-            for n in range(self.gpu_loop_kills):
-                if not crash.alive(app_before):
-                    break
+            n = 0
+            while crash.alive(app_before) and n < self.gpu_loop_max_slots:
+                n += 1
                 fresh = self.wait(new_gpu, self.gpu_restart_s)
                 if not fresh:
                     missed += 1
+                    if n >= self.gpu_loop_kills:
+                        break
                     continue
                 before = len(self.killed)
                 try:
@@ -733,7 +743,7 @@ class Chaos:
                 signalled.update(fresh)
                 if len(self.killed) > before:
                     kills.append({"at_s": round(time.monotonic() - began, 1), "pids": self.killed[before:]})
-                time.sleep(max(0.0, began + (n + 1) * slot - time.monotonic()))  # test harness: the kill clock
+                time.sleep(max(0.0, began + n * slot - time.monotonic()))  # test harness: the kill clock
             alive = crash.alive(app_before)
             back = bool(alive and self.wait(new_gpu, self.gpu_restart_s))
         seconds = round(time.monotonic() - began, 1)
@@ -742,14 +752,13 @@ class Chaos:
         app = "unchanged" if alive and app_after in (None, app_before) else "changed" if app_after else "gone"
         gpu = "running" if back else "off"
         answers = bool(alive and self.wait(lambda: self.answers(tab), 30))
-        complete = len(kills) == self.gpu_loop_kills or (gpu == "off" and missed > 0)
         observed = {"app": app, "app_pid_before": app_before, "app_pid_after": app_after, "gpu": gpu,
                     "kills": len(kills), "kill_times": kills, "slots_with_no_gpu": missed, "page_answers": answers,
                     "seconds": seconds}
-        if alive and not complete:
-            observed["why"] = (f"{len(kills)} of {self.gpu_loop_kills} kills landed and the GPU process still "
-                               "restarts: the loop did not reach Chromium's last GPU mode")
-        return app == "unchanged" and complete and answers, observed
+        if alive and gpu == "running":
+            observed["why"] = (f"{len(kills)} kills in {n} slots (at most {self.gpu_loop_max_slots}) landed and the "
+                               "GPU process still restarts: the loop did not reach Chromium's last GPU mode")
+        return app == "unchanged" and gpu == "off" and answers, observed
 
     def fault_terminal_host(self):
         role = "right" if self.tabs.get("right") else "left"

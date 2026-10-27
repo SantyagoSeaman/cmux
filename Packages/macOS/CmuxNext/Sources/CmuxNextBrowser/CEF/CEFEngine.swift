@@ -364,6 +364,13 @@ public final class CEFEngine: BrowserEngine {
         set { CEFRuntime.shared.spareAfterFirstTabFeature = newValue }
     }
 
+    /// The feature `chromiumGpuUnusableNoFatal`: a GPU crash loop past Chromium's last GPU mode turns
+    /// GPU use off instead of ending the app (`CEFSwitches.gpuUnusableNoFatal`); asked once, when Chromium starts.
+    public var gpuUnusableNoFatal: @MainActor () -> Bool {
+        get { CEFRuntime.shared.gpuUnusableNoFatalFeature }
+        set { CEFRuntime.shared.gpuUnusableNoFatalFeature = newValue }
+    }
+
     /// What modified link clicks do (cmux.json `browser.links.*`;
     /// process-wide, read on each request).
     public var linkClicks: BrowserLinkClickMapping {

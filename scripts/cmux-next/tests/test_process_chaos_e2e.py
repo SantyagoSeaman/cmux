@@ -14,10 +14,11 @@
    skip (exit 3).
 5. The holder fault: the killed holder's pane shows the ended state with Restart, Restart brings a shell back, the
    other holder and its terminal are untouched.
-6. gpu-crash-loop (p10-stability-164) runs only with --only. It kills each new GPU process 12 times and reports the
-   app pid and the GPU state: Chromium restarting every time passes, its last mode turning GPU off
-   (cmux-gpu-unusable-no-fatal) passes, Chromium's LOG(FATAL) ending the app fails with the app gone, and a loop
-   whose GPU process came back too late to reach the last mode fails with why.
+6. gpu-crash-loop (p10-stability-164) runs only with --only. It kills each new GPU process, 12 times and then on
+   until none starts (at most 24 slots), and reports the app pid and the GPU state: only Chromium's last mode turning
+   GPU off (cmux-gpu-unusable-no-fatal) with the app unchanged passes, after 9 or 12 kills or more (a forgiven
+   crash). Chromium's LOG(FATAL) ending the app fails with the app gone; a GPU process that still starts after the
+   cap, or that came back after empty slots, never reached the last mode and fails with why.
 
 Runs on any host (Linux included): no app, no socket, no signal sent.
 
@@ -614,18 +615,40 @@ class RunTests(unittest.TestCase):
         self.assertIn("chromium-gpu", faults)
 
     def test_gpu_crash_loop_kills_each_new_gpu_process_and_keeps_the_app(self):
-        app = FakeApp()
+        # Graphite, GL, SwiftShader and DISPLAY_COMPOSITOR: 3 crashes each, then the switch turns GPU off.
+        app = FakeApp(gpu_modes=chaos.GPU_LOOP_KILLS, gpu_last="off")
         rows, line = self.gpu_loop(app)
         self.assertEqual(line["outcome"], "ok", line)
         observed = line["observed"]
-        self.assertEqual((observed["app"], observed["gpu"]), ("unchanged", "running"))
+        self.assertEqual((observed["app"], observed["gpu"]), ("unchanged", "off"))
         self.assertEqual((observed["app_pid_before"], observed["app_pid_after"]), (APP, APP))
         self.assertEqual(observed["kills"], chaos.GPU_LOOP_KILLS)
         self.assertEqual(len(line["killed"]), chaos.GPU_LOOP_KILLS)
         self.assertEqual(len(set(line["killed"])), chaos.GPU_LOOP_KILLS, "each kill is a new GPU process")
         self.assertEqual(line["killed"][0], 602)
+        self.assertEqual(observed["slots_with_no_gpu"], 1)
         self.assertTrue(line["app_pid_kept"] and line["main_ping_ok"])
         self.assertEqual(chaos.exit_status(rows, []), 0)
+
+    def test_a_gpu_process_that_starts_after_every_kill_never_reached_the_last_mode_and_fails(self):
+        # 12 kills with the GPU process still starting is the state stock Chromium and the patch share: the run
+        # never reached FallBackToNextGpuMode's empty stack, so it proves nothing about the app surviving it.
+        rows, line = self.gpu_loop(FakeApp())
+        self.assertEqual(line["outcome"], "FAIL", line)
+        observed = line["observed"]
+        self.assertEqual((observed["app"], observed["gpu"]), ("unchanged", "running"))
+        self.assertEqual(observed["kills"], chaos.GPU_LOOP_MAX_SLOTS)
+        self.assertEqual(observed["slots_with_no_gpu"], 0)
+        self.assertIn("did not reach Chromium's last GPU mode", observed["why"])
+        self.assertEqual(chaos.exit_status(rows, []), 1)
+
+    def test_the_loop_goes_past_twelve_kills_while_a_gpu_process_still_starts(self):
+        # A forgiven or uncounted crash leaves Chromium a mode after 12 kills; the loop kills on until none starts.
+        rows, line = self.gpu_loop(FakeApp(gpu_modes=15, gpu_last="off"))
+        self.assertEqual(line["outcome"], "ok", line)
+        observed = line["observed"]
+        self.assertEqual((observed["app"], observed["gpu"], observed["kills"]), ("unchanged", "off", 15))
+        self.assertEqual(observed["slots_with_no_gpu"], 1)
 
     def test_the_last_gpu_mode_turning_gpu_off_passes(self):
         # cmux-gpu-unusable-no-fatal: after the ninth crash Chromium starts no GPU process; the app and page stay.
@@ -672,7 +695,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(line["outcome"], "FAIL", line)
         observed = line["observed"]
         self.assertEqual((observed["app"], observed["gpu"]), ("unchanged", "running"))
-        self.assertEqual((observed["kills"], observed["slots_with_no_gpu"]), (chaos.GPU_LOOP_KILLS - 2, 2))
+        self.assertEqual((observed["kills"], observed["slots_with_no_gpu"]), (chaos.GPU_LOOP_MAX_SLOTS - 2, 2))
         self.assertIn("did not reach Chromium's last GPU mode", observed["why"])
 
     def test_no_gpu_process_fails_the_loop(self):

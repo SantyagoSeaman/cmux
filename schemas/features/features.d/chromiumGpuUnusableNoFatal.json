@@ -1,0 +1,13 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "chromiumGpuUnusableNoFatal",
+  "owner": "PL-stability",
+  "description": "When Chromium's GPU process keeps crashing past its last fallback mode, a patched Chromium turns GPU use off instead of ending cmux; browser pages stop painting until cmux restarts.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "labs",
+  "process": "app",
+  "params": [],
+  "stories": [],
+  "sticky": false,
+  "runtimeMutable": false
+}

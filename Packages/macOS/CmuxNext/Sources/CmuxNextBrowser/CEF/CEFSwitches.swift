@@ -18,6 +18,9 @@ nonisolated struct CEFSwitches: Equatable, Sendable {
     /// The default-off feature `chromiumSpareAfterFirstTab`: pass the fork's spare renderer policy
     /// (`spareRendererAfterFirstTab`).
     var spareAfterFirstTab = false
+    /// The default-off feature `chromiumGpuUnusableNoFatal`: pass the fork's GPU crash loop policy
+    /// (``gpuUnusableNoFatal``).
+    var gpuUnusableNoFatalFeature = false
     /// Development builds share one ad hoc identity per tag; the real
     /// keychain would prompt for "Chromium Safe Storage" on every rebuild.
     var useMockKeychain: Bool
@@ -95,7 +98,7 @@ nonisolated struct CEFSwitches: Equatable, Sendable {
             // (include/cef_cmux.h in the fork).
             result.append("cmux-tabbed-windows")
             // A GPU crash loop ends GPU use, not the app (``gpuUnusableNoFatal``).
-            result.append(Self.gpuUnusableNoFatal)
+            if gpuUnusableNoFatalFeature { result.append(Self.gpuUnusableNoFatal) }
         }
         // Non-official builds otherwise enable the field trial testing config
         // (features that need helpers cmux does not ship).
@@ -335,6 +338,7 @@ nonisolated struct CEFSwitches: Equatable, Sendable {
         chromiumFeatures: [String] = [],
         disabledChromiumFeatures: [String] = [],
         spareAfterFirstTab: Bool = false,
+        gpuUnusableNoFatal: Bool = false,
         bundleIdentifier: String?,
         environment: [String: String],
         builtInExtensions: [String] = [],
@@ -366,6 +370,7 @@ nonisolated struct CEFSwitches: Equatable, Sendable {
             chromiumFeatures: chromiumFeatures,
             disabledChromiumFeatures: disabledChromiumFeatures,
             spareAfterFirstTab: spareAfterFirstTab,
+            gpuUnusableNoFatalFeature: gpuUnusableNoFatal,
             useMockKeychain: dev,
             loadExtensions: extensions,
             builtInExtensions: builtInExtensions,

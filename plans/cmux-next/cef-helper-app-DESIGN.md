@@ -161,7 +161,9 @@ cmux and every terminal in it.
 
 - Until F2: the fork patch `cmux_gpu_unusable_no_fatal` (manaflow-ai/cef `cp/p10-stability-164`, on the fork train
   tip `845d0aab`; a switch, no API number) turns that last step into GPU off when the browser process has
-  `--cmux-gpu-unusable-no-fatal` (`S/CEFSwitches.swift` `gpuUnusableNoFatal`, passed for every fork API >= 1). It logs
+  `--cmux-gpu-unusable-no-fatal` (`S/CEFSwitches.swift` `gpuUnusableNoFatal`, passed for every fork API >= 1 only
+  while the default-off feature `chromiumGpuUnusableNoFatal` is on, so a build can run both steps and the feature can
+  be turned off without a new build; the Chromium Host's own switch set does not get it yet). It logs
   "GPU process isn't usable. GPU off (cmux).", marks the GPU process unusable (`GpuDataManagerImpl::IsGpuProcessUnusable`,
   never cleared), and `GpuProcessHost::Get` makes no other sandboxed GPU process: it returns null, which its callers
   already handle while the browser shuts down. Web content stops painting until cmux restarts; terminals, agents and
@@ -170,9 +172,12 @@ cmux and every terminal in it.
   A GPU crash loop then turns the host's GPU off, not the host, and the supervisor (3.2) has nothing to restart. A
   host that ends in any other way restarts under `ChromiumHostRestartPolicy`. Owner: PL-cefhost for the host side,
   p10-stability for the fork patch.
-- Check: `scripts/cmux-next/process-chaos-e2e.py --only gpu-crash-loop` on a bare metal lab mini kills the GPU process
-  12 times in 60 s, each new one as it starts. Its row reports `app` (unchanged, changed or gone) and `gpu` (running
-  or off). With the patch the app is unchanged; on a fork without it the app is gone with a crash report.
+- Check: `scripts/cmux-next/process-chaos-e2e.py --only gpu-crash-loop` on a bare metal lab mini, against an app
+  launched with `CMUX_ENABLE_FEATURES=chromiumGpuUnusableNoFatal`, kills the GPU process 12 times in 60 s, each new
+  one as it starts, and then on until none starts (at most 24 slots). Its row reports `app` (unchanged, changed or
+  gone) and `gpu` (running or off). Only `unchanged` with `off` passes: Chromium reached its last mode and the patch
+  took it. On a fork without the patch the app is gone with a crash report; a GPU process that still starts after the
+  cap never reached the last mode, so the row fails with that reason.
 
 ### 3.7 Why page focus must not make a page window key (fork API 30, issue #24913)
 
