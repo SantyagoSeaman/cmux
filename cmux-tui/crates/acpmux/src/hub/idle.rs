@@ -73,6 +73,8 @@ impl Hub {
             && session.pending_permissions().is_empty()
             // Nor one whose agent waits on a request of its own (a permission not shown yet).
             && session.agent_requests.load(Ordering::SeqCst) == 0
+            // Nor one whose cut turn's automatic continuation waits or starts (`auto_resume.rs`).
+            && !self.continuation_pending(session)
             // Nor one with a sub-session or background subagent at work (`work_below.rs`).
             && session.work_below_since.lock().map_or(true, |v| *v == 0)
             // A Claude chat with turns but none stored would wake as a fresh conversation with
@@ -186,24 +188,36 @@ impl Hub {
                 // What the agent sent and the reader already queued (a turn Claude Code starts
                 // itself, its `system/init`) is handled first and counts: drained, then every gate
                 // read again. Output it has not written yet is the holder's to report.
+                // An exit the drain handles is no hibernation's (the mark is set after it).
                 let seen = session.last_active.load(Ordering::SeqCst);
-                session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
                 Self::drain_inbound(&session).await;
                 if session.last_active.load(Ordering::SeqCst) != seen
                     || seen.saturating_add(idle) > now
                     || !self.idle_eligible(&session)
                 {
-                    session.hibernated_at.store(0, Ordering::SeqCst);
+                    self.touch(&session);
+                    continue;
+                }
+                session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
+                if session.last_active.load(Ordering::SeqCst) != seen {
+                    self.clear_hibernation(&session);
                     continue;
                 }
                 self.detach_child(&session).await;
                 if link_lost {
                     self.end_unadopted_host(&session).await;
                 }
-                // Stopped meanwhile (`kill` clears the mark): its next start is no wake.
-                if session.status() == SessionStatus::Closed {
-                    session.hibernated_at.store(0, Ordering::SeqCst);
+                // Stopped meanwhile (`kill` clears the mark): its next start is no wake, and
+                // this was no hibernation.
+                if session.status() == SessionStatus::Closed
+                    || session.hibernated_at.load(Ordering::SeqCst) == 0
+                {
+                    self.clear_hibernation(&session);
+                    tracing::info!(session = %session.id, "stopped while the idle exit ended it: not hibernated");
+                    continue;
                 }
+                session.meta.lock().unwrap_or_else(|e| e.into_inner()).hibernated = true;
+                self.save_meta(&session);
                 tracing::info!(
                     session = %session.id,
                     cause = "idle",
@@ -216,6 +230,18 @@ impl Hub {
                 // In use at its deadline: a full idle period starts now.
                 self.touch(&session);
             }
+        }
+    }
+
+    /// `session` is no longer hibernated (woken, stopped, or its hibernation given up): its
+    /// mark, the cause a wake recorded, and the stored flag go.
+    pub(super) fn clear_hibernation(&self, session: &Session) {
+        session.hibernated_at.store(0, Ordering::SeqCst);
+        session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let was =
+            std::mem::take(&mut session.meta.lock().unwrap_or_else(|e| e.into_inner()).hibernated);
+        if was {
+            self.save_meta(session);
         }
     }
 
@@ -260,11 +286,11 @@ impl Hub {
         let Some((began, at)) = began else { return };
         let took_ms = began.elapsed().as_millis() as u64;
         let slept_secs = self.clock_now().saturating_sub(at) / 1_000_000_000;
-        let cause = session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let cause = *session.wake_cause.lock().unwrap_or_else(|e| e.into_inner());
         let cause = cause.unwrap_or("request");
         match failed {
             None => {
-                session.hibernated_at.store(0, Ordering::SeqCst);
+                self.clear_hibernation(session);
                 tracing::info!(session = %session.id, cause, took_ms, slept_secs, "woke");
             }
             Some(e) => {

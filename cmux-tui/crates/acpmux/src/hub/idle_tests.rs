@@ -46,3 +46,21 @@ async fn each_gate_keeps_a_session_awake() {
     assert!(hub.idle_eligible(&session));
     hub.shutdown_all().await;
 }
+
+/// A chat stored as hibernated comes back marked (it wakes on a click after a restart), and
+/// clearing the hibernation drops the mark, a cause a wake recorded, and the stored flag.
+#[tokio::test]
+async fn a_stored_hibernation_comes_back_and_clearing_it_drops_every_trace() {
+    let (hub, session) = chat().await;
+    let mut meta = session.meta();
+    meta.hibernated = true;
+    meta.id = format!("{}-restored", meta.id);
+    let restored = hub.make_session(meta);
+    assert_ne!(restored.hibernated_at.load(Ordering::SeqCst), 0, "a restart lost the hibernation");
+    hub.wake_cause(&restored, "click");
+    hub.clear_hibernation(&restored);
+    assert_eq!(restored.hibernated_at.load(Ordering::SeqCst), 0);
+    assert!(restored.wake_cause.lock().unwrap().is_none(), "a stale wake cause");
+    assert!(!restored.meta().hibernated);
+    hub.shutdown_all().await;
+}
