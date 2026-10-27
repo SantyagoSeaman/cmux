@@ -1,48 +1,76 @@
 // Settings > Menus: every right-click menu, arranged by the person (Swift `ContextMenuLayout`,
-// cmux.json `contextMenus`). The list names each menu; the editor draws the chosen menu's top
-// level as a menu, with More and the other submenus open beneath their rows. Rows reorder by
-// dragging their grip (menuDrag.ts: pointer events, so the save is the person's gesture) or by
-// their buttons, move into More or out of any submenu to the top level, hide, and take
-// separators; Reset brings back the app's own menu. Customize Menu… at the end of a menu opens
-// this page on it (`?focus=<menu>`).
-import { useId, useRef, useState, type PointerEvent, type ReactNode } from "react";
+// cmux.json `contextMenus`) as a tree, so any row goes anywhere at any depth. The list names each
+// menu; the editor draws the chosen menu as its rows, each submenu's rows indented under it.
+// - A row's grip drags it anywhere: before or after any row, into any submenu (menuDrag.ts).
+// - Its buttons step it up or down, move it to any submenu (Move to…, also its right-click menu),
+//   and hide or show it in place; a submenu of the person's renames and deletes.
+// - New Submenu makes one of the person's; Add Separator adds one; Reset brings back the app's menu.
+// Customize Menu… at the end of a menu opens this page on it (`?focus=<menu>`).
+import { useId, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
+import { ContextMenu, type ContextMenuItem } from "../../../ui/ContextMenu";
+import { nativeMenu, pickedId } from "../../../ui/nativeMenu";
 import { useSettingsRouter, useSettingsState, useStore } from "../context";
 import { Switch } from "../editors/ToggleEditor";
 import { Icon } from "../icons";
-import { DRAG_THRESHOLD, dropTarget, isNoMove, lineOffset, rowBoxes, type DropTarget } from "../menuDrag";
+import { DRAG_THRESHOLD, INDENT, block, dropTarget, rowBoxes, shift, type DropTarget, type RowBox } from "../menuDrag";
 import {
   MORE,
+  SEPARATOR,
+  addGroup,
   addSeparator,
-  demote,
-  hide,
+  deleteGroup,
+  destinations,
+  isFolder,
   isGenerated,
-  moveTop,
-  promote,
+  isGroup,
+  keyOf,
+  move,
+  moveInto,
+  nodeAt,
   removeSeparator,
-  show,
-  view,
-  type TopItem,
+  renameGroup,
+  samePath,
+  step,
+  toggleHidden,
+  visibleRows,
+  within,
+  type Folder,
+  type Path,
+  type VisibleRow,
 } from "../menuLayouts";
-import type { ContextMenuState, MenuLayout, MenuRow } from "../ops";
+import type { ContextMenuState, MenuLayout, MenuNode, MenuRow } from "../ops";
 import { sectionHref } from "../router";
 import { t } from "../strings";
 import { ResetSpacer } from "./ResetButton";
 
 const AREAS = ["workspace", "tabs", "terminal", "browser", "other"] as const;
 
-/** What a drag carries: a top-level entry by index, or a row from More or a submenu by key. */
-type Drag = { from: "top"; index: number } | { from: "child"; key: string };
+/** A press on a grip: a drag once the pointer travels `DRAG_THRESHOLD`; the rows as they stood
+ * when it began, the dragged block, and where it would drop. */
+type Dragging = {
+  path: Path;
+  depth: number;
+  startY: number;
+  dy: number;
+  active: boolean;
+  rows: RowBox[];
+  first: number;
+  last: number;
+  height: number;
+  target: DropTarget | null;
+};
 
-/** A press on a grip: a drag once the pointer travels `DRAG_THRESHOLD`; where it would drop. */
-type Dragging = { source: Drag; startY: number; dy: number; active: boolean; target: DropTarget | null; line: number | null };
+const pathKey = (path: Path) => path.join(".");
 
-const sameSource = (a: Drag, b: Drag) =>
-  a.from === "top" ? b.from === "top" && a.index === b.index : b.from === "child" && a.key === b.key;
+function newID(): string {
+  return globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10);
+}
 
 /** A row's SF Symbol (`symbol/<name>`, a template PNG) inked like the row's text: the image is an
  * alpha mask over a `currentColor` rect, as a macOS menu draws its template icons. */
 function RowIcon({ symbol }: { symbol: string | null }) {
-  const mask = useId();
+  // useId's characters (colons, guillemets) do not survive a `url(#…)` reference.
+  const mask = `menu-icon-${useId().replace(/[^A-Za-z0-9_-]/g, "")}`;
   if (!symbol) return <span className="menu-row-icon" aria-hidden="true" />;
   const href = `symbol/${encodeURIComponent(encodeURIComponent(symbol))}`;
   return (
@@ -63,13 +91,15 @@ function ActionButton({
   onClick,
   disabled = false,
   iconClass,
+  data,
 }: {
   icon: string;
   action: string;
   row?: string;
-  onClick: () => void;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   iconClass?: string;
+  data?: string;
 }) {
   return (
     <button
@@ -78,6 +108,7 @@ function ActionButton({
       aria-label={row ? `${action}: ${row}` : action}
       title={action}
       disabled={disabled}
+      data-action={data}
       onClick={onClick}
     >
       <Icon name={icon} className={iconClass} />
@@ -93,18 +124,30 @@ export function ContextMenusCard({ focus }: { focus: string | null }) {
   // The layout just saved, shown until the host lists bring it back, and the last write's refusal.
   const [pending, setPending] = useState<{ menu: string; layout: MenuLayout } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [open, setOpen] = useState<Set<string>>(() => new Set([MORE]));
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set([MORE]));
   const [dragging, setDragging] = useState<Dragging | null>(null);
+  const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
+  // Move to… without the app's menu (the dev server, tests): the page draws the list.
+  const [picker, setPicker] = useState<{ path: Path } | null>(null);
   const list = useRef<HTMLOListElement>(null);
   if (!state || state.menus.length === 0) return null;
 
   // The chosen menu is the route's focus: Customize Menu… opens `?focus=<menu>`, and picking a menu
   // here replaces it, so a later Customize Menu… always changes the route and selects its menu.
   const menu = state.menus.find((item) => item.id === focus) ?? state.menus[0]!;
-  const hasMore = menu.rows.some((row) => row.key === MORE);
   const layout = pending?.menu === menu.id ? pending.layout : menu.layout;
-  const shown = view(menu, layout);
+  const rowsByKey = new Map(menu.rows.map((row) => [row.key, row]));
+  const shown = visibleRows(layout, open);
   const generated = isGenerated(menu, layout);
+
+  const titleOf = (node: MenuNode): string => {
+    if (node === SEPARATOR) return t("settingsWindow.menus.separator");
+    if (isFolder(node) && isGroup(node.key)) return node.title ?? "";
+    return rowsByKey.get(keyOf(node))?.title ?? keyOf(node);
+  };
+  const rowOf = (node: MenuNode): MenuRow | undefined => (node === SEPARATOR ? undefined : rowsByKey.get(keyOf(node)));
+  const siblingsOf = (path: Path): MenuNode[] =>
+    path.length === 1 ? layout.items : (nodeAt(layout.items, path.slice(0, -1)) as Folder).items;
 
   const save = (next: MenuLayout) => {
     const write = { menu: menu.id, layout: next };
@@ -115,6 +158,7 @@ export function ContextMenusCard({ focus }: { focus: string | null }) {
       .catch((error: unknown) => setFailure(error instanceof Error ? error.message : String(error)))
       .finally(() => setPending((current) => (current === write ? null : current)));
   };
+  const openFolder = (key: string) => setOpen((current) => new Set([...current, key]));
   const toggleOpen = (key: string) =>
     setOpen((current) => {
       const next = new Set(current);
@@ -122,144 +166,223 @@ export function ContextMenusCard({ focus }: { focus: string | null }) {
       else next.add(key);
       return next;
     });
+  const folderKeys = (nodes: MenuNode[]): string[] =>
+    nodes.flatMap((node) => (isFolder(node) ? [node.key, ...folderKeys(node.items)] : []));
+  const allOpen = folderKeys(layout.items).every((key) => open.has(key));
 
-  /** Drops `source` on `target`: into More, or before top-level index `slot`. */
-  const commit = (source: Drag, target: DropTarget) => {
-    if ("intoMore" in target) {
-      const key = source.from === "top" ? layout.top[source.index] : source.key;
-      if (key && key !== "-" && key !== MORE) save(demote(layout, key));
-    } else if (source.from === "top") {
-      if (!isNoMove(source.index, target.slot)) save(moveTop(layout, source.index, source.index < target.slot ? target.slot - 1 : target.slot));
-    } else save(promote(menu, layout, source.key, target.slot));
+  /** Where the node at `path` can move: the top level, then every submenu, as menu rows. */
+  const moveChoices = (path: Path) => {
+    const parent = path.slice(0, -1);
+    return destinations(layout, path, (node: Folder) => titleOf(node)).map((destination) => ({
+      id: `move:${pathKey(destination.path)}`,
+      label: destination.trail.length === 0 ? t("settingsWindow.menus.topLevel") : destination.trail.join(" › "),
+      current: samePath(destination.path, parent),
+      run: () => {
+        save(moveInto(layout, path, destination.path));
+        const into = nodeAt(layout.items, destination.path);
+        if (into) openFolder(keyOf(into));
+      },
+    }));
   };
-  /** A grip's pointer handlers: capture on press, follow the pointer, save on release. */
-  const grip = (source: Drag) => ({
+  /** Move to…: the app's own menu at the button, else the page's list. */
+  const openMoveTo = (path: Path, button: HTMLElement) => {
+    const choices = moveChoices(path);
+    const host = nativeMenu();
+    if (!host) return setPicker({ path });
+    const rect = button.getBoundingClientRect();
+    void host({
+      items: choices.map((choice) => ({ id: choice.id, label: choice.label, ...(choice.current ? { disabled: true } : {}) })),
+      point: { x: rect.left, y: rect.bottom },
+    })
+      .then((reply) => choices.find((choice) => choice.id === pickedId(reply))?.run())
+      .catch(() => setPicker({ path }));
+  };
+
+  // MARK: Dragging
+
+  const grip = (path: Path, depth: number) => ({
     onPointerDown: (event: PointerEvent<HTMLElement>) => {
       if (event.button !== 0) return;
       event.preventDefault();
       event.currentTarget.setPointerCapture?.(event.pointerId);
-      setDragging({ source, startY: event.clientY, dy: 0, active: false, target: null, line: null });
+      setDragging({ path, depth, startY: event.clientY, dy: 0, active: false, rows: [], first: 0, last: 0, height: 0, target: null });
     },
     onPointerMove: (event: PointerEvent<HTMLElement>) => {
       const element = list.current;
-      if (!dragging || !sameSource(dragging.source, source) || !element) return;
+      if (!dragging || !samePath(dragging.path, path) || !element) return;
       const dy = event.clientY - dragging.startY;
       if (!dragging.active && Math.abs(dy) < DRAG_THRESHOLD) return;
-      const rows = rowBoxes(element);
-      const moving = source.from === "top" ? layout.top[source.index] : source.key;
-      const canEnterMore = hasMore && moving !== MORE && moving !== "-";
-      let target: DropTarget | null = dropTarget(rows, event.clientY, layout.top.length, canEnterMore);
-      if ("slot" in target && source.from === "top" && isNoMove(source.index, target.slot)) target = null;
-      const line = target ? lineOffset(rows, target, element.getBoundingClientRect().top) : null;
-      setDragging({ ...dragging, dy, active: true, target, line });
+      // Measured once, before any row slides (a slid row would move the target under the pointer).
+      const rows = dragging.active ? dragging.rows : rowBoxes(element);
+      const { first, last } = dragging.active ? dragging : block(rows, path);
+      // jsdom has no layout: a row is 24 px there, as the page draws it.
+      const measured = (rows[last]?.bottom ?? 0) - (rows[first]?.top ?? 0);
+      const height = dragging.active ? dragging.height : measured > 0 ? measured : 24 * (last - first + 1);
+      const target = dropTarget(rows, event.clientY, path, layout.items.length);
+      setDragging({ ...dragging, dy, active: true, rows, first, last, height, target });
     },
     onPointerUp: () => {
       const done = dragging;
       setDragging(null);
-      if (done?.active && done.target) commit(done.source, done.target);
+      if (!done?.active || !done.target) return;
+      save(move(layout, done.path, done.target.parent, done.target.index));
+      const into = done.target.into && nodeAt(layout.items, done.target.into);
+      if (into) openFolder(keyOf(into));
     },
     onPointerCancel: () => setDragging(null),
   });
-  /** A dragged row follows the pointer; the rest stay put, so nothing reflows mid-drag. */
-  const lifted = (source: Drag) =>
-    dragging?.active && sameSource(dragging.source, source)
-      ? { "data-dragging": "", style: { transform: `translateY(${dragging.dy}px)` } }
-      : {};
-  const gripHandle = (source: Drag) => (
-    <span className="menu-row-grip" aria-hidden="true" {...grip(source)}>
-      <Icon name="grip" />
-    </span>
-  );
-
-  const childRow = (row: MenuRow) => (
-    <li key={row.key} className="menu-row menu-child" data-key={row.key} {...lifted({ from: "child", key: row.key })}>
-      {gripHandle({ from: "child", key: row.key })}
-      <RowIcon symbol={row.symbol} />
-      <span className="menu-row-title">{row.title}</span>
-      {row.kind !== "item" && <span className="menu-row-chevron" aria-hidden="true">›</span>}
-      <span className="menu-row-actions">
-        <ActionButton icon="arrow.up.to.line" action={t("settingsWindow.menus.moveToTop")} row={row.title} onClick={() => save(promote(menu, layout, row.key))} />
-        <ActionButton icon="eye.slash" action={t("settingsWindow.menus.hide")} row={row.title} onClick={() => save(hide(layout, row.key))} />
-      </span>
-    </li>
-  );
-
-  const children = (key: string): ReactNode => {
-    const rows = key === MORE ? shown.more : (shown.folders.get(key) ?? []);
-    return (
-      <ul className="menu-children" data-folder={key}>
-        {rows.length === 0 ? <li className="menu-empty">{t("settingsWindow.menus.emptyFolder")}</li> : null}
-        {rows.map((row) => (
-          <FragmentRows key={row.key}>
-            {childRow(row)}
-            {row.kind === "folder" && (shown.folders.get(row.key)?.length ?? 0) > 0 ? (
-              <li className="menu-nested">{children(row.key)}</li>
-            ) : null}
-          </FragmentRows>
-        ))}
-      </ul>
-    );
+  /** A dragged row (and what an open submenu shows under it) follows the pointer, moving sideways
+   * to the depth it will land at; the rows it passes slide to open the gap. Transforms only. */
+  const lifted = (row: VisibleRow, flat: number) => {
+    if (!dragging?.active) return undefined;
+    if (within(row.path, dragging.path)) {
+      const dx = dragging.target ? (dragging.target.depth - dragging.depth) * INDENT : 0;
+      return { transform: `translate(${dx}px, ${dragging.dy}px)` };
+    }
+    const by = shift(flat, dragging.first, dragging.last, dragging.target?.flat ?? null, dragging.height);
+    return by ? { transform: `translateY(${by}px)` } : undefined;
   };
 
-  const topRow = (item: TopItem, position: number, count: number) => {
-    const title = item.kind === "row" ? item.row.title : t("settingsWindow.menus.separator");
-    const up = (
-      <ActionButton icon="chevron" iconClass="icon-up" action={t("settingsPage.moveUp")} row={title} disabled={position === 0} onClick={() => save(moveTop(layout, item.index, item.index - 1))} />
+  // MARK: Rows
+
+  const commitRename = (path: Path) => {
+    if (!renaming) return;
+    const title = renaming.title.trim();
+    setRenaming(null);
+    if (title) save(renameGroup(layout, path, title));
+  };
+
+  const rowMenuItems = (path: Path, node: MenuNode, hidden: boolean): ContextMenuItem[] => {
+    const at = path[path.length - 1]!;
+    const items: ContextMenuItem[] = [
+      { id: "up", label: t("settingsPage.moveUp"), disabled: at === 0, onSelect: () => save(step(layout, path, -1)) },
+      { id: "down", label: t("settingsPage.moveDown"), disabled: at === siblingsOf(path).length - 1, onSelect: () => save(step(layout, path, 1)) },
+    ];
+    moveChoices(path).forEach((choice, index) =>
+      items.push({
+        id: choice.id,
+        label: `${t("settingsWindow.menus.moveTo")} ${choice.label}`,
+        disabled: choice.current,
+        separatorBefore: index === 0,
+        onSelect: choice.run,
+      }),
     );
-    const down = (
-      <ActionButton icon="chevron" action={t("settingsPage.moveDown")} row={title} disabled={position === count - 1} onClick={() => save(moveTop(layout, item.index, item.index + 1))} />
-    );
-    const source: Drag = { from: "top", index: item.index };
-    if (item.kind === "separator") {
-      const id = `sep-${item.index}`;
-      return (
-        <li key={id} className="menu-row menu-separator" data-top-index={item.index} {...lifted(source)}>
-          {gripHandle(source)}
-          <span className="menu-separator-line" aria-label={t("settingsWindow.menus.separator")} role="separator" />
-          <span className="menu-row-actions">
-            {up}
-            {down}
-            <ActionButton icon="xmark" action={t("settingsWindow.menus.removeSeparator")} onClick={() => save(removeSeparator(layout, item.index))} />
-          </span>
-        </li>
+    if (node === SEPARATOR) {
+      items.push({ id: "remove", label: t("settingsWindow.menus.removeSeparator"), separatorBefore: true, onSelect: () => save(removeSeparator(layout, path)) });
+    } else if (isFolder(node) && isGroup(node.key)) {
+      items.push(
+        { id: "rename", label: t("settingsWindow.menus.rename"), separatorBefore: true, onSelect: () => setRenaming({ key: node.key, title: node.title ?? "" }) },
+        { id: "delete", label: t("settingsWindow.menus.deleteSubmenu"), destructive: true, onSelect: () => save(deleteGroup(layout, path)) },
       );
+    } else {
+      items.push({
+        id: "hide",
+        label: hidden ? t("settingsWindow.menus.show") : t("settingsWindow.menus.hide"),
+        separatorBefore: true,
+        onSelect: () => save(toggleHidden(layout, keyOf(node))),
+      });
     }
-    const { row } = item;
-    const folder = row.kind === "folder";
-    const isMore = row.key === MORE;
-    const expanded = folder && open.has(row.key);
-    const intoMore = isMore && dragging?.active === true && dragging.target !== null && "intoMore" in dragging.target;
+    return items;
+  };
+
+  const drawRow = (row: VisibleRow, flat: number) => {
+    const { node, path, depth } = row;
+    const key = keyOf(node);
+    const id = pathKey(path);
+    const folder = isFolder(node);
+    const group = folder && isGroup(node.key);
+    const info = rowOf(node);
+    const title = titleOf(node);
+    const expanded = folder && open.has(key);
+    const at = path[path.length - 1]!;
+    const last = siblingsOf(path).length - 1;
+    const into = dragging?.active && dragging.target?.into && samePath(dragging.target.into, path);
+    const dimmed = row.hidden || row.parentHidden;
+    const style = { paddingInlineStart: `${2 + depth * INDENT}px`, ...lifted(row, flat) };
+    const buttons = (
+      <span className="menu-row-actions">
+        <ActionButton icon="chevron" iconClass="icon-up" action={t("settingsPage.moveUp")} row={title} disabled={at === 0} onClick={() => save(step(layout, path, -1))} />
+        <ActionButton icon="chevron" action={t("settingsPage.moveDown")} row={title} disabled={at === last} onClick={() => save(step(layout, path, 1))} />
+        <ActionButton icon="arrow.turn.down.right" action={t("settingsWindow.menus.moveTo")} row={title} data="move-to" onClick={(event) => openMoveTo(path, event.currentTarget)} />
+        {node === SEPARATOR ? (
+          <ActionButton icon="xmark" action={t("settingsWindow.menus.removeSeparator")} data="remove" onClick={() => save(removeSeparator(layout, path))} />
+        ) : group ? (
+          <>
+            <ActionButton icon="square.and.pencil" action={t("settingsWindow.menus.rename")} row={title} data="rename" onClick={() => setRenaming({ key, title: node.title ?? "" })} />
+            <ActionButton icon="xmark" action={t("settingsWindow.menus.deleteSubmenu")} row={title} data="delete" onClick={() => save(deleteGroup(layout, path))} />
+          </>
+        ) : (
+          <ActionButton
+            icon={row.hidden ? "eye" : "eye.slash"}
+            action={row.hidden ? t("settingsWindow.menus.show") : t("settingsWindow.menus.hide")}
+            row={title}
+            data="hide"
+            onClick={() => save(toggleHidden(layout, key))}
+          />
+        )}
+      </span>
+    );
+    const titleView =
+      renaming && renaming.key === key && group ? (
+        <input
+          className="field menu-rename"
+          aria-label={t("settingsWindow.menus.submenuName")}
+          value={renaming.title}
+          // biome-ignore lint/a11y/noAutofocus: the person asked to rename this submenu
+          autoFocus
+          onChange={(event) => setRenaming({ key, title: event.currentTarget.value })}
+          onBlur={() => commitRename(path)}
+          onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+            if (event.key === "Enter") commitRename(path);
+            if (event.key === "Escape") setRenaming(null);
+          }}
+        />
+      ) : folder ? (
+        <button type="button" className="menu-row-title menu-disclosure" aria-expanded={expanded} onClick={() => toggleOpen(key)}>
+          <Icon name="chevron" className={expanded ? "menu-twisty" : "menu-twisty menu-twisty-closed"} />
+          {title}
+        </button>
+      ) : (
+        <span className="menu-row-title">{title}</span>
+      );
     return (
-      <FragmentRows key={row.key}>
-        <li
-          className="menu-row"
-          data-key={row.key}
-          data-top-index={item.index}
-          data-folder={folder ? "" : undefined}
-          data-drop-into={intoMore ? "" : undefined}
-          {...lifted(source)}
-        >
-          {gripHandle(source)}
-          <RowIcon symbol={row.symbol} />
-          {folder ? (
-            <button type="button" className="menu-row-title menu-disclosure" aria-expanded={expanded} onClick={() => toggleOpen(row.key)}>
-              {row.title}
-            </button>
-          ) : (
-            <span className="menu-row-title">{row.title}</span>
-          )}
-          {row.kind !== "item" && <span className="menu-row-chevron" aria-hidden="true">›</span>}
-          <span className="menu-row-actions">
-            {up}
-            {down}
-            {isMore || !hasMore ? null : (
-              <ActionButton icon="arrow.down.to.more" action={t("settingsWindow.menus.moveToMore")} row={row.title} onClick={() => save(demote(layout, row.key))} />
-            )}
-            <ActionButton icon="eye.slash" action={t("settingsWindow.menus.hide")} row={row.title} onClick={() => save(hide(layout, row.key))} />
+      <li
+        key={id}
+        className={node === SEPARATOR ? "menu-row menu-separator" : "menu-row"}
+        data-flat={flat}
+        data-path={id}
+        data-depth={depth}
+        data-key={node === SEPARATOR ? undefined : key}
+        data-folder={folder ? "" : undefined}
+        data-open={expanded ? "" : undefined}
+        data-children={folder ? node.items.length : undefined}
+        data-hidden={dimmed ? "" : undefined}
+        data-dragging={dragging?.active && within(path, dragging.path) ? "" : undefined}
+        data-drop-into={into ? "" : undefined}
+        style={style}
+      >
+        <ContextMenu className="menu-row-body" items={rowMenuItems(path, node, row.hidden)}>
+          <span className="menu-row-grip" aria-hidden="true" {...grip(path, depth)}>
+            <Icon name="grip" />
           </span>
-        </li>
-        {expanded ? <li className="menu-nested">{children(row.key)}</li> : null}
-      </FragmentRows>
+          {node === SEPARATOR ? (
+            <span className="menu-separator-line" aria-label={title} role="separator" />
+          ) : (
+            <>
+              {group ? <span className="menu-row-icon" aria-hidden="true" /> : <RowIcon symbol={info?.symbol ?? null} />}
+              {titleView}
+              {info?.kind === "submenu" ? (
+                <span className="menu-row-chevron" aria-hidden="true">
+                  ›
+                </span>
+              ) : null}
+              {folder && node.items.length === 0 ? <span className="menu-row-badge">{t("settingsWindow.menus.emptyFolder")}</span> : null}
+              {row.hidden ? <span className="menu-row-badge">{t("settingsWindow.menus.hidden")}</span> : null}
+            </>
+          )}
+          {buttons}
+        </ContextMenu>
+      </li>
     );
   };
 
@@ -322,6 +445,21 @@ export function ContextMenusCard({ focus }: { focus: string | null }) {
           <header className="menus-detail-header">
             <h3 className="menus-detail-title">{menu.title}</h3>
             <span className="menus-detail-spacer" />
+            <button type="button" className="button" data-action="expand" onClick={() => setOpen(allOpen ? new Set() : new Set(folderKeys(layout.items)))}>
+              {allOpen ? t("settingsWindow.menus.collapseAll") : t("settingsWindow.menus.expandAll")}
+            </button>
+            <button
+              type="button"
+              className="button"
+              data-action="new-submenu"
+              onClick={() => {
+                const made = addGroup(layout, t("settingsWindow.menus.newSubmenu"), newID());
+                save(made.layout);
+                setRenaming({ key: made.key, title: t("settingsWindow.menus.newSubmenu") });
+              }}
+            >
+              {t("settingsWindow.menus.newSubmenu")}
+            </button>
             <button type="button" className="button" data-action="add-separator" onClick={() => save(addSeparator(layout))}>
               {t("settingsWindow.menus.addSeparator")}
             </button>
@@ -336,33 +474,33 @@ export function ContextMenusCard({ focus }: { focus: string | null }) {
             </p>
           ) : null}
           <ol className="menu-preview" data-menu-preview="" data-reordering={dragging?.active ? "" : undefined} ref={list}>
-            {shown.top.map((item, position) => topRow(item, position, shown.top.length))}
-            {dragging?.active && dragging.line !== null ? (
-              <li className="menu-drop-line" aria-hidden="true" data-drop-line="" style={{ transform: `translateY(${dragging.line}px)` }} />
-            ) : null}
+            {shown.map((row, flat) => drawRow(row, flat))}
           </ol>
-          {shown.hidden.length > 0 ? (
-            <div className="menus-hidden" data-hidden="">
-              <div className="menus-area-title">{t("settingsWindow.menus.hidden")}</div>
-              <ul className="menu-children">
-                {shown.hidden.map((row) => (
-                  <li key={row.key} className="menu-row menu-child" data-key={row.key}>
-                    <RowIcon symbol={row.symbol} />
-                    <span className="menu-row-title">{row.title}</span>
-                    <span className="menu-row-actions">
-                      <ActionButton icon="eye" action={t("settingsWindow.menus.show")} row={row.title} onClick={() => save(show(menu, layout, row.key))} />
-                    </span>
-                  </li>
-                ))}
-              </ul>
+          {picker ? (
+            <div className="menus-move-picker" role="menu" aria-label={t("settingsWindow.menus.moveTo")} data-picker="">
+              {moveChoices(picker.path).map((choice) => (
+                <button
+                  key={choice.id}
+                  type="button"
+                  role="menuitem"
+                  className="menus-list-item"
+                  data-destination={choice.id}
+                  disabled={choice.current}
+                  onClick={() => {
+                    setPicker(null);
+                    choice.run();
+                  }}
+                >
+                  {choice.label}
+                </button>
+              ))}
+              <button type="button" className="button" data-action="cancel-move" onClick={() => setPicker(null)}>
+                {t("settingsWindow.menus.cancel")}
+              </button>
             </div>
           ) : null}
         </div>
       </section>
     </>
   );
-}
-
-function FragmentRows({ children }: { children: ReactNode }) {
-  return <>{children}</>;
 }

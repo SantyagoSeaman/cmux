@@ -6,7 +6,8 @@
 ///   submenu with its own rows. A submenu is one the app makes (`folder:<name>`, More is
 ///   `folder:more`) or one the person made (`group:<id>`, with a title); either holds any rows,
 ///   other submenus included.
-/// - ``hidden`` rows are left out everywhere; a hidden submenu takes what it holds with it.
+/// - ``hidden`` rows keep their place in ``items`` and are left out of the menu; a hidden submenu
+///   takes what it holds with it. Showing one again puts it back where it was.
 ///
 /// A row the layout does not name keeps its generated place: inside the submenu the app makes it
 /// in, wherever the person put that submenu, after the row it follows there (an action the app
@@ -107,22 +108,13 @@ public nonisolated struct ContextMenuLayout: Sendable, Hashable {
     }
 
     /// This layout against the generated `entries`: rows the app no longer places dropped, each
-    /// named once, hidden rows out, and the generated rows it does not name inserted where the app
-    /// puts them. What the Settings editor starts from, and what ``applied(to:)`` draws.
+    /// named once (hidden ones kept in place), and the generated rows it does not name inserted
+    /// where the app puts them. What the Settings editor starts from, and what ``applied(to:)`` draws.
     public func normalized(against entries: [ContextMenuEntry]) -> ContextMenuLayout {
         let units = Self.units(in: entries)
         let known = Set(units.map(\.key))
         let folders = Set(units.compactMap { unit -> String? in if case .folder = unit.entry { unit.key } else { nil } })
-        var hidden: [String] = []
         var seen: Set<String> = []
-        for key in self.hidden where known.contains(key) && seen.insert(key).inserted { hidden.append(key) }
-        // The rows a hidden submenu of the layout holds go with it: none of them shows elsewhere.
-        func claim(_ nodes: [Node]) {
-            for node in nodes {
-                if let key = node.key { seen.insert(key) }
-                if case .folder(_, _, let items) = node { claim(items) }
-            }
-        }
         func clean(_ nodes: [Node]) -> [Node] {
             var result: [Node] = []
             for node in nodes {
@@ -132,9 +124,7 @@ public nonisolated struct ContextMenuLayout: Sendable, Hashable {
                 case .item(let key):
                     if known.contains(key), !folders.contains(key), seen.insert(key).inserted { result.append(node) }
                 case .folder(let key, let title, let items):
-                    if hidden.contains(key) {
-                        claim(items)
-                    } else if Self.isGroup(key), seen.insert(key).inserted {
+                    if Self.isGroup(key), seen.insert(key).inserted {
                         result.append(.folder(key: key, title: title ?? "", items: clean(items)))
                     } else if folders.contains(key), seen.insert(key).inserted {
                         result.append(.folder(key: key, title: nil, items: clean(items)))
@@ -147,13 +137,15 @@ public nonisolated struct ContextMenuLayout: Sendable, Hashable {
             return result
         }
         var tree = clean(items)
+        // Every row stays in the tree, hidden ones too, so a hidden row shows again where it was.
+        var hiddenSeen: Set<String> = []
+        let hidden = self.hidden.filter { (known.contains($0) || Self.isGroup($0) && seen.contains($0)) && hiddenSeen.insert($0).inserted }
         let order = Self.generatedOrder(entries)
         for unit in units where !seen.contains(unit.key) {
             seen.insert(unit.key)
             let node: Node = folders.contains(unit.key) ? .folder(key: unit.key, title: nil, items: []) : .item(unit.key)
             let siblings = order[unit.home ?? ""] ?? []
             guard let at = siblings.firstIndex(of: unit.key) else { continue }
-            // A row whose submenu is hidden is hidden with it.
             _ = Self.insert(node, into: unit.home, in: &tree) { keys in Self.insertion(of: at, generated: siblings, in: keys) }
         }
         return ContextMenuLayout(items: tree, hidden: hidden)
@@ -202,8 +194,11 @@ public nonisolated struct ContextMenuLayout: Sendable, Hashable {
     public func applied(to entries: [ContextMenuEntry]) -> [ContextMenuEntry] {
         let layout = normalized(against: entries)
         let byKey = Dictionary(Self.units(in: entries).map { ($0.key, $0.entry) }, uniquingKeysWith: { first, _ in first })
+        let hidden = Set(layout.hidden)
         func render(_ nodes: [Node]) -> [ContextMenuEntry] {
             nodes.compactMap { node -> ContextMenuEntry? in
+                // A hidden row leaves the menu; a hidden submenu takes what it holds.
+                if let key = node.key, hidden.contains(key) { return nil }
                 switch node {
                 case .separator:
                     return .separator

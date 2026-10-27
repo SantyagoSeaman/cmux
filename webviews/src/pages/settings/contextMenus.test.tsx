@@ -1,114 +1,67 @@
-// Settings > Menus (ContextMenusCard): the person arranges each right-click menu. Customize
-// Menu… opens the page on its menu; rows move out of More to the top level, into More, hide and
-// show again where the app puts them; separators add and go; Reset saves no layout; rows reorder
-// by drag. Every change saves the whole layout through cmux.settings.context_menus.set.
+// Settings > Menus (ContextMenusCard): the person arranges each right-click menu as a tree, so any
+// row goes anywhere at any depth. Customize Menu… opens the page on its menu; a row moves to any
+// submenu (Move to…) or by drag (before or after any row, into a submenu's middle); a submenu moves
+// into another with its rows; rows hide and show in place; the person makes, names, fills and
+// deletes their own submenus; separators add and go; Reset saves no layout. Every change saves the
+// whole tree through cmux.settings.context_menus.set.
 import { afterAll, expect, test } from "bun:test";
+import type { MenuLayout, MenuNode } from "./ops";
 import { installDom } from "./testDom";
 
 const restore = installDom();
 afterAll(() => restore());
-const { renderPage, settle, click, ops } = await import("./testing");
+const { renderPage, settle, click, ops, changeValue, fire } = await import("./testing");
 const { act } = await import("react");
 
-type Layout = { top: string[]; more: string[]; hidden: string[] };
 const SET = "cmux.settings.context_menus.set";
 
 const editor = (container: HTMLElement) => container.querySelector<HTMLElement>('[data-card="context-menus"]')!;
-const topKeys = (container: HTMLElement) =>
-  [...editor(container).querySelectorAll<HTMLElement>(".menu-preview > .menu-row")].map((row) =>
-    row.classList.contains("menu-separator") ? "-" : row.dataset.key!,
+const row = (container: HTMLElement, key: string) => editor(container).querySelector<HTMLElement>(`.menu-row[data-key="${key}"]`)!;
+const drawn = (container: HTMLElement) =>
+  [...editor(container).querySelectorAll<HTMLElement>(".menu-preview > [data-flat]")].map(
+    (element) => `${element.dataset.depth}:${element.dataset.key ?? "-"}`,
   );
-const row = (container: HTMLElement, key: string) =>
-  editor(container).querySelector<HTMLElement>(`.menu-row[data-key="${key}"]`)!;
-const button = (element: HTMLElement, label: string) =>
-  [...element.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.getAttribute("aria-label")?.startsWith(label))!;
-const lastSaved = (provider: Parameters<typeof ops>[0]) => (ops(provider, SET).at(-1) as { menu: string; layout: Layout | null });
+const action = (element: HTMLElement, name: string) => element.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!;
+const saved = (provider: Parameters<typeof ops>[0]) => (ops(provider, SET).at(-1) as { menu: string; layout: MenuLayout | null }).layout;
 
-test("Customize Menu… opens Settings > Menus on its menu", async () => {
-  const page = await renderPage({ path: "/settings/menus?focus=tab" });
-  await settle();
-  expect(editor(page.container).dataset.menu).toBe("tab");
-  expect(editor(page.container).querySelector(".menus-detail-title")?.textContent).toBe("Tab");
-  // Another menu from the list.
-  await click(editor(page.container).querySelector<HTMLElement>('.menus-list-item[data-menu="terminalSelection"]')!);
-  expect(editor(page.container).dataset.menu).toBe("terminalSelection");
-  page.unmount();
-});
+/** The rows of submenu `key` in `nodes`, at any depth. */
+function folder(nodes: MenuNode[], key: string): MenuNode[] | undefined {
+  for (const node of nodes) {
+    if (typeof node !== "object") continue;
+    if (node.key === key) return node.items;
+    const found = folder(node.items, key);
+    if (found) return found;
+  }
+  return undefined;
+}
+const keys = (nodes: MenuNode[] | undefined) => (nodes ?? []).map((node) => (typeof node === "object" ? node.key : node));
 
-test("a row in More moves to the top level, just above More, and saves the menu", async () => {
-  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
-  await settle();
-  // More is open: its rows show beneath it.
-  expect(row(page.container, "workspace.copyPath").closest('[data-folder="folder:more"]')).not.toBeNull();
-  await click(button(row(page.container, "workspace.copyPath"), "Move to Top Level"));
-  const saved = lastSaved(page.provider);
-  expect(saved.menu).toBe("workspaceRow");
-  expect(saved.layout?.top.indexOf("workspace.copyPath")).toBe(saved.layout!.top.indexOf("folder:more") - 1);
-  expect(topKeys(page.container)).toContain("workspace.copyPath");
-  // Marked as edited in the list.
-  expect(editor(page.container).querySelector('.menus-list-item[data-menu="workspaceRow"] .menus-edited')).not.toBeNull();
-  page.unmount();
-});
+/** Move to… on `key`'s row, then the destination labelled `label` (the page's list in tests). */
+async function moveTo(container: HTMLElement, key: string, label: string) {
+  await click(action(row(container, key), "move-to"));
+  const choice = [...editor(container).querySelectorAll<HTMLButtonElement>("[data-destination]")].find(
+    (button) => button.textContent === label,
+  );
+  expect(choice).toBeDefined();
+  await click(choice!);
+}
 
-test("a row moves into More and a row in a folder moves out of it", async () => {
-  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
-  await settle();
-  await click(button(row(page.container, "renameWorkspace"), "Move to More"));
-  expect(lastSaved(page.provider).layout?.more).toEqual(["renameWorkspace"]);
-  expect(topKeys(page.container)).not.toContain("renameWorkspace");
-  // Move ▸ opens to show its rows; Move to Top lands above it.
-  await click(row(page.container, "folder:move").querySelector<HTMLElement>(".menu-disclosure")!);
-  await click(button(row(page.container, "palette.moveWorkspaceToTop"), "Move to Top Level"));
-  const top = lastSaved(page.provider).layout!.top;
-  expect(top.indexOf("palette.moveWorkspaceToTop")).toBe(top.indexOf("folder:move") - 1);
-  page.unmount();
-});
-
-test("a hidden row leaves the menu and Show puts it back where the app puts it", async () => {
-  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
-  await settle();
-  await click(button(row(page.container, "workspace.duplicate"), "Hide"));
-  expect(lastSaved(page.provider).layout?.hidden).toEqual(["workspace.duplicate"]);
-  expect(topKeys(page.container)).not.toContain("workspace.duplicate");
-  const hidden = editor(page.container).querySelector<HTMLElement>("[data-hidden]")!;
-  await click(button(hidden, "Show"));
-  // Back after New Workspace Below, as generated: the menu is the app's again, so no layout.
-  expect(lastSaved(page.provider).layout).toBeNull();
-  const keys = topKeys(page.container);
-  expect(keys.indexOf("workspace.duplicate")).toBe(keys.indexOf("workspace.newBelow") + 1);
-  page.unmount();
-});
-
-test("separators add and go, and Reset brings back the app's menu", async () => {
-  const page = await renderPage({ path: "/settings/menus?focus=terminalSelection" });
-  await settle();
-  const reset = () => editor(page.container).querySelector<HTMLButtonElement>('[data-action="reset"]')!;
-  expect(reset().disabled).toBe(true);
-  // A menu without More offers no Move to More (the row would leave the editor).
-  expect(button(row(page.container, "copy"), "Move to More")).toBeUndefined();
-  await click(editor(page.container).querySelector<HTMLElement>('[data-action="add-separator"]')!);
-  expect(lastSaved(page.provider).layout?.top.at(-1)).toBe("-");
-  expect(reset().disabled).toBe(false);
-  const separators = editor(page.container).querySelectorAll<HTMLElement>(".menu-separator");
-  await click(button(separators[0]!, "Remove Separator"));
-  expect(lastSaved(page.provider).layout?.top).toEqual(["copy", "paste", "splitRight", "splitDown", "-", "clearTerminal", "-"]);
-  await click(reset());
-  expect(lastSaved(page.provider).layout).toBeNull();
-  expect(topKeys(page.container)).toEqual(["copy", "paste", "-", "splitRight", "splitDown", "-", "clearTerminal"]);
-  page.unmount();
-});
-
-/** Lays the top-level rows out 24 px apart from y = 100, as the page draws them (jsdom has no layout). */
+/** Lays the drawn rows out 24 px apart from y = 100, as the page draws them (jsdom has no layout). */
 function layOut(container: HTMLElement) {
   const list = editor(container).querySelector<HTMLElement>(".menu-preview")!;
-  const box = (top: number) => () => ({ top, bottom: top + 24, left: 0, right: 400, width: 400, height: 24, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+  const box = (top: number) => () =>
+    ({ top, bottom: top + 24, left: 0, right: 400, width: 400, height: 24, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
   list.getBoundingClientRect = box(100);
-  list.querySelectorAll<HTMLElement>(":scope > [data-top-index]").forEach((element, position) => {
+  list.querySelectorAll<HTMLElement>(":scope > [data-flat]").forEach((element, position) => {
     element.getBoundingClientRect = box(100 + position * 24);
   });
 }
 const rowY = (container: HTMLElement, key: string) =>
-  [...editor(container).querySelectorAll<HTMLElement>(".menu-preview > [data-top-index]")].findIndex((element) => element.dataset.key === key) * 24 + 100;
+  [...editor(container).querySelectorAll<HTMLElement>(".menu-preview > [data-flat]")].findIndex(
+    (element) => element.dataset.key === key,
+  ) *
+    24 +
+  100;
 
 /** Presses `key`'s grip, moves the pointer to `y`, then releases: the person's drag. */
 async function dragRow(container: HTMLElement, key: string, y: number, check?: () => void) {
@@ -127,19 +80,95 @@ async function dragRow(container: HTMLElement, key: string, y: number, check?: (
   await settle();
 }
 
-test("dragging a row's grip moves it where the line shows, with no HTML5 drag", async () => {
+test("Customize Menu… opens Settings > Menus on its menu", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=tab" });
+  await settle();
+  expect(editor(page.container).dataset.menu).toBe("tab");
+  expect(editor(page.container).querySelector(".menus-detail-title")?.textContent).toBe("Tab");
+  await click(editor(page.container).querySelector<HTMLElement>('.menus-list-item[data-menu="terminalSelection"]')!);
+  expect(editor(page.container).dataset.menu).toBe("terminalSelection");
+  page.unmount();
+});
+
+test("the editor draws the whole tree: each open submenu's rows indented under it", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
+  await settle();
+  // More is open; Move and Options are closed until opened.
+  expect(drawn(page.container)).toContain("1:workspace.copyPath");
+  expect(drawn(page.container)).not.toContain("1:palette.moveWorkspaceToTop");
+  await click(action(editor(page.container), "expand"));
+  expect(drawn(page.container)).toContain("1:palette.moveWorkspaceToTop");
+  expect(drawn(page.container)).toContain("2:palette.markWorkspaceUnread");
+  page.unmount();
+});
+
+test("Move to… takes any row to any submenu at any depth, or out to the top level", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
+  await settle();
+  // Out of More to the top level.
+  await moveTo(page.container, "workspace.copyPath", "Top Level");
+  expect(keys(saved(page.provider)?.items)).toContain("workspace.copyPath");
+  expect(keys(folder(saved(page.provider)!.items, "folder:more"))).not.toContain("workspace.copyPath");
+  // A top-level row into Move ▸.
+  await moveTo(page.container, "renameWorkspace", "Move");
+  expect(keys(folder(saved(page.provider)!.items, "folder:move")).at(-1)).toBe("renameWorkspace");
+  // A submenu into a submenu inside another: Move ▸ into More › Options, rows and all.
+  await moveTo(page.container, "folder:move", "More › Options");
+  const options = folder(saved(page.provider)!.items, "folder:options");
+  expect(keys(options)).toContain("folder:move");
+  expect(keys(folder(options!, "folder:move"))).toEqual([
+    "palette.moveWorkspaceToTop",
+    "palette.moveWorkspaceToBottom",
+    "renameWorkspace",
+  ]);
+  expect(keys(saved(page.provider)?.items)).not.toContain("folder:move");
+  page.unmount();
+});
+
+test("a submenu never moves into itself", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
+  await settle();
+  await click(action(row(page.container, "folder:more"), "move-to"));
+  const labels = [...editor(page.container).querySelectorAll("[data-destination]")].map((button) => button.textContent);
+  expect(labels).toContain("Move");
+  expect(labels).not.toContain("More");
+  expect(labels).not.toContain("More › Options");
+  page.unmount();
+});
+
+test("dragging a row onto a submenu's middle puts it in that submenu", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
+  await settle();
+  await dragRow(page.container, "renameWorkspace", rowY(page.container, "folder:move") + 12, () => {
+    expect(row(page.container, "folder:move").hasAttribute("data-drop-into")).toBe(true);
+  });
+  expect(keys(folder(saved(page.provider)!.items, "folder:move")).at(-1)).toBe("renameWorkspace");
+  // The submenu opens to show where it went.
+  expect(drawn(page.container)).toContain("1:renameWorkspace");
+  page.unmount();
+});
+
+test("dragging a row out of a submenu puts it where it is dropped, the gap opening there", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
+  await settle();
+  // Copy Path (in More) dragged above the first row: every row from there down slides one row.
+  await dragRow(page.container, "workspace.copyPath", 102, () => {
+    expect(row(page.container, "renameWorkspace").style.transform).toBe("translateY(24px)");
+    expect(row(page.container, "workspace.copyPath").hasAttribute("data-dragging")).toBe(true);
+  });
+  expect(keys(saved(page.provider)?.items)[0]).toBe("workspace.copyPath");
+  page.unmount();
+});
+
+test("a top-level row drags past others, which slide to open its gap", async () => {
   const page = await renderPage({ path: "/settings/menus?focus=terminalSelection" });
   await settle();
   expect(row(page.container, "copy").getAttribute("draggable")).toBeNull();
-  // Clear Terminal (the last row) dragged above Copy: one drop line, above Copy, while dragging.
   await dragRow(page.container, "clearTerminal", 102, () => {
-    const lines = editor(page.container).querySelectorAll<HTMLElement>("[data-drop-line]");
-    expect(lines.length).toBe(1);
-    expect(lines[0]!.style.transform).toBe("translateY(0px)");
-    expect(row(page.container, "clearTerminal").hasAttribute("data-dragging")).toBe(true);
+    expect(row(page.container, "copy").style.transform).toBe("translateY(24px)");
+    expect(row(page.container, "splitDown").style.transform).toBe("translateY(24px)");
   });
-  expect(lastSaved(page.provider).layout?.top.slice(0, 2)).toEqual(["clearTerminal", "copy"]);
-  expect(editor(page.container).querySelector("[data-drop-line]")).toBeNull();
+  expect(keys(saved(page.provider)?.items).slice(0, 2)).toEqual(["clearTerminal", "copy"]);
   // A row dropped back where it started saves nothing.
   const before = ops(page.provider, SET).length;
   await dragRow(page.container, "paste", rowY(page.container, "paste") + 12);
@@ -147,31 +176,67 @@ test("dragging a row's grip moves it where the line shows, with no HTML5 drag", 
   page.unmount();
 });
 
-test("dragging a row onto the middle of More moves it into More", async () => {
+test("a hidden row stays in place, dimmed, and Show brings it back there", async () => {
   const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
   await settle();
-  const more = rowY(page.container, "folder:more") + 12;
-  await dragRow(page.container, "renameWorkspace", more, () => {
-    expect(row(page.container, "folder:more").hasAttribute("data-drop-into")).toBe(true);
-  });
-  expect(lastSaved(page.provider).layout?.more).toEqual(["renameWorkspace"]);
+  const before = drawn(page.container);
+  await click(action(row(page.container, "workspace.duplicate"), "hide"));
+  expect(saved(page.provider)?.hidden).toEqual(["workspace.duplicate"]);
+  expect(row(page.container, "workspace.duplicate").hasAttribute("data-hidden")).toBe(true);
+  expect(drawn(page.container)).toEqual(before);
+  await click(action(row(page.container, "workspace.duplicate"), "hide"));
+  // Back as the app made it: no layout at all.
+  expect(saved(page.provider)).toBeNull();
+  expect(row(page.container, "workspace.duplicate").hasAttribute("data-hidden")).toBe(false);
   page.unmount();
 });
 
-test("a row of More dragged to the top level lands where it is dropped", async () => {
+test("the person makes a submenu, names it, fills it and deletes it", async () => {
   const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
   await settle();
-  await dragRow(page.container, "workspace.copyPath", 102);
-  expect(lastSaved(page.provider).layout?.top[0]).toBe("workspace.copyPath");
+  await click(action(editor(page.container), "new-submenu"));
+  const made = saved(page.provider)!.items.at(-1) as { key: string; title: string; items: MenuNode[] };
+  expect(made.key.startsWith("group:")).toBe(true);
+  // It opens as a name field.
+  const field = editor(page.container).querySelector<HTMLInputElement>(".menu-rename")!;
+  expect(field).not.toBeNull();
+  await changeValue(field, "Mine");
+  await fire(field, "keydown", { key: "Enter" });
+  expect((saved(page.provider)!.items.at(-1) as { title: string }).title).toBe("Mine");
+  // Rows go into it, a submenu of the app's too.
+  await moveTo(page.container, "renameWorkspace", "Mine");
+  await moveTo(page.container, "folder:move", "Mine");
+  expect(keys(folder(saved(page.provider)!.items, made.key))).toEqual(["renameWorkspace", "folder:move"]);
+  // Deleting it leaves its rows where it was.
+  await click(action(row(page.container, made.key), "delete"));
+  const items = keys(saved(page.provider)?.items);
+  expect(items).not.toContain(made.key);
+  expect(items.slice(-2)).toEqual(["renameWorkspace", "folder:move"]);
+  page.unmount();
+});
+
+test("separators add and go, and Reset brings back the app's menu", async () => {
+  const page = await renderPage({ path: "/settings/menus?focus=terminalSelection" });
+  await settle();
+  const reset = () => action(editor(page.container), "reset");
+  expect(reset().disabled).toBe(true);
+  await click(action(editor(page.container), "add-separator"));
+  expect(saved(page.provider)?.items.at(-1)).toBe("-");
+  expect(reset().disabled).toBe(false);
+  const separator = editor(page.container).querySelector<HTMLElement>(".menu-separator")!;
+  await click(action(separator, "remove"));
+  expect(keys(saved(page.provider)?.items)).toEqual(["copy", "paste", "splitRight", "splitDown", "-", "clearTerminal", "-"]);
+  await click(reset());
+  expect(saved(page.provider)).toBeNull();
   page.unmount();
 });
 
 test("a row button's tooltip names only its action", async () => {
   const page = await renderPage({ path: "/settings/menus?focus=workspaceRow" });
   await settle();
-  const moveToMore = button(row(page.container, "renameWorkspace"), "Move to More");
-  expect(moveToMore.title).toBe("Move to More");
-  expect(moveToMore.getAttribute("aria-label")).toBe("Move to More: Rename Workspace…");
+  const moveToButton = action(row(page.container, "renameWorkspace"), "move-to");
+  expect(moveToButton.title).toBe("Move to…");
+  expect(moveToButton.getAttribute("aria-label")).toBe("Move to…: Rename Workspace…");
   page.unmount();
 });
 

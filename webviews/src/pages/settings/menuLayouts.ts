@@ -1,149 +1,180 @@
 // Settings > Menus: the edits the page makes to a right-click menu's arrangement (Swift
-// `ContextMenuLayout`). The app sends each menu's rows and its arrangement already normalized
-// (every generated top-level row named once), so these edits keep that shape and the page saves
-// the whole layout. What the app draws for a layout is decided in Swift; `view` shows the same:
-// the top level in order, More with the rows moved into it and its own rows that stayed, and each
-// folder's rows that were not moved out.
-import type { ContextMenuState, MenuLayout, MenuRow } from "./ops";
+// `ContextMenuLayout`): the whole menu as a tree, so any row goes anywhere at any depth. A node is a
+// row key, `-` for a separator, or a submenu `{key, title?, items}`: the app's (`folder:<name>`) or
+// the person's (`group:<id>`, with a title). The app sends the tree normalized (every row once,
+// hidden rows kept in place), so these edits keep that shape and the page saves the whole tree.
+import type { ContextMenuState, MenuLayout, MenuNode } from "./ops";
 
 export const SEPARATOR = "-";
 export const MORE = "folder:more";
+export const GROUP_PREFIX = "group:";
 
-/** A row of the editor's top level: a menu row, or a separator at its index in `top`. */
-export type TopItem = { kind: "row"; row: MenuRow; index: number } | { kind: "separator"; index: number };
+/** A node's place: its index in each container from the top level down. */
+export type Path = number[];
 
-export type MenuView = {
-  top: TopItem[];
-  /** More's rows: the ones moved into it, then its generated rows (and folders) that stayed. */
-  more: MenuRow[];
-  /** A folder's rows that stayed in it, by folder key (More's are in `more`). */
-  folders: Map<string, MenuRow[]>;
-  hidden: MenuRow[];
-};
+export type Folder = Extract<MenuNode, object>;
 
-function rowsByKey(menu: ContextMenuState): Map<string, MenuRow> {
-  return new Map(menu.rows.map((row) => [row.key, row]));
+export const isFolder = (node: MenuNode): node is Folder => typeof node === "object";
+export const keyOf = (node: MenuNode): string => (isFolder(node) ? node.key : node);
+export const isGroup = (key: string) => key.startsWith(GROUP_PREFIX);
+
+/** One row the editor draws: the node, where it is, how deep, and whether the menu hides it. */
+export type VisibleRow = { node: MenuNode; path: Path; depth: number; hidden: boolean; parentHidden: boolean };
+
+/** The rows the editor shows, top to bottom: every node, and the rows of each open submenu. */
+export function visibleRows(layout: MenuLayout, open: ReadonlySet<string>): VisibleRow[] {
+  const hidden = new Set(layout.hidden);
+  const rows: VisibleRow[] = [];
+  const walk = (nodes: MenuNode[], prefix: Path, parentHidden: boolean) => {
+    nodes.forEach((node, index) => {
+      const path = [...prefix, index];
+      const isHidden = hidden.has(keyOf(node));
+      rows.push({ node, path, depth: prefix.length, hidden: isHidden, parentHidden });
+      if (isFolder(node) && open.has(node.key)) walk(node.items, path, parentHidden || isHidden);
+    });
+  };
+  walk(layout.items, [], false);
+  return rows;
 }
 
-/** The rows the layout places itself: named at the top level, moved into More, or hidden. */
-function placed(layout: MenuLayout): Set<string> {
-  return new Set([...layout.top.filter((key) => key !== SEPARATOR), ...layout.more, ...layout.hidden]);
+/** The node at `path`, or undefined. */
+export function nodeAt(items: MenuNode[], path: Path): MenuNode | undefined {
+  let nodes = items;
+  let node: MenuNode | undefined;
+  for (const index of path) {
+    node = nodes[index];
+    if (node === undefined) return undefined;
+    nodes = isFolder(node) ? node.items : [];
+  }
+  return node;
 }
 
-export function view(menu: ContextMenuState, layout: MenuLayout): MenuView {
-  const rows = rowsByKey(menu);
-  const taken = placed(layout);
-  const stayed = (home: string) => menu.rows.filter((row) => row.home === home && !taken.has(row.key));
-  const folders = new Map<string, MenuRow[]>();
-  for (const row of menu.rows) if (row.kind === "folder" && row.key !== MORE) folders.set(row.key, stayed(row.key));
-  const top: TopItem[] = layout.top.flatMap((key, index): TopItem[] => {
-    if (key === SEPARATOR) return [{ kind: "separator", index }];
-    const row = rows.get(key);
-    return row ? [{ kind: "row", row, index }] : [];
+/** A deep copy of `items`, so an edit never changes the tree React drew. */
+function copy(items: MenuNode[]): MenuNode[] {
+  return items.map((node) => (isFolder(node) ? { ...node, items: copy(node.items) } : node));
+}
+
+/** The container (a node list) at `parent` in `items`: the top level for `[]`. */
+function container(items: MenuNode[], parent: Path): MenuNode[] | undefined {
+  if (parent.length === 0) return items;
+  const node = nodeAt(items, parent);
+  return node && isFolder(node) ? node.items : undefined;
+}
+
+export const samePath = (a: Path, b: Path) => a.length === b.length && a.every((value, index) => value === b[index]);
+/** Whether `path` is `ancestor` or inside it. */
+export const within = (path: Path, ancestor: Path) =>
+  ancestor.length <= path.length && ancestor.every((value, index) => path[index] === value);
+
+/**
+ * Moves the node at `from` to index `index` of the container at `parent`, as counted before the
+ * move (the node's old place still counts). A submenu never goes into itself.
+ */
+export function move(layout: MenuLayout, from: Path, parent: Path, index: number): MenuLayout {
+  if (within(parent, from)) return layout;
+  const items = copy(layout.items);
+  const source = container(items, from.slice(0, -1));
+  const target = container(items, parent);
+  const at = from[from.length - 1]!;
+  if (!source || !target || source[at] === undefined) return layout;
+  // Mark the drop place, take the node out, then put it at the mark: indices stay as they were.
+  const mark: Folder = { key: "\u0000drop", items: [] };
+  target.splice(Math.max(0, Math.min(index, target.length)), 0, mark);
+  const [node] = source.splice(source === target && target.indexOf(mark) <= at ? at + 1 : at, 1);
+  target.splice(target.indexOf(mark), 1, node!);
+  return { ...layout, items };
+}
+
+/** Moves the node at `path` one place up or down inside its submenu. */
+export function step(layout: MenuLayout, path: Path, by: -1 | 1): MenuLayout {
+  const parent = path.slice(0, -1);
+  const at = path[path.length - 1]!;
+  const siblings = container(layout.items, parent);
+  if (!siblings || at + by < 0 || at + by >= siblings.length) return layout;
+  return move(layout, path, parent, by > 0 ? at + 2 : at - 1);
+}
+
+/** Moves the node at `path` to the end of the submenu at `parent` (`[]`: the top level). */
+export function moveInto(layout: MenuLayout, path: Path, parent: Path): MenuLayout {
+  const target = container(layout.items, parent);
+  return target ? move(layout, path, parent, target.length) : layout;
+}
+
+/** Hides or shows `key` where it is (a hidden submenu hides what it holds). */
+export function toggleHidden(layout: MenuLayout, key: string): MenuLayout {
+  return layout.hidden.includes(key)
+    ? { ...layout, hidden: layout.hidden.filter((item) => item !== key) }
+    : { ...layout, hidden: [...layout.hidden, key] };
+}
+
+/** Adds a separator at the end of the top level. */
+export function addSeparator(layout: MenuLayout): MenuLayout {
+  return { ...layout, items: [...copy(layout.items), SEPARATOR] };
+}
+
+/** Takes out the node at `path` when it is a separator. */
+export function removeSeparator(layout: MenuLayout, path: Path): MenuLayout {
+  if (nodeAt(layout.items, path) !== SEPARATOR) return layout;
+  const items = copy(layout.items);
+  container(items, path.slice(0, -1))!.splice(path[path.length - 1]!, 1);
+  return { ...layout, items };
+}
+
+/** A new submenu of the person's, `title`, at the end of the top level, and its key. */
+export function addGroup(layout: MenuLayout, title: string, id: string): { layout: MenuLayout; key: string } {
+  const key = `${GROUP_PREFIX}${id}`;
+  return { layout: { ...layout, items: [...copy(layout.items), { key, title, items: [] }] }, key };
+}
+
+/** Renames the person's submenu at `path`. */
+export function renameGroup(layout: MenuLayout, path: Path, title: string): MenuLayout {
+  const items = copy(layout.items);
+  const node = nodeAt(items, path);
+  if (!node || !isFolder(node) || !isGroup(node.key)) return layout;
+  node.title = title;
+  return { ...layout, items };
+}
+
+/** Deletes the person's submenu at `path`; what it held takes its place. */
+export function deleteGroup(layout: MenuLayout, path: Path): MenuLayout {
+  const items = copy(layout.items);
+  const node = nodeAt(items, path);
+  if (!node || !isFolder(node) || !isGroup(node.key)) return layout;
+  container(items, path.slice(0, -1))!.splice(path[path.length - 1]!, 1, ...node.items);
+  return { ...layout, hidden: layout.hidden.filter((key) => key !== node.key), items };
+}
+
+/** A submenu a node can move into: its path and the titles that lead to it. */
+export type Destination = { path: Path; trail: string[] };
+
+/**
+ * Every submenu the node at `path` can move into, in menu order, the top level first; a submenu
+ * never into itself or one inside it.
+ */
+export function destinations(layout: MenuLayout, path: Path, title: (node: Folder) => string): Destination[] {
+  const result: Destination[] = [{ path: [], trail: [] }];
+  const walk = (nodes: MenuNode[], prefix: Path, trail: string[]) => {
+    nodes.forEach((node, index) => {
+      const at = [...prefix, index];
+      if (!isFolder(node) || within(at, path)) return;
+      const names = [...trail, title(node)];
+      result.push({ path: at, trail: names });
+      walk(node.items, at, names);
+    });
+  };
+  walk(layout.items, [], []);
+  return result;
+}
+
+const equal = (a: MenuNode[], b: MenuNode[]): boolean =>
+  a.length === b.length &&
+  a.every((node, index) => {
+    const other = b[index]!;
+    if (!isFolder(node) || !isFolder(other)) return node === other;
+    return node.key === other.key && (node.title ?? null) === (other.title ?? null) && equal(node.items, other.items);
   });
-  const more = [...layout.more.flatMap((key) => rows.get(key) ?? []), ...stayed(MORE)];
-  const hidden = layout.hidden.flatMap((key) => rows.get(key) ?? []);
-  return { top, more, folders, hidden };
-}
 
 /** Whether `layout` is the app's own arrangement (Reset has nothing to do). */
 export function isGenerated(menu: ContextMenuState, layout: MenuLayout): boolean {
-  const same = (a: string[], b: string[]) => a.length === b.length && a.every((key, index) => key === b[index]);
-  return same(layout.top, menu.generated.top) && layout.more.length === 0 && layout.hidden.length === 0;
-}
-
-function without(list: string[], key: string): string[] {
-  return list.filter((item) => item !== key);
-}
-
-/** Moves the top-level entry at `from` to `to` (an index in `top` after the move). */
-export function moveTop(layout: MenuLayout, from: number, to: number): MenuLayout {
-  const top = [...layout.top];
-  const [moved] = top.splice(from, 1);
-  if (moved === undefined) return layout;
-  top.splice(Math.max(0, Math.min(to, top.length)), 0, moved);
-  return { ...layout, top };
-}
-
-/**
- * Puts `key` on the top level at `at`; by default just before the top-level row its folder
- * shows as (a row of More lands above More), else at the end. It leaves More and Hidden.
- */
-export function promote(menu: ContextMenuState, layout: MenuLayout, key: string, at?: number): MenuLayout {
-  const rows = rowsByKey(menu);
-  const top = without(layout.top, key);
-  let position = at;
-  if (position === undefined) {
-    let home = rows.get(key)?.home ?? null;
-    while (home !== null && !top.includes(home)) home = rows.get(home)?.home ?? null;
-    position = home === null ? top.length : top.indexOf(home);
-  }
-  top.splice(Math.max(0, Math.min(position, top.length)), 0, key);
-  return { top, more: without(layout.more, key), hidden: without(layout.hidden, key) };
-}
-
-/** Moves `key` into More, after the rows already moved there. */
-export function demote(layout: MenuLayout, key: string): MenuLayout {
-  if (key === MORE) return layout;
-  return {
-    top: without(layout.top, key),
-    more: [...without(layout.more, key), key],
-    hidden: without(layout.hidden, key),
-  };
-}
-
-/** Leaves `key` out of the menu everywhere. */
-export function hide(layout: MenuLayout, key: string): MenuLayout {
-  return { top: without(layout.top, key), more: without(layout.more, key), hidden: [...without(layout.hidden, key), key] };
-}
-
-/**
- * Where a generated top-level row (at `index` of `generated`) goes in `top`, as Swift
- * `ContextMenuLayout.insertion` places a row the layout does not name: after the row it follows
- * in its generated section, else before the row after it there, else after the nearest earlier
- * row, else first.
- */
-function lastWhere(list: string[], test: (key: string) => boolean): string | undefined {
-  for (let index = list.length - 1; index >= 0; index -= 1) if (test(list[index]!)) return list[index];
-  return undefined;
-}
-
-export function insertion(index: number, generated: string[], top: string[]): number {
-  const before = generated.slice(0, index);
-  const after = generated.slice(index + 1);
-  const sectionStart = before.lastIndexOf(SEPARATOR) + 1;
-  const anchor = lastWhere(before.slice(sectionStart), (key) => top.includes(key));
-  if (anchor !== undefined) return top.indexOf(anchor) + 1;
-  const sectionEnd = after.indexOf(SEPARATOR) < 0 ? after.length : after.indexOf(SEPARATOR);
-  const next = after.slice(0, sectionEnd).find((key) => top.includes(key));
-  if (next !== undefined) return top.indexOf(next);
-  const earlier = lastWhere(before, (key) => key !== SEPARATOR && top.includes(key));
-  return earlier === undefined ? 0 : top.indexOf(earlier) + 1;
-}
-
-/**
- * Shows a hidden row again where the app puts it: a top-level row in its generated section
- * (`insertion`), any other row back in its folder.
- */
-export function show(menu: ContextMenuState, layout: MenuLayout, key: string): MenuLayout {
-  const next = { ...layout, hidden: without(layout.hidden, key) };
-  const generated = menu.generated.top;
-  const at = generated.indexOf(key);
-  if (at < 0) return next;
-  const top = [...next.top];
-  top.splice(insertion(at, generated, top), 0, key);
-  return { ...next, top };
-}
-
-/** Adds a separator at `at` in the top level (the end by default). */
-export function addSeparator(layout: MenuLayout, at: number = layout.top.length): MenuLayout {
-  const top = [...layout.top];
-  top.splice(at, 0, SEPARATOR);
-  return { ...layout, top };
-}
-
-/** Removes the top-level entry at `index` when it is a separator. */
-export function removeSeparator(layout: MenuLayout, index: number): MenuLayout {
-  if (layout.top[index] !== SEPARATOR) return layout;
-  return { ...layout, top: layout.top.filter((_, item) => item !== index) };
+  return layout.hidden.length === 0 && equal(layout.items, menu.generated.items);
 }

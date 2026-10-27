@@ -1,6 +1,7 @@
 // Settings > Menus for the dev server, tests and the gallery: three right-click menus as the app
-// sends them (Swift `ContextMenusPageRoute`), with rows in More and in a folder. Not shipped.
-import type { ContextMenuState, ContextMenusHostState, MenuLayout, MenuRow } from "./ops";
+// sends them (Swift `ContextMenusSettingsPage`), each as a tree with submenus, one inside another.
+// Not shipped.
+import type { ContextMenuState, ContextMenusHostState, MenuLayout, MenuNode, MenuRow } from "./ops";
 
 const row = (key: string, title: string, symbol: string | null, home: string | null = null, kind: MenuRow["kind"] = "item"): MenuRow => ({
   key,
@@ -21,24 +22,32 @@ const workspaceRows: MenuRow[] = [
   row("palette.moveWorkspaceToBottom", "Move to Bottom", "arrow.down.to.line", "folder:move"),
   row("moveWorkspaceToGroup", "Move to Group", "square.stack.3d.up", null, "submenu"),
   row("folder:more", "More", "ellipsis.circle", null, "folder"),
-  row("palette.markWorkspaceUnread", "Mark as Unread", "envelope.badge", "folder:more"),
   row("workspace.copyPath", "Copy Path", "doc.on.doc", "folder:more"),
   row("revealWorkspaceInFinder", "Reveal in Finder", "folder", "folder:more"),
-  row("workspace.showResources", "Show Resources", "gauge.with.dots.needle.33percent", "folder:more"),
+  row("folder:options", "Options", "slider.horizontal.3", "folder:more", "folder"),
+  row("palette.markWorkspaceUnread", "Mark as Unread", "envelope.badge", "folder:options"),
+  row("workspace.showResources", "Show Resources", "gauge.with.dots.needle.33percent", "folder:options"),
   row("closeWorkspace", "Close Workspace", "xmark.square"),
 ];
 
-const workspaceTop = [
+const workspaceTree: MenuNode[] = [
   "renameWorkspace",
   "palette.toggleWorkspacePin",
   "palette.workspaceColor",
   "workspace.newBelow",
   "workspace.duplicate",
-  "folder:move",
+  { key: "folder:move", items: ["palette.moveWorkspaceToTop", "palette.moveWorkspaceToBottom"] },
   "-",
   "moveWorkspaceToGroup",
   "-",
-  "folder:more",
+  {
+    key: "folder:more",
+    items: [
+      "workspace.copyPath",
+      "revealWorkspaceInFinder",
+      { key: "folder:options", items: ["palette.markWorkspaceUnread", "workspace.showResources"] },
+    ],
+  },
   "-",
   "closeWorkspace",
 ];
@@ -55,6 +64,19 @@ const tabRows: MenuRow[] = [
   row("closeOtherTabsInPane", "Close Other Tabs", "xmark.square.fill"),
 ];
 
+const tabTree: MenuNode[] = [
+  "newTab.toRight",
+  "-",
+  "reloadTab",
+  "duplicateTab",
+  "palette.toggleTabPin",
+  "-",
+  { key: "folder:more", items: ["renameTab", "moveTabToNewWindow"] },
+  "-",
+  "closeTab",
+  "closeOtherTabsInPane",
+];
+
 const terminalRows: MenuRow[] = [
   row("copy", "Copy", "doc.on.doc"),
   row("paste", "Paste", "doc.on.clipboard"),
@@ -63,8 +85,8 @@ const terminalRows: MenuRow[] = [
   row("clearTerminal", "Clear", "clear"),
 ];
 
-function menu(id: string, title: string, area: string, rows: MenuRow[], top: string[]): ContextMenuState {
-  const generated: MenuLayout = { top, more: [], hidden: [] };
+function menu(id: string, title: string, area: string, rows: MenuRow[], items: MenuNode[]): ContextMenuState {
+  const generated: MenuLayout = { items, hidden: [] };
   return { id, title, area, customized: false, rows, generated, layout: generated };
 }
 
@@ -72,8 +94,8 @@ export function mockContextMenus(): ContextMenusHostState {
   return {
     show_customize_item: true,
     menus: [
-      menu("workspaceRow", "Workspace", "workspace", workspaceRows, workspaceTop),
-      menu("tab", "Tab", "tabs", tabRows, ["newTab.toRight", "-", "reloadTab", "duplicateTab", "palette.toggleTabPin", "-", "folder:more", "-", "closeTab", "closeOtherTabsInPane"]),
+      menu("workspaceRow", "Workspace", "workspace", workspaceRows, workspaceTree),
+      menu("tab", "Tab", "tabs", tabRows, tabTree),
       menu("terminalSelection", "Terminal", "terminal", terminalRows, ["copy", "paste", "-", "splitRight", "splitDown", "-", "clearTerminal"]),
     ],
   };

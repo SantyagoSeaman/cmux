@@ -104,8 +104,13 @@ export type DeviceRow = {
   full_access_help?: string;
 };
 
-/** A right-click menu's arrangement (Swift `ContextMenuLayout`): row keys; `-` is a separator. */
-export type MenuLayout = { top: string[]; more: string[]; hidden: string[] };
+/** One entry of a menu's tree: a row key, `-` for a separator, or a submenu with its rows (the
+ * app's `folder:<name>`, or the person's `group:<id>` with a title). */
+export type MenuNode = string | { key: string; title?: string; items: MenuNode[] };
+
+/** A right-click menu's arrangement (Swift `ContextMenuLayout`): the whole menu as a tree, and
+ * the rows it hides (kept in place). */
+export type MenuLayout = { items: MenuNode[]; hidden: string[] };
 
 /** One row a menu's arrangement can place: an action, a submenu, or a folder (`folder:<name>`). */
 export type MenuRow = {
@@ -128,7 +133,7 @@ export type ContextMenuState = {
   rows: MenuRow[];
   /** The app's own arrangement (what Reset draws). */
   generated: MenuLayout;
-  /** The arrangement drawn now. */
+  /** The arrangement drawn now: every row once, hidden ones in place. */
   layout: MenuLayout;
 };
 

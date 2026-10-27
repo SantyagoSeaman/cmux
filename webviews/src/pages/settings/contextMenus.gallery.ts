@@ -14,9 +14,30 @@ const variant = (focus: string, note: string, menus = base): SettingsPageVariant
   note,
 });
 
+// Copy Path out of More, Rename inside Move ▸, Move ▸ inside More, a submenu of the person's
+// holding Mark as Unread, and Duplicate hidden in place.
 const customized = setMockMenuLayout(base, "workspaceRow", {
-  top: ["workspace.copyPath", "renameWorkspace", "-", "palette.toggleWorkspacePin", "palette.workspaceColor", "workspace.newBelow", "folder:move", "-", "moveWorkspaceToGroup", "-", "folder:more", "-", "closeWorkspace"],
-  more: ["palette.markWorkspaceUnread"],
+  items: [
+    "workspace.copyPath",
+    "palette.toggleWorkspacePin",
+    "palette.workspaceColor",
+    "workspace.newBelow",
+    "workspace.duplicate",
+    { key: "group:mine", title: "Mine", items: ["palette.markWorkspaceUnread"] },
+    "-",
+    "moveWorkspaceToGroup",
+    "-",
+    {
+      key: "folder:more",
+      items: [
+        { key: "folder:move", items: ["renameWorkspace", "palette.moveWorkspaceToTop", "palette.moveWorkspaceToBottom"] },
+        "revealWorkspaceInFinder",
+        { key: "folder:options", items: ["workspace.showResources"] },
+      ],
+    },
+    "-",
+    "closeWorkspace",
+  ],
   hidden: ["workspace.duplicate"],
 });
 
@@ -31,7 +52,7 @@ export default settingsPageEntry({
     generated: variant("workspaceRow", "The Workspace menu as the app makes it: More open beneath its row, Reset off."),
     customized: variant(
       "workspaceRow",
-      "Copy Path promoted out of More to the top, Rename after it, Mark as Unread moved into More, Duplicate hidden; the list marks Workspace as edited.",
+      "Copy Path out of More, Rename inside Move, Move inside More, the person's Mine submenu, Duplicate hidden in place.",
       customized,
     ),
     terminal: variant("terminalSelection", "Customize Menu… from a terminal opens the Terminal menu."),
