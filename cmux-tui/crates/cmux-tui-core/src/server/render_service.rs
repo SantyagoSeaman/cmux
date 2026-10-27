@@ -150,6 +150,98 @@ impl Drop for BudgetedText {
     }
 }
 
+/// A frame payload charged to an outbound byte budget until it drops, as a
+/// `BudgetedText` is for a JSON line: a payload it wrote by the capacity of
+/// its allocation, a shared PTY output chunk by its length.
+pub(super) struct BudgetedBytes {
+    pub(super) bytes: bytes::Bytes,
+    retained_bytes: usize,
+    budget: Arc<OutboundByteBudget>,
+}
+
+impl BudgetedBytes {
+    /// Shares a buffer that already exists (a PTY output chunk, not copied)
+    /// once its length is charged, as the viewer queue counts it
+    /// (surface/attach_tap.rs); a refused chunk is not taken.
+    pub(super) fn share(
+        bytes: &bytes::Bytes,
+        budget: &Arc<OutboundByteBudget>,
+    ) -> std::io::Result<Self> {
+        let retained_bytes = bytes.len();
+        if !budget.try_retain(retained_bytes) {
+            return Err(budget_overflow());
+        }
+        Ok(Self { bytes: bytes.clone(), retained_bytes, budget: budget.clone() })
+    }
+
+    /// The bytes `writer` wrote, as one shared buffer.
+    pub(super) fn finish(mut writer: BudgetedJsonWriter) -> Self {
+        let bytes = std::mem::take(&mut writer.bytes);
+        let retained_bytes = bytes.capacity();
+        if retained_bytes < writer.retained_bytes {
+            writer.budget.release(writer.retained_bytes - retained_bytes);
+        }
+        // The writer's drop releases nothing more: the payload owns the charge.
+        writer.retained_bytes = 0;
+        writer.reservation_bytes = 0;
+        Self { bytes: bytes.into(), retained_bytes, budget: writer.budget.clone() }
+    }
+}
+
+impl Drop for BudgetedBytes {
+    fn drop(&mut self) {
+        self.budget.release(self.retained_bytes);
+    }
+}
+
+pub(super) fn budget_overflow() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::WouldBlock, "global outbound byte budget overflowed")
+}
+
+/// The payload of a frame in the control FIFO: a reply's JSON text, or the
+/// binary body of a `payload: binary` method's reply (crate::binary_body),
+/// whose bytes are not text.
+#[derive(Clone)]
+pub(super) enum FramePayload {
+    Text(Arc<BudgetedText>),
+    Bytes(Arc<BudgetedBytes>),
+}
+
+impl FramePayload {
+    pub(super) fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Bytes(bytes) => &bytes.bytes,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    /// A binary body (the reply frame carries the binary flag).
+    pub(super) fn is_binary(&self) -> bool {
+        matches!(self, Self::Bytes(_))
+    }
+
+    /// The JSON text, for a control line; a binary body has none.
+    pub(super) fn into_text(self) -> std::io::Result<Arc<BudgetedText>> {
+        match self {
+            Self::Text(text) => Ok(text),
+            Self::Bytes(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a binary body is not a line",
+            )),
+        }
+    }
+}
+
+impl From<Arc<BudgetedText>> for FramePayload {
+    fn from(text: Arc<BudgetedText>) -> Self {
+        Self::Text(text)
+    }
+}
+
 pub(super) struct BudgetedJsonWriter {
     pub(super) bytes: Vec<u8>,
     // Total quota charged while this writer is alive. A reserved writer
@@ -381,6 +473,12 @@ impl RenderService {
         value: &T,
     ) -> std::io::Result<Arc<BudgetedText>> {
         self.serialize_control_for(value, None)
+    }
+
+    /// `body`, a binary frame payload, charged to the control budget as a
+    /// reply line is.
+    pub(super) fn control_bytes(&self, body: Vec<u8>) -> std::io::Result<Arc<BudgetedBytes>> {
+        BudgetedBytes::share(&body.into(), &self.control_budget).map(Arc::new)
     }
 
     pub(super) fn serialize_control_for<T: Serialize + ?Sized>(

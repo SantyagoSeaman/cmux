@@ -27,6 +27,7 @@ use super::{
     BoundedOutbound, ClientTransport, FrameStage, MAX_JSON_LINE_BYTES, MessageWriter, QueuedSink,
     RenderService, SinkControl, transport,
 };
+use crate::diagnostics::IpcStats;
 use crate::fs_ops::stream::{self, StreamRequest};
 use crate::fs_ops::{FsError, FsService, frame_command, object_command};
 use crate::mux::Mux;
@@ -80,13 +81,37 @@ pub(super) fn handle(line: &RouteLine<'_>) -> Option<bool> {
         .then(|| mux.frame_principal(client))
         .flatten()
         .map(super::remote_relay::Principal::participant);
-    let reply = answer_request(
-        crate::fs_ops::installed(),
-        owner.is_some(),
-        owner.as_deref().unwrap_or(super::remote_relay::NO_PRINCIPAL),
-        request,
-    );
-    Some(writer.send_control(&reply).is_ok())
+    let service = crate::fs_ops::installed();
+    Some(answer_route(mux.ipc_stats(), writer, service, owner.as_deref(), request))
+}
+
+/// Answers a decoded `fs.*` request on `writer` with `service`, for a
+/// connection whose principal is `owner` (`None`: not allowed). A framed
+/// `fs.write` carries its bytes raw after the line, and a framed `fs.read`
+/// gets them raw (p05-ipc-149).
+fn answer_route(
+    ipc: &IpcStats,
+    writer: &MessageWriter,
+    service: Option<&FsService>,
+    owner: Option<&str>,
+    request: Map<String, Value>,
+) -> bool {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let raw = writer.frame_call().and_then(|call| call.request_bytes());
+    let principal = owner.unwrap_or(super::remote_relay::NO_PRINCIPAL);
+    let reply = match answer_op(service, owner.is_some(), principal, request, raw) {
+        Ok(FsData::Read(reply)) => {
+            let envelope = |data| stream::answer(&id, Ok(data));
+            match super::bulk_reply::answer(ipc, writer, reply, envelope) {
+                super::bulk_reply::BulkData::Sent(sent) => return sent,
+                super::bulk_reply::BulkData::Json(data) => stream::answer(&id, Ok(data)),
+            }
+        }
+        Ok(FsData::Json(data)) => stream::answer(&id, Ok(data)),
+        Err(error) => stream::answer(&id, Err(error)),
+    };
+    // A framed request's reply leaves as its REPLY or ERROR frame.
+    writer.send_reply(&reply).is_ok()
 }
 
 /// True for a trusted local or a remote-entry connection. A poisoned
@@ -121,6 +146,7 @@ pub(super) fn answer_line(
 }
 
 /// The answer to a decoded `fs.*` request (its op is named by `cmd`).
+#[cfg(test)]
 fn answer_request(
     service: Option<&FsService>,
     transport_allowed: bool,
@@ -128,19 +154,52 @@ fn answer_request(
     request: Map<String, Value>,
 ) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let answer = answer_op(service, transport_allowed, owner, request, None);
+    stream::answer(&id, answer.map(FsData::into_json))
+}
+
+/// What one op answers: its `data`, or an `fs.read` answer, whose bytes
+/// go raw to a framed request and as base64 in a line (server/bulk_reply.rs).
+enum FsData {
+    Json(Value),
+    Read(crate::fs_ops::ops::ReadReply),
+}
+
+#[cfg(test)]
+impl FsData {
+    /// The line's `data`, uncounted (tests that answer with no writer).
+    fn into_json(self) -> Value {
+        use crate::binary_body::BulkReply as _;
+        match self {
+            Self::Json(data) => data,
+            Self::Read(reply) => reply.into_json(),
+        }
+    }
+}
+
+/// Runs a decoded `fs.*` request after its transport and stream checks.
+/// `raw` is the bytes of a framed binary `fs.write`.
+fn answer_op(
+    service: Option<&FsService>,
+    transport_allowed: bool,
+    owner: &str,
+    request: Map<String, Value>,
+    raw: Option<&[u8]>,
+) -> Result<FsData, FsError> {
     if !transport_allowed {
-        return stream::answer(&id, Err(FsError::PermissionDenied));
+        return Err(FsError::PermissionDenied);
     }
-    let Some(service) = service else {
-        return stream::answer(&id, Err(FsError::Unavailable));
-    };
+    let service = service.ok_or(FsError::Unavailable)?;
     if request.get("stream").and_then(Value::as_bool) == Some(true) {
-        return stream::answer(
-            &id,
-            Err(FsError::ParamsInvalid("a byte stream needs a link dial of its own".into())),
-        );
+        return Err(FsError::ParamsInvalid("a byte stream needs a link dial of its own".into()));
     }
-    stream::answer(&id, answer_fs_request(service, owner, Value::Object(request)))
+    let command = serde_json::from_value::<Command>(Value::Object(request))
+        .map_err(|error| FsError::ParamsInvalid(error.to_string()))?;
+    match (command, raw) {
+        (Command::Read(params), _) => service.read_reply(params).map(FsData::Read),
+        (Command::Write(params), Some(raw)) => service.write_raw(params, raw).map(FsData::Json),
+        (command, _) => command.run(service, owner).map(FsData::Json),
+    }
 }
 
 /// Runs one `fs-v1` line op on `service`: `request` is the whole frame
@@ -421,3 +480,7 @@ mod tests;
 #[cfg(test)]
 #[path = "fs_stream_tests.rs"]
 mod stream_tests;
+
+#[cfg(test)]
+#[path = "fs_wire_frame_tests.rs"]
+mod frame_tests;

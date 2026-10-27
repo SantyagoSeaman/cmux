@@ -22863,6 +22863,18 @@
         "ty": "uint64",
         "required": true
       },
+      "/data/ipc/base64_encodes": {
+        "ty": "object",
+        "required": true
+      },
+      "/data/ipc/base64_encodes/frames": {
+        "ty": "uint64",
+        "required": true
+      },
+      "/data/ipc/base64_encodes/lines": {
+        "ty": "uint64",
+        "required": true
+      },
       "/data/ipc/parses": {
         "ty": "object",
         "required": true

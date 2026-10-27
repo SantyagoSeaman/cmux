@@ -16,7 +16,9 @@
 use std::fmt;
 
 use cmux_ipc::MAX_FRAME_PAYLOAD;
-use serde_json::{Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::Value;
 
 /// The layout version byte this daemon writes and reads.
 pub(crate) const LAYOUT_VERSION: u8 = 1;
@@ -35,9 +37,13 @@ pub(crate) enum BinaryBodyError {
     /// The body ends before the length its header or meta names.
     Truncated { have: usize, need: usize },
     /// A `<field>_len` that is missing or not a byte count.
+    #[cfg(test)]
     Length { field: &'static str },
     /// Raw bytes the meta does not name.
+    #[cfg(test)]
     Trailing { bytes: usize },
+    /// A meta that is not UTF-8.
+    Utf8 { valid_up_to: usize },
 }
 
 impl fmt::Display for BinaryBodyError {
@@ -53,15 +59,71 @@ impl fmt::Display for BinaryBodyError {
             Self::Truncated { have, need } => {
                 write!(f, "binary body has {have} bytes where {need} are named")
             }
+            #[cfg(test)]
             Self::Length { field } => write!(f, "binary body meta has no byte count {field}"),
+            #[cfg(test)]
             Self::Trailing { bytes } => {
                 write!(f, "binary body has {bytes} bytes its meta does not name")
+            }
+            Self::Utf8 { valid_up_to } => {
+                write!(f, "binary body meta is not UTF-8 after byte {valid_up_to}")
             }
         }
     }
 }
 
 impl std::error::Error for BinaryBodyError {}
+
+impl BinaryBodyError {
+    /// A stable name of the failure, for logs and counters.
+    pub(crate) fn reason(&self) -> &'static str {
+        match self {
+            Self::Meta(_) => "meta",
+            Self::Oversize { .. } => "oversize",
+            Self::Layout { .. } => "layout",
+            Self::Truncated { .. } => "truncated",
+            #[cfg(test)]
+            Self::Length { .. } => "length",
+            #[cfg(test)]
+            Self::Trailing { .. } => "trailing",
+            Self::Utf8 { .. } => "utf8",
+        }
+    }
+}
+
+/// A reply whose `data` carries bulk bytes, in its two forms: the JSON line,
+/// the bytes base64 text, and the binary body, the same fields with the
+/// bytes raw. Both come from one typed value, so they cannot drift.
+pub(crate) trait BulkReply {
+    /// The line's `data`: the bytes as base64.
+    fn into_json(self) -> Value;
+
+    /// The binary body's `data`: the line's `data` without its base64
+    /// fields, with each one's decoded length as `<field>_len` where the
+    /// field was; then those bytes, in the order the meta names them.
+    fn body_parts(&self) -> (Value, Vec<&[u8]>);
+}
+
+/// A request body of a `payload: binary` method split without a parse: its
+/// meta, the request's JSON line, and the range of the raw bytes after it.
+pub(crate) fn split(body: &[u8]) -> Result<(&str, std::ops::Range<usize>), BinaryBodyError> {
+    let (&version, rest) =
+        body.split_first().ok_or(BinaryBodyError::Truncated { have: 0, need: HEADER_BYTES })?;
+    if version != LAYOUT_VERSION {
+        return Err(BinaryBodyError::Layout { version });
+    }
+    let (meta_len, rest) = rest
+        .split_first_chunk::<4>()
+        .ok_or(BinaryBodyError::Truncated { have: body.len(), need: HEADER_BYTES })?;
+    let meta_len = usize::try_from(u32::from_le_bytes(*meta_len)).unwrap_or(usize::MAX);
+    let meta = rest.get(..meta_len).ok_or(BinaryBodyError::Truncated {
+        have: body.len(),
+        need: HEADER_BYTES.saturating_add(meta_len),
+    })?;
+    let meta = std::str::from_utf8(meta)
+        .map_err(|error| BinaryBodyError::Utf8 { valid_up_to: error.valid_up_to() })?;
+    Ok((meta, HEADER_BYTES + meta_len..body.len()))
+}
 
 /// `meta` and `raw` as one body. `meta` must be a JSON object.
 pub(crate) fn encode(meta: &Value, raw: &[&[u8]]) -> Result<Vec<u8>, BinaryBodyError> {
@@ -88,13 +150,16 @@ pub(crate) fn encode(meta: &Value, raw: &[&[u8]]) -> Result<Vec<u8>, BinaryBodyE
     Ok(body)
 }
 
-/// A body read back: its meta object and the raw bytes still unread.
+/// A body read back: its meta object and the raw bytes still unread. The
+/// daemon reads request bodies with [`split`]; tests read reply bodies.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct BinaryBody<'a> {
     pub(crate) meta: Map<String, Value>,
     raw: &'a [u8],
 }
 
+#[cfg(test)]
 impl<'a> BinaryBody<'a> {
     /// Splits `body` into its meta and raw bytes; nothing is copied but the
     /// meta's parse.
@@ -147,7 +212,15 @@ impl<'a> BinaryBody<'a> {
     }
 }
 
+/// `reply`'s binary body with no envelope: its `data` meta, then its bytes.
+#[cfg(test)]
+pub(crate) fn body_of(reply: &impl BulkReply) -> Vec<u8> {
+    let (meta, raw) = reply.body_parts();
+    encode(&meta, &raw).unwrap_or_default()
+}
+
 /// Removes the byte count `field` from `meta`.
+#[cfg(test)]
 pub(crate) fn take_len(
     meta: &mut Map<String, Value>,
     field: &'static str,

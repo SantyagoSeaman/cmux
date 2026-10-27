@@ -236,6 +236,40 @@ until it holds `4 + meta_len + data_len + pending_len` bytes, and then has the
 whole event. A frame that would pass the 32 MiB payload limit is not built;
 that event goes as its JSON line.
 
+#### Binary request and reply bodies (`payload: binary`)
+
+The commands whose bytes are bulk, `terminal-history`, `fs.read`,
+`fs.write` and `agent-session-media`, are `payload: binary` with
+`layout_version` 1. A REQUEST frame of one sets the binary call flag (a
+REQUEST without it, or a JSON method's with it, is `bad_message`
+`flags_refused`), and its payload is:
+
+| Bytes | Field | Notes |
+| --- | --- | --- |
+| 0 | layout | `1` |
+| 1-4 | meta_len | u32 little endian |
+| 5.. | meta | one UTF-8 JSON object, `meta_len` bytes |
+| then | raw | the bytes the meta names |
+
+A request's meta is its JSON line. Only `fs.write` has raw bytes: the file's
+bytes, sent in place of `text` or `bytes_base64` (a meta with either is
+`params.invalid`). Raw bytes on another method, another layout or a meta that
+is not UTF-8 closes the connection with `bad_message` `bad_binary_body`.
+
+A successful reply is a REPLY frame with the binary flag in the same layout:
+its meta is the reply line (`id` when the request had one, `ok`, `data`)
+whose `data` has each base64 field replaced by its decoded length, and raw
+is those bytes in the order the meta names them. `terminal-history` gives
+each page `data_len` in place of `data`, the page records raw in page
+order; `fs.read` gives `data_len` in place of `text` or `bytes_base64`
+(`encoding` still names the field the line uses); `agent-session-media`
+gives `data_len` in place of `data`. Putting the bytes back as base64 (or
+as UTF-8 text for `encoding: "utf-8"`) gives the line byte for byte. An
+error reply is the JSON ERROR frame of its line, without the binary flag.
+The lines of these commands are unchanged. `server-stats` `ipc`
+`base64_encodes` counts the replies that base64-encoded their bytes by the
+transport of their request; a framed request of these commands never does.
+
 Golden vectors for every kind, one mixed stream and each bad-message case are
 in `spec/fixtures/ipc-frames` with a `manifest.json` that describes them in
 plain fields. Every implementation decodes them the same way.

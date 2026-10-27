@@ -24,6 +24,7 @@ use super::BoundedOutboundState;
 use super::BudgetedText;
 use super::ClientStreams;
 use super::ControlOutbound;
+use super::FramePayload;
 use super::OutboundItem;
 use super::OutboundStream;
 use super::SpaceWoken;
@@ -82,7 +83,7 @@ impl RegularOutbound {
     /// The item written whole: the line, or the frame with all its payload.
     fn whole_item(&self) -> OutboundItem {
         match self.frame {
-            Some(header) => OutboundItem::Frame(header, self.text.clone()),
+            Some(header) => OutboundItem::Frame(header, FramePayload::Text(self.text.clone())),
             None => OutboundItem::Text(self.text.clone()),
         }
     }

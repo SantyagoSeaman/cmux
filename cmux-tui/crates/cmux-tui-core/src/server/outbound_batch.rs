@@ -151,8 +151,8 @@ fn write_gathered<W: Write + ?Sized>(
     for item in items {
         let (first, second): (&[u8], &[u8]) = match item {
             OutboundItem::Text(text) => (text.as_bytes(), b"\n"),
-            OutboundItem::Frame(_, text) => {
-                (headers.next().ok_or(ErrorKind::InvalidData)?, text.as_bytes())
+            OutboundItem::Frame(_, payload) => {
+                (headers.next().ok_or(ErrorKind::InvalidData)?, payload.as_bytes())
             }
             OutboundItem::Chunk { text, range, .. } => (
                 headers.next().ok_or(ErrorKind::InvalidData)?,

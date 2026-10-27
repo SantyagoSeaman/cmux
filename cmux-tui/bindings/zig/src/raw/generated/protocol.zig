@@ -7,7 +7,7 @@ const client_runtime = @import("../client.zig");
 
 pub const schema_version: u16 = 2;
 pub const mux_protocol: u16 = 12;
-pub const ir_sha256 = "5739101a2a1f12a08327e6d4e67314a7c13e6f450f88de4362e39eec5338716c";
+pub const ir_sha256 = "1791aad57368e3abf55d437adfc92f3cd0552133b773513a900f62d479788f47";
 
 pub const AccessRequestKind = enum {
     file,
@@ -2815,12 +2815,18 @@ pub const ServerStatsHistogram = struct {
 
 pub const ServerStatsIpc = struct {
     bad_message: u64,
+    base64_encodes: ServerStatsIpcBase64Encodes,
     parses: ServerStatsIpcParses,
     received: []const ServerStatsIpcKind,
     sent: []const ServerStatsIpcKind,
     sequence_depth: ServerStatsHistogram,
     streams: ServerStatsIpcStreams,
     writes: ServerStatsIpcWrites,
+};
+
+pub const ServerStatsIpcBase64Encodes = struct {
+    frames: u64,
+    lines: u64,
 };
 
 pub const ServerStatsIpcKind = struct {

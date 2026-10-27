@@ -690,8 +690,8 @@ def _runtime_type_shape(rust_type: str) -> str:
         "f64": "float64",
         "Value": "opaque-json",
         "LayoutRequest": "declarative-layout",
-        # loopback_forward.rs: a base64 string, decoded while the line parses.
-        "Base64Frame": "string",
+        # loopback_frames.rs: a base64 string, decoded while the line parses.
+        "DataPayload": "string",
         "SurfaceId": "uint64",
         "PaneId": "uint64",
         "SplitId": "uint64",

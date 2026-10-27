@@ -14,7 +14,7 @@
 namespace cmux::raw {
 
 inline constexpr std::uint32_t kMuxProtocolVersion = 12U;
-inline constexpr std::string_view kProtocolIrSha256 = "5739101a2a1f12a08327e6d4e67314a7c13e6f450f88de4362e39eec5338716c";
+inline constexpr std::string_view kProtocolIrSha256 = "1791aad57368e3abf55d437adfc92f3cd0552133b773513a900f62d479788f47";
 
 enum class AccessRequestKind;
 struct AccessRequestPending;
@@ -229,6 +229,7 @@ struct ServerStatsHangRecord;
 struct ServerStatsHangs;
 struct ServerStatsHistogram;
 struct ServerStatsIpc;
+struct ServerStatsIpcBase64Encodes;
 struct ServerStatsIpcKind;
 struct ServerStatsIpcParse;
 struct ServerStatsIpcParses;
@@ -6413,6 +6414,12 @@ struct ServerStatsHistogram {
     friend bool operator==(const ServerStatsHistogram&, const ServerStatsHistogram&) = default;
 };
 
+struct ServerStatsIpcBase64Encodes {
+    std::uint64_t frames{};
+    std::uint64_t lines{};
+    friend bool operator==(const ServerStatsIpcBase64Encodes&, const ServerStatsIpcBase64Encodes&) = default;
+};
+
 struct ServerStatsIpcKind {
     std::uint64_t bytes{};
     std::string kind{};
@@ -6450,6 +6457,7 @@ struct ServerStatsIpcWrites {
 
 struct ServerStatsIpc {
     std::uint64_t bad_message{};
+    ServerStatsIpcBase64Encodes base64_encodes{};
     ServerStatsIpcParses parses{};
     std::vector<ServerStatsIpcKind> received{};
     std::vector<ServerStatsIpcKind> sent{};
@@ -9099,6 +9107,12 @@ template <>
 struct Codec<ServerStatsIpc> {
     static Result<Json> encode(const ServerStatsIpc& value);
     static Result<ServerStatsIpc> decode(const Json& value);
+};
+
+template <>
+struct Codec<ServerStatsIpcBase64Encodes> {
+    static Result<Json> encode(const ServerStatsIpcBase64Encodes& value);
+    static Result<ServerStatsIpcBase64Encodes> decode(const Json& value);
 };
 
 template <>

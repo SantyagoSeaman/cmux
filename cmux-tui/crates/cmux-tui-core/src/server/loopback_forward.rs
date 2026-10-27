@@ -589,8 +589,8 @@ impl ForwardStream {
 
 /// Target to client. Reads only while the client granted credit, and the
 /// outbound stream holds at most two frames, so memory stays bounded.
-fn run_reader(stream: Arc<ForwardStream>, forwarder: Arc<Mux>) {
-    let forwarder = &forwarder.control_clients.loopback;
+fn run_reader(stream: Arc<ForwardStream>, mux: Arc<Mux>) {
+    let forwarder = &mux.control_clients.loopback;
     let Ok(mut socket) = stream.tcp.try_clone() else {
         stream.fail(forwarder, "internal", true);
         return;
@@ -637,6 +637,9 @@ fn run_reader(stream: Arc<ForwardStream>, forwarder: Arc<Mux>) {
         };
         let Some(bytes) = buffer.get(..read) else { return };
         let data = LoopbackData { stream: stream.id, offset, bytes };
+        // A forward rides JSON lines until its opener is framed
+        // (p05-ipc-101): its event is a base64 encode on a line.
+        mux.ipc_stats().base64_encoded(crate::diagnostics::IpcTransport::Lines);
         if stream.event(&data.json()).is_err() {
             stream.fail(forwarder, "client-gone", false);
             return;

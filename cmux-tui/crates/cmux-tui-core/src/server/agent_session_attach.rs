@@ -756,12 +756,25 @@ fn run_on_worker(
     let worker_writer = writer.clone();
     let worker_id = id.clone();
     let worker = attachment.clone();
+    let ipc = mux.ipc_stats().clone();
     // The call waits on acpmux (`request_wait.rs`).
     let posted = mux.post_request_wait(move || {
-        let result = call(&worker, command);
+        let result = match command {
+            AgentSessionCommand::Media(MediaParams { path, .. }) => {
+                media::media(&worker, path).map(CallAnswer::Media)
+            }
+            command => call(&worker, command).map(CallAnswer::Json),
+        };
         worker.calls.fetch_sub(1, Ordering::AcqRel);
         match result {
-            Ok(data) => ok(&worker_writer, worker_id, data),
+            Ok(CallAnswer::Json(data)) => ok(&worker_writer, worker_id, data),
+            Ok(CallAnswer::Media(reply)) => {
+                let envelope = |data| super::bulk_reply::ok_envelope(worker_id.clone(), data);
+                match super::bulk_reply::answer(&ipc, &worker_writer, reply, envelope) {
+                    super::bulk_reply::BulkData::Sent(sent) => sent,
+                    super::bulk_reply::BulkData::Json(data) => ok(&worker_writer, worker_id, data),
+                }
+            }
             Err(refusal) => refuse(&worker_writer, worker_id, refusal),
         };
     });
@@ -772,6 +785,15 @@ fn run_on_worker(
     true
 }
 
+/// What a worker call answers: a JSON `data`, or an image (a binary body
+/// on a framed request, base64 in its line otherwise).
+enum CallAnswer {
+    Json(Value),
+    Media(media::MediaReply),
+}
+
+/// Runs one command on its worker. `agent-session-media` is answered by the
+/// worker itself ([`CallAnswer::Media`]).
 fn call(attachment: &Attachment, command: AgentSessionCommand) -> Result<Value, Refusal> {
     let session = attachment.session.as_str();
     match command {
@@ -838,10 +860,9 @@ fn call(attachment: &Attachment, command: AgentSessionCommand) -> Result<Value, 
             answered.map_err(Refusal::of)
         }
         AgentSessionCommand::Children(_) => agent_session_children::list(attachment),
-        AgentSessionCommand::Media(MediaParams { path, .. }) => {
-            media::media(attachment, path).map(media::MediaReply::into_json)
-        }
-        AgentSessionCommand::Cancel(_) | AgentSessionCommand::Detach(_) => Ok(json!({})),
+        AgentSessionCommand::Media(_)
+        | AgentSessionCommand::Cancel(_)
+        | AgentSessionCommand::Detach(_) => Ok(json!({})),
     }
 }
 

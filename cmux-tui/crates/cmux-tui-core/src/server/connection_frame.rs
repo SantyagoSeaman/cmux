@@ -477,6 +477,14 @@ pub(super) fn handle_request_with_cancellation(
     {
         return span.reply(|| send_request_error(writer, id, "server lifecycle is not ready"));
     }
+    // A framed `terminal-history` (frames are local only) gets its pages
+    // raw; every other one takes the dispatch, its remote gate included.
+    if writer.answers_binary()
+        && let Command::TerminalHistory(params) = cmd
+    {
+        let reply = terminal_history::history(mux, params);
+        return span.reply(|| answer_terminal_history(mux, client, id, reply, writer));
+    }
     if let Command::VtState(terminal_io_wire::VtStateParams { surface }) = &cmd {
         let reply = vt_state_command_reply(mux, id.as_ref(), *surface, writer);
         return span.reply(|| {
@@ -575,6 +583,28 @@ fn start_sized_browser_attach(
         },
     );
     posted.is_ok() || send_request_error(writer, id, "the daemon is shutting down")
+}
+
+/// Answers a framed `terminal-history` with its binary body (bulk_reply.rs),
+/// or with the ERROR frame of its line.
+fn answer_terminal_history(
+    mux: &Mux,
+    client: u64,
+    id: Option<Value>,
+    reply: anyhow::Result<terminal_history::HistoryReply>,
+    writer: &MessageWriter,
+) -> bool {
+    let data = match reply {
+        Ok(reply) => {
+            let envelope = |data| bulk_reply::ok_envelope(id.clone(), data);
+            match bulk_reply::answer(mux.ipc_stats(), writer, reply, envelope) {
+                bulk_reply::BulkData::Sent(sent) => return sent,
+                bulk_reply::BulkData::Json(data) => Ok(data),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    send_command_result(mux, client, id, data, writer).1
 }
 
 /// Answers request `id` with a command's `result`: whether it succeeded,

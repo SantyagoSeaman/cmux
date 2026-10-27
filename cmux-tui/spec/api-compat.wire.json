@@ -185,7 +185,11 @@
       },
       "agent-session-media": {
         "id": 4872,
-        "priority": "control"
+        "priority": "control",
+        "layout": {
+          "version": 1,
+          "fingerprint": "471703494a0a931e"
+        }
       },
       "agent-session-observe": {
         "id": 4865,
@@ -789,7 +793,11 @@
       },
       "fs.read": {
         "id": 5634,
-        "priority": "bulk"
+        "priority": "bulk",
+        "layout": {
+          "version": 1,
+          "fingerprint": "48fbe69871477c51"
+        }
       },
       "fs.rename": {
         "id": 5637,
@@ -801,7 +809,11 @@
       },
       "fs.write": {
         "id": 5635,
-        "priority": "control"
+        "priority": "control",
+        "layout": {
+          "version": 1,
+          "fingerprint": "2fb4961c029ad490"
+        }
       },
       "get-blob": {
         "id": 4353,
@@ -1425,7 +1437,11 @@
       },
       "terminal-history": {
         "id": 792,
-        "priority": "bulk"
+        "priority": "bulk",
+        "layout": {
+          "version": 1,
+          "fingerprint": "4b73393eb2a1de11"
+        }
       },
       "terminal-ports": {
         "id": 1033,

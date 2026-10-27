@@ -1256,7 +1256,10 @@ hears only its page; page_access_tests pass. Test: RUST(cmd_subscribe); RUST(pag
 core:fs_ops/ops.rs, core:server/terminal_history.rs, app:CmuxNextDaemon/Loopback/LoopbackStream.swift. Change: binary
 stream frames (SHARED_BUFFER only if 115 landed) instead of base64; LoopbackStream uses a bounded credit queue.
 Acceptance: 0 base64 encodes on frame connections for these ops (counter); byte equality; no `.unbounded` in
-Loopback/. Test: RUST(loopback_forward); RUST(fs_wire); SWIFT(LoopbackForwardTests).
+Loopback/. Test: RUST(loopback_forward); RUST(fs_wire); SWIFT(LoopbackForwardTests). Depends on p05-ipc-101 for
+loopback: its OUTPUT/INPUT stream frames need the forward's framed opener, so until 101 lands loopback-data stays
+a line (counted under `ipc.base64_encodes.lines`) and only terminal-history, fs.read, fs.write and
+agent-session-media are `payload: binary`.
 
 **p05-ipc-150 echo-path QoS.** Files: core:terminal_host.rs, core:holder_runtime/service.rs, core:surface.rs,
 core:journal_ingress.rs, cmux-tui/crates/cmux-holder/src/link.rs, threading-model.md. Change: QoS for

@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 5739101a2a1f12a08327e6d4e67314a7c13e6f450f88de4362e39eec5338716c. */
+/* cmux-tui mux protocol 12, IR 1791aad57368e3abf55d437adfc92f3cd0552133b773513a900f62d479788f47. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "5739101a2a1f12a08327e6d4e67314a7c13e6f450f88de4362e39eec5338716c" as const;
+export const SDK_IR_SHA256 = "1791aad57368e3abf55d437adfc92f3cd0552133b773513a900f62d479788f47" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -9759,6 +9759,7 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         }
       },
       "name": {
+        "max_bytes": 1024,
         "nullable": false,
         "presence": "required",
         "type": {
@@ -9770,6 +9771,7 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         "constraints": [
           "s<size>-m<mtime ms>; set on the entry a write, mkdir or rename answers."
         ],
+        "max_bytes": 64,
         "nullable": false,
         "omit_nil": true,
         "presence": "optional",
@@ -9930,6 +9932,7 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         "additional_properties": false,
         "fields": {
           "bytes_base64": {
+            "max_bytes": 22369624,
             "nullable": false,
             "presence": "required",
             "type": {
@@ -9984,6 +9987,7 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
             }
           },
           "text": {
+            "max_bytes": 16777216,
             "nullable": false,
             "presence": "required",
             "type": {
@@ -13881,6 +13885,14 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
           "name": "uint64"
         }
       },
+      "base64_encodes": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "ref",
+          "name": "ServerStatsIpcBase64Encodes"
+        }
+      },
       "parses": {
         "nullable": false,
         "presence": "required",
@@ -13933,6 +13945,31 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         "type": {
           "kind": "ref",
           "name": "ServerStatsIpcWrites"
+        }
+      }
+    },
+    "kind": "object"
+  },
+  "ServerStatsIpcBase64Encodes": {
+    "additional_properties": false,
+    "constraints": [
+      "Replies of the bulk-byte methods (terminal-history, fs.read, agent-session-media) and loopback-data events whose bytes were base64-encoded into JSON, by the transport of their request: lines for a JSON line, frames for a REQUEST frame. A framed request of a payload: binary method gets its bytes raw in a binary body, so it never counts."
+    ],
+    "fields": {
+      "frames": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
+        }
+      },
+      "lines": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
         }
       }
     },
@@ -17180,6 +17217,7 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
     ],
     "fields": {
       "data": {
+        "max_bytes": 33554432,
         "nullable": false,
         "presence": "required",
         "type": {
@@ -17245,7 +17283,8 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
             "kind": "ref",
             "name": "TerminalHistoryPage"
           },
-          "kind": "array"
+          "kind": "array",
+          "max_items": 1024
         }
       },
       "snapshot_version": {
@@ -19408,6 +19447,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
       "fields": {
         "path": {
           "description": "An image the session wrote: png, jpg, jpeg, gif or webp, at most 4096 bytes.",
+          "max_bytes": 4096,
           "nullable": false,
           "presence": "required",
           "type": {
@@ -19432,6 +19472,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
       "fields": {
         "data": {
           "description": "The image bytes in standard base64, at most 10 MiB decoded.",
+          "max_bytes": 13981016,
           "nullable": false,
           "presence": "required",
           "type": {
@@ -19441,6 +19482,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
         },
         "mimeType": {
           "description": "The image type acpmux reported.",
+          "max_bytes": 255,
           "nullable": true,
           "presence": "required",
           "type": {
@@ -27113,6 +27155,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
           }
         },
         "path": {
+          "max_bytes": 4096,
           "nullable": false,
           "presence": "required",
           "type": {
@@ -27184,6 +27227,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
       "additional_properties": false,
       "fields": {
         "bytes_base64": {
+          "max_bytes": 16777216,
           "nullable": true,
           "presence": "optional",
           "type": {
@@ -27195,6 +27239,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
           "constraints": [
             "The revision replace and append require."
           ],
+          "max_bytes": 64,
           "nullable": true,
           "presence": "optional",
           "type": {
@@ -27206,6 +27251,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
           "constraints": [
             "create, overwrite, replace or append."
           ],
+          "max_bytes": 16,
           "nullable": false,
           "presence": "required",
           "type": {
@@ -27214,6 +27260,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
           }
         },
         "path": {
+          "max_bytes": 4096,
           "nullable": false,
           "presence": "required",
           "type": {
@@ -27236,6 +27283,7 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
           "constraints": [
             "Exactly one of text and bytes_base64."
           ],
+          "max_bytes": 12582912,
           "nullable": true,
           "presence": "optional",
           "type": {

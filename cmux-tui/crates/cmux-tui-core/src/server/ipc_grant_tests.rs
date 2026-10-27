@@ -71,12 +71,11 @@ impl Connection {
         // The scheduler may answer on a worker: wait for that reply.
         loop {
             match self.outbound.recv() {
-                Some(
-                    OutboundItem::Text(text)
-                    | OutboundItem::Frame(_, text)
-                    | OutboundItem::Chunk { text, .. },
-                ) => {
+                Some(OutboundItem::Text(text) | OutboundItem::Chunk { text, .. }) => {
                     return serde_json::from_str(&text.to_string()).unwrap();
+                }
+                Some(OutboundItem::Frame(_, payload)) => {
+                    return serde_json::from_slice(payload.as_bytes()).unwrap();
                 }
                 Some(OutboundItem::Flush(flushed)) => drop(flushed.send(())),
                 None => panic!("the connection closed without a reply"),

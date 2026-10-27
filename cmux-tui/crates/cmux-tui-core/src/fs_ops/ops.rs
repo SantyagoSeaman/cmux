@@ -20,7 +20,7 @@ use super::listing::{Filter, Listings, MAX_BATCH, Sort, sort_entries};
 use super::resolve::{Resolved, Roots};
 use super::sys;
 use super::write::{PendingWrite, WriteMode, append, remove_tree};
-use crate::binary_body::{self, BinaryBody, BinaryBodyError};
+use crate::binary_body::BulkReply;
 
 /// Largest `fs.read` answer (decision D2): `max_bytes` above this is cut
 /// and answered with `truncated: true`.
@@ -193,6 +193,7 @@ impl FsService {
         Ok((entries, revision))
     }
 
+    /// `fs.read` as its line (the remote entry's `fs-v1` dials).
     pub(crate) fn read(&self, params: ReadParams) -> Result<Value, FsError> {
         self.read_reply(params).map(ReadReply::into_json)
     }
@@ -252,31 +253,17 @@ impl FsService {
         self.write_data(params, data)
     }
 
-    /// `fs.write` from its binary body (crate::binary_body): the meta is the
-    /// params without `text` and `bytes_base64`, plus `data_len`; raw is the
-    /// bytes, written as they came, never through base64.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "fs-v1 answers on frames once its methods carry `payload: binary`"
-        )
-    )]
-    pub(crate) fn write_body(&self, body: &[u8]) -> Result<Value, FsError> {
-        let invalid = |error: BinaryBodyError| FsError::ParamsInvalid(error.to_string());
-        let mut body = BinaryBody::decode(body).map_err(invalid)?;
-        let data = body.take("data_len").map_err(invalid)?;
-        if data.len() > MAX_WRITE_BYTES {
-            return Err(FsError::TooLarge { total: Some(data.len() as u64) });
-        }
-        let data = data.to_vec();
-        let params: WriteParams =
-            serde_json::from_value(Value::Object(body.finish().map_err(invalid)?))
-                .map_err(|error| FsError::ParamsInvalid(error.to_string()))?;
+    /// `fs.write` of a binary body (crate::binary_body): `params` is its
+    /// meta, without `text` and `bytes_base64`; `data` the raw bytes after
+    /// it, written as they came, never through base64.
+    pub(crate) fn write_raw(&self, params: WriteParams, data: &[u8]) -> Result<Value, FsError> {
         if params.text.is_some() || params.bytes_base64.is_some() {
             return Err(FsError::ParamsInvalid("a binary fs.write carries its bytes raw".into()));
         }
-        self.write_data(params, data)
+        if data.len() > MAX_WRITE_BYTES {
+            return Err(FsError::TooLarge { total: Some(data.len() as u64) });
+        }
+        self.write_data(params, data.to_vec())
     }
 
     /// Writes `data` as `params` says; its `text` and `bytes_base64` were
@@ -374,10 +361,10 @@ pub(crate) struct ReadReply {
     size: u64,
 }
 
-impl ReadReply {
-    /// The line: `{text, encoding: "utf-8"}` or `{bytes_base64, encoding:
-    /// "base64"}`, with `truncated` and `size`.
-    pub(crate) fn into_json(self) -> Value {
+impl BulkReply for ReadReply {
+    /// `{text, encoding: "utf-8"}` or `{bytes_base64, encoding: "base64"}`,
+    /// with `truncated` and `size`.
+    fn into_json(self) -> Value {
         let Self { data, truncated, size } = self;
         match data {
             ReadData::Text(text) => {
@@ -392,29 +379,21 @@ impl ReadReply {
         }
     }
 
-    /// The binary body: the line's fields but the bytes, plus `data_len`,
-    /// then the bytes raw. `encoding` still names the field the line uses,
-    /// so a reader rebuilds the line byte for byte.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "fs-v1 answers on frames once its methods carry `payload: binary`"
-        )
-    )]
-    pub(crate) fn into_body(self) -> Result<Vec<u8>, BinaryBodyError> {
-        let Self { data, truncated, size } = self;
-        let (encoding, bytes) = match &data {
+    /// The line's fields but the bytes, plus `data_len`, then the bytes
+    /// raw. `encoding` still names the field the line uses, so a reader
+    /// rebuilds the line byte for byte.
+    fn body_parts(&self) -> (Value, Vec<&[u8]>) {
+        let (encoding, bytes) = match &self.data {
             ReadData::Text(text) => ("utf-8", text.as_bytes()),
             ReadData::Bytes(bytes) => ("base64", bytes.as_slice()),
         };
         let meta = json!({
-            "truncated": truncated,
-            "size": size,
+            "truncated": self.truncated,
+            "size": self.size,
             "encoding": encoding,
             "data_len": bytes.len(),
         });
-        binary_body::encode(&meta, &[bytes])
+        (meta, vec![bytes])
     }
 }
 

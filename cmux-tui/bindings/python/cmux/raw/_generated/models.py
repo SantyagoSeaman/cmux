@@ -2105,12 +2105,20 @@ class ServerStatsHistogram:
 class ServerStatsIpc:
     __cmux_schema_path__: ClassVar[str] = 'types/ServerStatsIpc'
     bad_message: int
+    base64_encodes: ServerStatsIpcBase64Encodes
     parses: ServerStatsIpcParses
     received: List[ServerStatsIpcKind]
     sent: List[ServerStatsIpcKind]
     sequence_depth: ServerStatsHistogram
     streams: ServerStatsIpcStreams
     writes: ServerStatsIpcWrites
+
+
+@dataclass(frozen=True)
+class ServerStatsIpcBase64Encodes:
+    __cmux_schema_path__: ClassVar[str] = 'types/ServerStatsIpcBase64Encodes'
+    frames: int
+    lines: int
 
 
 @dataclass(frozen=True)
@@ -7934,6 +7942,7 @@ __all__ = [
     'ServerStatsHangs',
     'ServerStatsHistogram',
     'ServerStatsIpc',
+    'ServerStatsIpcBase64Encodes',
     'ServerStatsIpcKind',
     'ServerStatsIpcParse',
     'ServerStatsIpcParses',

@@ -866,7 +866,7 @@ pub(super) fn handle_command_with_cancellation(
         Command::SnapshotRequest(params) => {
             cmd_terminal_io::snapshot_request(mux, client, writer, params)
         }
-        Command::TerminalHistory(params) => cmd_terminals::terminal_history(mux, params),
+        Command::TerminalHistory(params) => cmd_terminals::terminal_history(mux, writer, params),
         Command::TerminalReadRange(params) => cmd_terminals::terminal_read_range(mux, params),
         Command::ScrollSurface(ScrollSurfaceParams { surface, delta }) => {
             cmd_terminal_io::scroll_surface(mux, surface, terminal_io_wire::wire_isize(delta))

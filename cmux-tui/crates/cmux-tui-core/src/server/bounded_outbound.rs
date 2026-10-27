@@ -25,6 +25,7 @@
 
 use super::BACKPRESSURE_RECHECK;
 use super::BudgetedText;
+use super::FramePayload;
 use super::MAX_SERVER_CONNECTIONS;
 use super::OUTBOUND_BACKPRESSURED_STREAM_CAPACITY;
 use super::OUTBOUND_BYTE_CAPACITY;
@@ -148,7 +149,7 @@ pub(super) struct StreamOutboundUsage {
 pub(super) enum ControlOutbound {
     Text(Arc<BudgetedText>),
     /// A framed request's REPLY or ERROR: counted like `Text`.
-    Frame(FrameHeader, Arc<BudgetedText>),
+    Frame(FrameHeader, FramePayload),
     /// An item of a control-sequence stream, in FIFO order with replies.
     Stream(RegularOutbound),
     Flush(std::sync::mpsc::SyncSender<()>),
@@ -156,8 +157,8 @@ pub(super) enum ControlOutbound {
 
 pub(super) enum OutboundItem {
     Text(Arc<BudgetedText>),
-    /// A frame: `header`, then the text as its payload, with no delimiter.
-    Frame(FrameHeader, Arc<BudgetedText>),
+    /// A frame: `header`, then its payload, with no delimiter.
+    Frame(FrameHeader, FramePayload),
     /// One chunk of a longer frame: `header`, then the payload bytes `range`.
     Chunk {
         header: FrameHeader,
@@ -549,7 +550,7 @@ impl BoundedOutbound {
     pub(super) fn push_frame(
         &self,
         header: FrameHeader,
-        text: Arc<BudgetedText>,
+        text: FramePayload,
     ) -> std::io::Result<()> {
         let mut state = self.state.lock().recover_poison();
         Self::admit_control_locked(&mut state, text.len())?;
@@ -600,8 +601,9 @@ impl BoundedOutbound {
             }
             woken.wake();
             match item? {
-                OutboundItem::Text(text) | OutboundItem::Frame(_, text) => {
-                    return Some(text.to_string());
+                OutboundItem::Text(text) => return Some(text.to_string()),
+                OutboundItem::Frame(_, payload) => {
+                    return Some(String::from_utf8_lossy(payload.as_bytes()).into_owned());
                 }
                 OutboundItem::Chunk { text, range, .. } => {
                     let bytes = text.as_bytes().get(range).unwrap_or_default();

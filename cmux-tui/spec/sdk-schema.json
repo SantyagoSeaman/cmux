@@ -6445,6 +6445,31 @@
     "messages counts messages handed to the connection writers and syscalls their write calls; stalls counts write calls that blocked for at least 1 ms on a full peer receive buffer."
    ]
   },
+  "ServerStatsIpcBase64Encodes": {
+   "kind": "object",
+   "fields": {
+    "lines": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "required",
+     "nullable": false
+    },
+    "frames": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "required",
+     "nullable": false
+    }
+   },
+   "additional_properties": false,
+   "constraints": [
+    "Replies of the bulk-byte methods (terminal-history, fs.read, agent-session-media) and loopback-data events whose bytes were base64-encoded into JSON, by the transport of their request: lines for a JSON line, frames for a REQUEST frame. A framed request of a payload: binary method gets its bytes raw in a binary body, so it never counts."
+   ]
+  },
   "ServerStatsIpc": {
    "kind": "object",
    "fields": {
@@ -6498,6 +6523,14 @@
      "type": {
       "kind": "ref",
       "name": "ServerStatsIpcWrites"
+     },
+     "presence": "required",
+     "nullable": false
+    },
+    "base64_encodes": {
+     "type": {
+      "kind": "ref",
+      "name": "ServerStatsIpcBase64Encodes"
      },
      "presence": "required",
      "nullable": false
@@ -8096,7 +8129,8 @@
       "name": "string"
      },
      "presence": "required",
-     "nullable": false
+     "nullable": false,
+     "max_bytes": 33554432
     }
    },
    "additional_properties": false,
@@ -8137,7 +8171,8 @@
       "items": {
        "kind": "ref",
        "name": "TerminalHistoryPage"
-      }
+      },
+      "max_items": 1024
      },
      "presence": "required",
      "nullable": false
@@ -11998,7 +12033,8 @@
       "name": "string"
      },
      "presence": "required",
-     "nullable": false
+     "nullable": false,
+     "max_bytes": 1024
     },
     "kind": {
      "type": {
@@ -12058,6 +12094,7 @@
      },
      "presence": "optional",
      "nullable": false,
+     "max_bytes": 64,
      "omit_nil": true,
      "constraints": [
       "s<size>-m<mtime ms>; set on the entry a write, mkdir or rename answers."
@@ -12248,7 +12285,8 @@
         "name": "string"
        },
        "presence": "required",
-       "nullable": false
+       "nullable": false,
+       "max_bytes": 16777216
       },
       "truncated": {
        "type": {
@@ -12286,7 +12324,8 @@
         "name": "Base64"
        },
        "presence": "required",
-       "nullable": false
+       "nullable": false,
+       "max_bytes": 22369624
       },
       "truncated": {
        "type": {
@@ -23232,6 +23271,7 @@
       },
       "presence": "required",
       "nullable": false,
+      "max_bytes": 4096,
       "description": "An image the session wrote: png, jpg, jpeg, gif or webp, at most 4096 bytes."
      }
     },
@@ -23247,6 +23287,7 @@
       },
       "presence": "required",
       "nullable": true,
+      "max_bytes": 255,
       "description": "The image type acpmux reported."
      },
      "data": {
@@ -23256,6 +23297,7 @@
       },
       "presence": "required",
       "nullable": false,
+      "max_bytes": 13981016,
       "description": "The image bytes in standard base64, at most 10 MiB decoded."
      }
     },
@@ -23272,6 +23314,8 @@
    "method_id": 4872,
    "priority": "control",
    "durability": "read_only",
+   "payload": "binary",
+   "layout_version": 1,
    "stream_scoped": true,
    "clients": [
     "macos",
@@ -29080,6 +29124,8 @@
    "method_id": 792,
    "priority": "bulk",
    "durability": "read_only",
+   "payload": "binary",
+   "layout_version": 1,
    "stream_scoped": true,
    "clients": [
     "sdk"
@@ -34129,7 +34175,8 @@
        "name": "string"
       },
       "presence": "required",
-      "nullable": false
+      "nullable": false,
+      "max_bytes": 4096
      },
      "offset": {
       "type": {
@@ -34168,6 +34215,8 @@
    "method_id": 5634,
    "priority": "bulk",
    "durability": "read_only",
+   "payload": "binary",
+   "layout_version": 1,
    "clients": [
     "cli",
     "sdk"
@@ -34186,7 +34235,8 @@
        "name": "string"
       },
       "presence": "required",
-      "nullable": false
+      "nullable": false,
+      "max_bytes": 4096
      },
      "text": {
       "type": {
@@ -34195,6 +34245,7 @@
       },
       "presence": "optional",
       "nullable": true,
+      "max_bytes": 12582912,
       "constraints": [
        "Exactly one of text and bytes_base64."
       ]
@@ -34205,7 +34256,8 @@
        "name": "Base64"
       },
       "presence": "optional",
-      "nullable": true
+      "nullable": true,
+      "max_bytes": 16777216
      },
      "mode": {
       "type": {
@@ -34214,6 +34266,7 @@
       },
       "presence": "required",
       "nullable": false,
+      "max_bytes": 16,
       "constraints": [
        "create, overwrite, replace or append."
       ]
@@ -34225,6 +34278,7 @@
       },
       "presence": "optional",
       "nullable": true,
+      "max_bytes": 64,
       "constraints": [
        "The revision replace and append require."
       ]
@@ -34258,6 +34312,8 @@
    "method_id": 5635,
    "priority": "control",
    "durability": "reply_after_journal",
+   "payload": "binary",
+   "layout_version": 1,
    "clients": [
     "cli",
     "sdk"

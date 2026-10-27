@@ -192,6 +192,7 @@ MODEL_BY_PATH = {
     'types/ServerStatsHangs': models.ServerStatsHangs,
     'types/ServerStatsHistogram': models.ServerStatsHistogram,
     'types/ServerStatsIpc': models.ServerStatsIpc,
+    'types/ServerStatsIpcBase64Encodes': models.ServerStatsIpcBase64Encodes,
     'types/ServerStatsIpcKind': models.ServerStatsIpcKind,
     'types/ServerStatsIpcParse': models.ServerStatsIpcParse,
     'types/ServerStatsIpcParses': models.ServerStatsIpcParses,

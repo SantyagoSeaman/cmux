@@ -29,8 +29,8 @@
 
 use super::AttachWireShape;
 use super::render_service::{
-    BudgetedJsonWriter, OutboundByteBudget, json_error_to_io, write_colors_changed_json,
-    write_output_sidecar_fields, write_resized_state_fields,
+    BudgetedBytes, BudgetedJsonWriter, OutboundByteBudget, budget_overflow, json_error_to_io,
+    write_colors_changed_json, write_output_sidecar_fields, write_resized_state_fields,
 };
 use crate::AttachFrame;
 use crate::SurfaceId;
@@ -118,51 +118,6 @@ impl From<AttachFrameError> for std::io::Error {
             }
         }
     }
-}
-
-/// A frame payload charged to an outbound byte budget until it drops, as a
-/// `BudgetedText` is for a JSON line: a payload it wrote by the capacity of
-/// its allocation, a shared PTY output chunk by its length.
-pub(super) struct BudgetedBytes {
-    bytes: bytes::Bytes,
-    retained_bytes: usize,
-    budget: Arc<OutboundByteBudget>,
-}
-
-impl BudgetedBytes {
-    /// Shares a buffer that already exists (a PTY output chunk, not copied)
-    /// once its length is charged, as the viewer queue counts it
-    /// (surface/attach_tap.rs); a refused chunk is not taken.
-    fn share(bytes: &bytes::Bytes, budget: &Arc<OutboundByteBudget>) -> std::io::Result<Self> {
-        let retained_bytes = bytes.len();
-        if !budget.try_retain(retained_bytes) {
-            return Err(budget_overflow());
-        }
-        Ok(Self { bytes: bytes.clone(), retained_bytes, budget: budget.clone() })
-    }
-
-    /// The bytes `writer` wrote, as one shared buffer.
-    fn finish(mut writer: BudgetedJsonWriter) -> Self {
-        let bytes = std::mem::take(&mut writer.bytes);
-        let retained_bytes = bytes.capacity();
-        if retained_bytes < writer.retained_bytes {
-            writer.budget.release(writer.retained_bytes - retained_bytes);
-        }
-        // The writer's drop releases nothing more: the payload owns the charge.
-        writer.retained_bytes = 0;
-        writer.reservation_bytes = 0;
-        Self { bytes: bytes.into(), retained_bytes, budget: writer.budget.clone() }
-    }
-}
-
-impl Drop for BudgetedBytes {
-    fn drop(&mut self) {
-        self.budget.release(self.retained_bytes);
-    }
-}
-
-fn budget_overflow() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::WouldBlock, "global outbound byte budget overflowed")
 }
 
 /// A writer that holds exactly `capacity` bytes, charged before it

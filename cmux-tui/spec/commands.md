@@ -656,6 +656,7 @@ object{
     received:array<kind_count>, sent:array<kind_count>,
     parses:object{lines:parse_count,frames:parse_count},
     writes:object{messages:uint64,syscalls:uint64,syscalls_per_message:float64,stalls:uint64},
+    base64_encodes:object{lines:uint64,frames:uint64},
     bad_message:uint64
   },
   lock_classes?:object{
@@ -798,7 +799,12 @@ also a route that then declines the line); `parses.frames` the same for
 admitted REQUEST frames. `json_parses_per_request` is 0 before the first
 request. `writes.syscalls` counts the writers' write calls and
 `writes.stalls` the calls that blocked for at least 1 ms on a full peer
-receive buffer. `bad_message` counts connections closed for a malformed
+receive buffer. `base64_encodes` counts replies of the bulk-byte commands
+(`terminal-history`, `fs.read`, `agent-session-media`, and the
+`loopback-data` events) whose bytes went into their JSON as base64, by the
+transport of their request: `lines`, or `frames` for a REQUEST frame; a
+framed request of a `payload: binary` command gets its bytes raw, so it
+never counts (transports.md, "Binary request and reply bodies"). `bad_message` counts connections closed for a malformed
 message: a JSON line over the size limit or not UTF-8, a bad frame, or a
 WebSocket message that is oversized, not UTF-8, binary or against the
 protocol.

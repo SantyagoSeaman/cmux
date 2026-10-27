@@ -283,6 +283,7 @@ use group_outcome_json::{
     workspace_group_json, workspace_groups_json,
 };
 use split_respawn::{frontend_shell, placement_spawn_options, shell_argv, split_tab};
+mod bulk_reply;
 mod capabilities;
 mod terminal_create;
 mod terminal_history;
@@ -2363,8 +2364,8 @@ use worker_admission::{
 mod attach_frames;
 mod render_service;
 use render_service::{
-    BudgetedJsonWriter, BudgetedText, RenderService, json_error_to_io, write_base64_json_string,
-    write_kitty_image_aliases_json, write_kitty_replay_state_json,
+    BudgetedJsonWriter, BudgetedText, FramePayload, RenderService, json_error_to_io,
+    write_base64_json_string, write_kitty_image_aliases_json, write_kitty_replay_state_json,
 };
 #[cfg(test)]
 use render_service::{OutboundByteBudget, RenderGraphicBase64Cache};

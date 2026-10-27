@@ -7,6 +7,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use super::{Attachment, CALL_TIMEOUT, Refusal};
+use crate::binary_body::BulkReply;
 
 /// The largest image, and the largest range one acpmux call returns.
 const MAX_BYTES: u64 = 10 << 20;
@@ -18,26 +19,19 @@ pub(super) struct MediaReply {
     bytes: Vec<u8>,
 }
 
-impl MediaReply {
-    /// The line: `{mimeType, data}` with `data` in base64.
-    pub(super) fn into_json(self) -> Value {
+impl BulkReply for MediaReply {
+    /// `{mimeType, data}` with `data` in base64.
+    fn into_json(self) -> Value {
         json!({
             "mimeType": self.mime_type,
             "data": base64::engine::general_purpose::STANDARD.encode(self.bytes),
         })
     }
 
-    /// The binary body: `{mimeType, data_len}`, then the image raw.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "agent-session-media answers on frames once it carries `payload: binary`"
-        )
-    )]
-    pub(super) fn into_body(self) -> Result<Vec<u8>, crate::binary_body::BinaryBodyError> {
+    /// `{mimeType, data_len}`, then the image raw.
+    fn body_parts(&self) -> (Value, Vec<&[u8]>) {
         let meta = json!({"mimeType": self.mime_type, "data_len": self.bytes.len()});
-        crate::binary_body::encode(&meta, &[&self.bytes])
+        (meta, vec![self.bytes.as_slice()])
     }
 }
 
@@ -107,6 +101,7 @@ pub(super) fn media(attachment: &Attachment, path: String) -> Result<MediaReply,
 #[cfg(test)]
 mod tests {
     use super::MediaReply;
+    use crate::binary_body::BulkReply as _;
     use base64::Engine as _;
     use serde_json::{Value, json};
 
@@ -119,7 +114,7 @@ mod tests {
         for (mime_type, bytes) in [(json!("image/png"), png), (Value::Null, vec![0u8])] {
             let reply = || MediaReply { mime_type: mime_type.clone(), bytes: bytes.clone() };
             let line = reply().into_json();
-            let body = reply().into_body().unwrap();
+            let body = crate::binary_body::body_of(&reply());
             let mut read = crate::binary_body::BinaryBody::decode(&body).unwrap();
             let raw = read.take("data_len").unwrap();
             assert_eq!(raw, bytes.as_slice());

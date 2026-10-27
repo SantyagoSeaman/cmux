@@ -12135,6 +12135,9 @@ Result<Json> Codec<ServerStatsIpc>::encode(const ServerStatsIpc& value) {
     auto encoded_bad_message = encode_value(value.bad_message);
     if (!encoded_bad_message) return std::move(encoded_bad_message).error();
     object.emplace("bad_message", std::move(encoded_bad_message).value());
+    auto encoded_base64_encodes = encode_value(value.base64_encodes);
+    if (!encoded_base64_encodes) return std::move(encoded_base64_encodes).error();
+    object.emplace("base64_encodes", std::move(encoded_base64_encodes).value());
     auto encoded_parses = encode_value(value.parses);
     if (!encoded_parses) return std::move(encoded_parses).error();
     object.emplace("parses", std::move(encoded_parses).value());
@@ -12168,6 +12171,15 @@ Result<ServerStatsIpc> Codec<ServerStatsIpc>::decode(const Json& value) {
         auto decoded = decode_value<std::uint64_t>(*field_bad_message);
         if (!decoded) return std::move(decoded).error();
         result.bad_message = std::move(decoded).value();
+    }
+    const Json* field_base64_encodes = value.find("base64_encodes");
+    if (!field_base64_encodes) {
+        return make_error(ErrorCode::decode, "missing required field 'base64_encodes'");
+    }
+    if (field_base64_encodes) {
+        auto decoded = decode_value<ServerStatsIpcBase64Encodes>(*field_base64_encodes);
+        if (!decoded) return std::move(decoded).error();
+        result.base64_encodes = std::move(decoded).value();
     }
     const Json* field_parses = value.find("parses");
     if (!field_parses) {
@@ -12222,6 +12234,43 @@ Result<ServerStatsIpc> Codec<ServerStatsIpc>::decode(const Json& value) {
         auto decoded = decode_value<ServerStatsIpcWrites>(*field_writes);
         if (!decoded) return std::move(decoded).error();
         result.writes = std::move(decoded).value();
+    }
+    return result;
+}
+
+Result<Json> Codec<ServerStatsIpcBase64Encodes>::encode(const ServerStatsIpcBase64Encodes& value) {
+    (void)value;
+    Json::Object object;
+    auto encoded_frames = encode_value(value.frames);
+    if (!encoded_frames) return std::move(encoded_frames).error();
+    object.emplace("frames", std::move(encoded_frames).value());
+    auto encoded_lines = encode_value(value.lines);
+    if (!encoded_lines) return std::move(encoded_lines).error();
+    object.emplace("lines", std::move(encoded_lines).value());
+    return Json(std::move(object));
+}
+
+Result<ServerStatsIpcBase64Encodes> Codec<ServerStatsIpcBase64Encodes>::decode(const Json& value) {
+    auto source = value.as_object();
+    if (!source) return std::move(source).error();
+    ServerStatsIpcBase64Encodes result{};
+    const Json* field_frames = value.find("frames");
+    if (!field_frames) {
+        return make_error(ErrorCode::decode, "missing required field 'frames'");
+    }
+    if (field_frames) {
+        auto decoded = decode_value<std::uint64_t>(*field_frames);
+        if (!decoded) return std::move(decoded).error();
+        result.frames = std::move(decoded).value();
+    }
+    const Json* field_lines = value.find("lines");
+    if (!field_lines) {
+        return make_error(ErrorCode::decode, "missing required field 'lines'");
+    }
+    if (field_lines) {
+        auto decoded = decode_value<std::uint64_t>(*field_lines);
+        if (!decoded) return std::move(decoded).error();
+        result.lines = std::move(decoded).value();
     }
     return result;
 }

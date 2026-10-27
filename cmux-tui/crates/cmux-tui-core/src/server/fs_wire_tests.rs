@@ -39,7 +39,7 @@ impl Home {
         Self { path: std::fs::canonicalize(path).unwrap() }
     }
 
-    fn service(&self) -> FsService {
+    pub(super) fn service(&self) -> FsService {
         FsService::new(Roots::new([self.path.clone()]))
     }
 
@@ -394,7 +394,7 @@ fn fs_stat_code(mux: &Arc<Mux>, client: u64) -> Value {
 /// it took.
 fn remote_frame(mux: &Arc<Mux>, client: u64, line: &str) -> (Value, u64) {
     let (writer, outbound) = fs_writer();
-    let stats = crate::diagnostics::IpcStats::default();
+    let stats = IpcStats::default();
     {
         let _scope = crate::diagnostics::JsonParseScope::enter(
             &stats,
@@ -493,6 +493,7 @@ fn read_line_of_body(body: &[u8]) -> Value {
 /// binary, empty and truncated reads).
 #[test]
 fn fs_read_binary_body_equals_the_line_and_carries_raw_bytes() {
+    use crate::binary_body::BulkReply as _;
     let home = Home::new("read-body");
     let service = home.service();
     let binary: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
@@ -510,7 +511,7 @@ fn fs_read_binary_body_equals_the_line_and_carries_raw_bytes() {
             serde_json::from_value(json!({"path": path, "max_bytes": max_bytes})).unwrap()
         };
         let line = service.read_reply(params()).unwrap().into_json();
-        let body = service.read_reply(params()).unwrap().into_body().unwrap();
+        let body = crate::binary_body::body_of(&service.read_reply(params()).unwrap());
         let rebuilt = read_line_of_body(&body);
         assert_eq!(rebuilt, line, "{name}");
         assert_eq!(serde_json::to_vec(&rebuilt).unwrap(), serde_json::to_vec(&line).unwrap());
@@ -522,8 +523,8 @@ fn fs_read_binary_body_equals_the_line_and_carries_raw_bytes() {
 }
 
 /// p05-ipc-149: a binary `fs.write` writes its raw bytes exactly as the
-/// `bytes_base64` line writes them, and refuses a body that also carries
-/// the bytes as text or names more bytes than it has.
+/// `bytes_base64` line writes them, and refuses a meta that also carries
+/// the bytes as text.
 #[test]
 fn fs_write_binary_body_writes_the_bytes_the_line_writes() {
     use base64::Engine as _;
@@ -532,12 +533,10 @@ fn fs_write_binary_body_writes_the_bytes_the_line_writes() {
     let bytes: Vec<u8> = (0..=255u8).rev().cycle().take(5000).collect();
     let path = |name: &str| home.path.join(name).display().to_string();
 
-    let body = crate::binary_body::encode(
-        &json!({"path": path("framed"), "mode": "create", "data_len": bytes.len()}),
-        &[&bytes],
-    )
-    .unwrap();
-    let framed = service.write_body(&body).unwrap();
+    let params = |value: Value| serde_json::from_value(value).unwrap();
+    let framed = service
+        .write_raw(params(json!({"path": path("framed"), "mode": "create"})), &bytes)
+        .unwrap();
     let line = service
         .write(
             serde_json::from_value(json!({
@@ -552,19 +551,12 @@ fn fs_write_binary_body_writes_the_bytes_the_line_writes() {
     assert_eq!(std::fs::read(home.path.join("line")).unwrap(), bytes);
     assert_eq!(framed["entry"]["size"], line["entry"]["size"], "{framed} {line}");
 
-    let both = crate::binary_body::encode(
-        &json!({"path": path("both"), "mode": "create", "text": "x", "data_len": 1}),
-        &[b"y"],
-    )
-    .unwrap();
-    let short = crate::binary_body::encode(
-        &json!({"path": path("short"), "mode": "create", "data_len": 9}),
-        &[b"y"],
-    )
-    .unwrap();
-    for body in [both, short] {
-        let refused = service.write_body(&body);
+    for meta in [
+        json!({"path": path("both"), "mode": "create", "text": "x"}),
+        json!({"path": path("both"), "mode": "create", "bytes_base64": "eA=="}),
+    ] {
+        let refused = service.write_raw(params(meta), b"y");
         assert!(matches!(refused, Err(FsError::ParamsInvalid(_))), "{refused:?}");
     }
-    assert!(!home.path.join("both").exists() && !home.path.join("short").exists());
+    assert!(!home.path.join("both").exists());
 }

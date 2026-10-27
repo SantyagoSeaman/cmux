@@ -12,6 +12,7 @@ import java.util.Objects;
 
 public final class ServerStatsIpc implements WireValue {
     private final UInt64 badMessage;
+    private final ServerStatsIpcBase64Encodes base64Encodes;
     private final ServerStatsIpcParses parses;
     private final List<ServerStatsIpcKind> received;
     private final List<ServerStatsIpcKind> sent;
@@ -22,6 +23,8 @@ public final class ServerStatsIpc implements WireValue {
     private ServerStatsIpc(Builder builder) {
         if (!builder.badMessageSet) throw new IllegalArgumentException("bad_message is required");
         this.badMessage = Wire.nonNull(builder.badMessage, "bad_message");
+        if (!builder.base64EncodesSet) throw new IllegalArgumentException("base64_encodes is required");
+        this.base64Encodes = Wire.nonNull(builder.base64Encodes, "base64_encodes");
         if (!builder.parsesSet) throw new IllegalArgumentException("parses is required");
         this.parses = Wire.nonNull(builder.parses, "parses");
         if (!builder.receivedSet) throw new IllegalArgumentException("received is required");
@@ -39,6 +42,7 @@ public final class ServerStatsIpc implements WireValue {
     public static Builder builder() { return new Builder(); }
 
     public UInt64 badMessage() { return badMessage; }
+    public ServerStatsIpcBase64Encodes base64Encodes() { return base64Encodes; }
     public ServerStatsIpcParses parses() { return parses; }
     public List<ServerStatsIpcKind> received() { return received; }
     public List<ServerStatsIpcKind> sent() { return sent; }
@@ -51,6 +55,8 @@ public final class ServerStatsIpc implements WireValue {
         Builder builder = builder();
         Object rawBadMessage = Wire.required(object, "bad_message");
         builder.badMessage(Wire.uint64(rawBadMessage, "ServerStatsIpc.bad_message"));
+        Object rawBase64Encodes = Wire.required(object, "base64_encodes");
+        builder.base64Encodes(ServerStatsIpcBase64Encodes.fromWire(rawBase64Encodes));
         Object rawParses = Wire.required(object, "parses");
         builder.parses(ServerStatsIpcParses.fromWire(rawParses));
         Object rawReceived = Wire.required(object, "received");
@@ -70,6 +76,7 @@ public final class ServerStatsIpc implements WireValue {
     public Map<String, Object> toWire() {
         LinkedHashMap<String, Object> object = new LinkedHashMap<>();
         Wire.put(object, "bad_message", badMessage);
+        Wire.put(object, "base64_encodes", base64Encodes);
         Wire.put(object, "parses", parses);
         Wire.put(object, "received", received);
         Wire.put(object, "sent", sent);
@@ -82,11 +89,11 @@ public final class ServerStatsIpc implements WireValue {
     @Override
     public boolean equals(Object other) {
         if (!(other instanceof ServerStatsIpc that)) return false;
-        return Objects.equals(badMessage, that.badMessage) && Objects.equals(parses, that.parses) && Objects.equals(received, that.received) && Objects.equals(sent, that.sent) && Objects.equals(sequenceDepth, that.sequenceDepth) && Objects.equals(streams, that.streams) && Objects.equals(writes, that.writes);
+        return Objects.equals(badMessage, that.badMessage) && Objects.equals(base64Encodes, that.base64Encodes) && Objects.equals(parses, that.parses) && Objects.equals(received, that.received) && Objects.equals(sent, that.sent) && Objects.equals(sequenceDepth, that.sequenceDepth) && Objects.equals(streams, that.streams) && Objects.equals(writes, that.writes);
     }
 
     @Override
-    public int hashCode() { return Objects.hash(badMessage, parses, received, sent, sequenceDepth, streams, writes); }
+    public int hashCode() { return Objects.hash(badMessage, base64Encodes, parses, received, sent, sequenceDepth, streams, writes); }
 
     @Override
     public String toString() { return "ServerStatsIpc" + toWire(); }
@@ -94,6 +101,8 @@ public final class ServerStatsIpc implements WireValue {
     public static final class Builder {
         private UInt64 badMessage;
         private boolean badMessageSet;
+        private ServerStatsIpcBase64Encodes base64Encodes;
+        private boolean base64EncodesSet;
         private ServerStatsIpcParses parses;
         private boolean parsesSet;
         private List<ServerStatsIpcKind> received;
@@ -110,6 +119,11 @@ public final class ServerStatsIpc implements WireValue {
         public Builder badMessage(UInt64 value) {
             this.badMessage = value;
             this.badMessageSet = true;
+            return this;
+        }
+        public Builder base64Encodes(ServerStatsIpcBase64Encodes value) {
+            this.base64Encodes = value;
+            this.base64EncodesSet = true;
             return this;
         }
         public Builder parses(ServerStatsIpcParses value) {

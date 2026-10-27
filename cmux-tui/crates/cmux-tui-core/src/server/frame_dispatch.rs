@@ -63,7 +63,9 @@ use super::line_connection::{
     ConnectionBadMessage, FrameConnection, FrameLane, IPC_FRAMES_CAPABILITY,
 };
 use super::pending_streams::{ClientStreams, RequestLane, StreamEndpoint, post_request};
-use super::{Command, ConnectionCancellation, MessageWriter, Mux, handle_connection_frame_at};
+use super::{
+    Command, ConnectionCancellation, FramePayload, MessageWriter, Mux, handle_connection_frame_at,
+};
 
 /// The `error_code` of the ERROR reply to a method that answers only lines.
 pub(super) const METHOD_NOT_FRAMED: &str = "method_not_framed";
@@ -82,6 +84,10 @@ pub(super) struct FrameCall {
     /// The stream this request opens (an opener on stream S): its reply
     /// binds or ends it.
     opens: Option<Arc<StreamEndpoint>>,
+    /// The raw bytes after the meta of a `payload: binary` request
+    /// (crate::binary_body); `None` for a JSON request. Its successful
+    /// reply is a binary body too ([`MessageWriter::send_binary_reply`]).
+    binary: Option<bytes::Bytes>,
 }
 
 impl FrameCall {
@@ -98,7 +104,24 @@ impl FrameCall {
             answered: AtomicBool::new(false),
             cancellation: Arc::default(),
             opens,
+            binary: None,
         }
+    }
+
+    /// The request of a `payload: binary` method, `raw` the bytes after its
+    /// meta.
+    pub(super) fn binary(self, raw: bytes::Bytes) -> Self {
+        FrameCall { binary: Some(raw), ..self }
+    }
+
+    /// Whether the request is of a `payload: binary` method.
+    pub(super) fn is_binary(&self) -> bool {
+        self.binary.is_some()
+    }
+
+    /// The raw bytes of a `payload: binary` request after its meta.
+    pub(super) fn request_bytes(&self) -> Option<&[u8]> {
+        self.binary.as_deref()
     }
 
     /// Answered by its stream's `stream-end` (it never ran): no reply
@@ -146,12 +169,21 @@ impl FrameCall {
         &self.cancellation
     }
 
-    /// The header of its reply: REPLY, or ERROR when `ok` is false.
-    pub(super) fn reply_header(&self, ok: bool, len: usize) -> Result<FrameHeader, BadMessage> {
+    /// The header of its reply carrying `payload`: REPLY, or ERROR when
+    /// `ok` is false; with the binary flag for a binary body.
+    pub(super) fn reply_header(
+        &self,
+        ok: bool,
+        payload: &FramePayload,
+    ) -> std::io::Result<FrameHeader> {
         let kind = if ok { FrameKind::Reply } else { FrameKind::Error };
-        let len = u32::try_from(len)
-            .map_err(|_| BadMessage::Oversize { len: u32::MAX, max: MAX_FRAME_PAYLOAD })?;
-        FrameHeader::new(kind, self.stream, len, Aux::Call(self.call))
+        let flags = if payload.is_binary() { CallFlags::BINARY } else { CallFlags::empty() };
+        let header = u32::try_from(payload.len())
+            .map_err(|_| BadMessage::Oversize { len: u32::MAX, max: MAX_FRAME_PAYLOAD })
+            .and_then(|len| {
+                FrameHeader::new(kind, self.stream, len, Aux::Call(CallAux { flags, ..self.call }))
+            });
+        header.map_err(|bad| std::io::Error::new(std::io::ErrorKind::InvalidData, bad.to_string()))
     }
 }
 
@@ -180,6 +212,9 @@ pub(super) enum CallRefusal {
     CancelMismatch { request_id: u32, method_id: u16 },
     /// A CANCEL with a payload.
     CancelPayload { request_id: u32 },
+    /// A `payload: binary` request whose body is not a binary body of this
+    /// daemon's layout.
+    BadBinaryBody { method_id: u16, reason: &'static str },
 }
 
 impl CallRefusal {
@@ -196,6 +231,7 @@ impl CallRefusal {
             CallRefusal::DuplicateRequest { .. } => "duplicate_request",
             CallRefusal::CancelMismatch { .. } => "cancel_mismatch",
             CallRefusal::CancelPayload { .. } => "cancel_payload",
+            CallRefusal::BadBinaryBody { .. } => "bad_binary_body",
         }
     }
 }
@@ -236,6 +272,9 @@ impl fmt::Display for CallRefusal {
             ),
             CallRefusal::CancelPayload { request_id } => {
                 write!(f, "cancel of request {request_id} has a payload")
+            }
+            CallRefusal::BadBinaryBody { method_id, reason } => {
+                write!(f, "method {method_id:#06x} body: {reason}")
             }
         }
     }
@@ -289,7 +328,7 @@ impl FrameLane for RequestFrames {
         let header = *frame.header();
         match (header.kind(), header.call()) {
             (FrameKind::Request, Some(call)) => {
-                self.request(&header, call, frame.payload(), connection)
+                self.request(&header, call, &frame.into_payload(), connection)
             }
             (FrameKind::Cancel, Some(call)) => self
                 .cancel(&header, call, frame.payload().is_empty())
@@ -308,38 +347,43 @@ impl RequestFrames {
         &mut self,
         header: &FrameHeader,
         call: CallAux,
-        payload: &[u8],
+        frame_payload: &bytes::Bytes,
         connection: &FrameConnection<'_>,
     ) -> Result<bool, ConnectionBadMessage> {
         let method = self.method(call).map_err(ConnectionBadMessage::Call)?;
         request_flags(method, call.flags).map_err(ConnectionBadMessage::Call)?;
         if let Some(max) = method.max_bytes
-            && payload.len() > usize::try_from(max).unwrap_or(usize::MAX)
+            && frame_payload.len() > usize::try_from(max).unwrap_or(usize::MAX)
         {
-            let len = payload.len();
+            let len = frame_payload.len();
             return Err(ConnectionBadMessage::Call(CallRefusal::Oversize {
                 method_id: call.method_id,
                 len,
                 max,
             }));
         }
-        let body = std::str::from_utf8(payload).map_err(|error| {
-            ConnectionBadMessage::Wire(BadMessage::InvalidUtf8 { valid_up_to: error.valid_up_to() })
-        })?;
+        let (body, raw) = request_body(method, frame_payload)?;
         let stream = header.stream();
         let lane = self.streams.request_lane(stream, method).map_err(ConnectionBadMessage::Call)?;
         self.admit(call.request_id).map_err(ConnectionBadMessage::Call)?;
         // An admitted REQUEST is one framed request of `server-stats` `ipc`:
         // the body parses below and on its line's path count toward it.
         let _parses = JsonParseScope::enter(connection.mux.ipc_stats(), IpcTransport::Frames);
-        if !served_on_frames(self.tables, method) {
+        // A feature route runs on the control sequence, never on a stream's.
+        let routed_on_stream = matches!(lane, RequestLane::Stream(_))
+            && Command::method_of_wire(method.name).is_none();
+        if !served_on_frames(self.tables, method) || routed_on_stream {
             let call = Arc::new(FrameCall::new(stream, call));
             return Ok(send_not_framed(&connection.writer.replying_to(call), method));
         }
         names_method(body, method).map_err(ConnectionBadMessage::Call)?;
         let opens =
             matches!(lane, RequestLane::Open).then(|| self.streams.announce(stream, connection));
-        let frame_call = Arc::new(FrameCall::opening(stream, call, opens));
+        let frame_call = FrameCall::opening(stream, call, opens);
+        let frame_call = Arc::new(match raw {
+            Some(raw) => frame_call.binary(raw),
+            None => frame_call,
+        });
         let writer = connection.writer.replying_to(frame_call.clone());
         self.in_flight.insert(call.request_id, frame_call.clone());
         match lane {
@@ -421,12 +465,61 @@ impl RequestFrames {
     }
 }
 
+/// The `payload: binary` methods whose handlers answer a framed request
+/// with a binary body through the responder (server/bulk_reply.rs), each
+/// with whether its request carries raw bytes after its meta, which the
+/// handler reads from the responder (`fs.write`'s bytes; p05-ipc-149).
+pub(super) const BINARY_METHODS: [(&str, bool); 4] = [
+    ("terminal-history", false),
+    ("fs.read", false),
+    ("fs.write", true),
+    ("agent-session-media", false),
+];
+
+/// Whether `name` is a binary method whose request carries raw bytes.
+fn takes_raw(name: &str) -> bool {
+    BINARY_METHODS.iter().any(|(method, raw)| *method == name && *raw)
+}
+
+/// A REQUEST's body: the JSON line it carries, and the raw bytes after the
+/// meta of a `payload: binary` request (crate::binary_body), whose line
+/// then runs as any other. Only a method that takes raw bytes has any.
+fn request_body<'p>(
+    method: &MethodAttrs,
+    payload: &'p bytes::Bytes,
+) -> Result<(&'p str, Option<bytes::Bytes>), ConnectionBadMessage> {
+    if method.payload == Payload::Json {
+        let body = std::str::from_utf8(payload).map_err(|error| {
+            ConnectionBadMessage::Wire(BadMessage::InvalidUtf8 { valid_up_to: error.valid_up_to() })
+        })?;
+        return Ok((body, None));
+    }
+    let refused = |reason| {
+        ConnectionBadMessage::Call(CallRefusal::BadBinaryBody {
+            method_id: method.id.raw(),
+            reason,
+        })
+    };
+    let (meta, raw) =
+        crate::binary_body::split(payload).map_err(|error| refused(error.reason()))?;
+    if !raw.is_empty() && !takes_raw(method.name) {
+        return Err(refused("raw_bytes_refused"));
+    }
+    Ok((meta, Some(payload.slice(raw))))
+}
+
 /// Whether the method's reply goes through the responder: a JSON v12
-/// `Command` (its handler replies through `responses`).
+/// `Command` (its handler replies through `responses`), or a binary method
+/// of [`BINARY_METHODS`] at this daemon's layout.
 fn served_on_frames(tables: &MethodTables, method: &MethodAttrs) -> bool {
     tables.v12(method.id).is_some()
-        && method.payload == Payload::Json
-        && Command::method_of_wire(method.name).is_some()
+        && match method.payload {
+            Payload::Json => Command::method_of_wire(method.name).is_some(),
+            Payload::Binary { layout_version } => {
+                layout_version == crate::binary_body::LAYOUT_VERSION
+                    && BINARY_METHODS.iter().any(|(name, _)| *name == method.name)
+            }
+        }
 }
 
 /// The v12 method ids this daemon answers on REQUEST frames, in id order

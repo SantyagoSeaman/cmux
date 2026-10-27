@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use cmux_ipc::{
     Aux, CallAux, CallFlags, FrameHeader, FrameKind, FrameReader, Message, MethodAttrs,
-    MethodTables, PriorityHint, ReaderLimits,
+    MethodTables, Payload, PriorityHint, ReaderLimits,
 };
 use serde_json::{Value, json};
 
@@ -21,11 +21,13 @@ use super::{CallRefusal, METHOD_NOT_FRAMED, RequestFrames};
 use crate::server::line_connection::{ConnectionBadMessage, ConnectionEnd, serve_connection};
 use crate::server::*;
 
-/// What the daemon sent: a line, or a frame and its JSON payload.
+/// What the daemon sent: a line, a frame and its JSON payload, or a frame
+/// with the binary flag and its binary body.
 #[derive(Debug)]
 pub(in crate::server) enum Got {
     Line(Value),
     Frame(FrameHeader, Value),
+    Binary(FrameHeader, Vec<u8>),
 }
 
 pub(in crate::server) struct Client {
@@ -65,6 +67,24 @@ pub(in crate::server) fn request(request_id: u32, body: &Value) -> Vec<u8> {
         method.priority,
         body.to_string().as_bytes(),
     )
+}
+
+/// A REQUEST frame of a `payload: binary` method: the binary flag, and
+/// `body`'s line as the meta of a binary body followed by `raw`.
+pub(in crate::server) fn binary_request(request_id: u32, body: &Value, raw: &[u8]) -> Vec<u8> {
+    let method = method(body["cmd"].as_str().unwrap());
+    let payload = crate::binary_body::encode(body, &[raw]).unwrap();
+    let call = CallAux {
+        request_id,
+        method_id: method.id.raw(),
+        priority: method.priority,
+        flags: CallFlags::BINARY,
+    };
+    let len = u32::try_from(payload.len()).unwrap();
+    let header = FrameHeader::new(FrameKind::Request, 0, len, Aux::Call(call)).unwrap();
+    let mut bytes = header.encode().to_vec();
+    bytes.extend_from_slice(&payload);
+    bytes
 }
 
 pub(in crate::server) fn cancel(request_id: u32, name: &str) -> Vec<u8> {
@@ -169,8 +189,12 @@ impl Client {
                     }
                 }
                 Some(Message::Frame(frame)) => {
+                    let header = *frame.header();
+                    if header.call().is_some_and(|call| call.flags.contains(CallFlags::BINARY)) {
+                        return Some(Got::Binary(header, frame.payload().to_vec()));
+                    }
                     let value = serde_json::from_slice(frame.payload()).unwrap();
-                    return Some(Got::Frame(*frame.header(), value));
+                    return Some(Got::Frame(header, value));
                 }
                 None => {
                     if self.reader.read_from(&mut self.read_half).unwrap() == 0 {
@@ -563,4 +587,139 @@ fn frame_dispatch_ipc_counts_frames_their_parses_and_bad_frames() {
     let ipc = mux.ipc_stats().snapshot();
     assert_eq!(ipc.bad_message, 1);
     assert_eq!(ipc.streams.open, 0);
+}
+
+/// p05-ipc-149: the schema's `payload: binary` methods are the ones this
+/// daemon answers with a binary body, at its layout, and each is framed.
+#[test]
+fn frame_dispatch_binary_methods_are_the_schemas_binary_methods() {
+    let tables = MethodTables::schema();
+    let mut schema: Vec<&str> = tables
+        .v12_families()
+        .flat_map(|family| family.iter())
+        .filter(|method| matches!(method.payload, Payload::Binary { .. }))
+        .map(|method| method.name)
+        .collect();
+    schema.sort_unstable();
+    let mut served: Vec<&str> = super::BINARY_METHODS.iter().map(|(name, _)| *name).collect();
+    served.sort_unstable();
+    assert_eq!(schema, served);
+    let layout = Payload::Binary { layout_version: crate::binary_body::LAYOUT_VERSION };
+    for name in served {
+        assert_eq!(method(name).payload, layout, "{name}");
+        assert!(super::framed_method_ids().contains(&method(name).id.raw()), "{name}");
+    }
+}
+
+/// The line a binary `terminal-history` reply stands for: each page's
+/// `data_len` raw bytes back as base64 `data`.
+fn history_line_of(body: &[u8]) -> Value {
+    use base64::Engine as _;
+    let mut read = crate::binary_body::BinaryBody::decode(body).unwrap();
+    let mut data = read.meta.remove("data").unwrap();
+    for page in data["pages"].as_array_mut().unwrap() {
+        let page = page.as_object_mut().unwrap();
+        let len = crate::binary_body::take_len(page, "data_len").unwrap();
+        let record = read.take_bytes(len).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(record);
+        page.insert("data".into(), json!(encoded));
+    }
+    let mut line = read.finish().unwrap();
+    line.insert("data".into(), data);
+    Value::Object(line)
+}
+
+/// p05-ipc-149: a framed `terminal-history` is answered with its page
+/// records raw in a binary REPLY that stands for the line byte for byte;
+/// only the line base64-encodes (`ipc.base64_encodes`).
+#[test]
+fn frame_dispatch_terminal_history_answers_raw_pages_equal_to_its_line() {
+    let mut client = Client::granted("history");
+    let surface = client.mux.new_workspace(None, Some((80, 24))).unwrap();
+    let rows: String =
+        (0..3000).map(|row| format!("history row {row:06} of the test\r\n")).collect();
+    surface.inject_output_for_test(rows.as_bytes());
+    let epoch = surface.history_pages(None, None, 1 << 20).unwrap().marker_epoch;
+    let body = json!({
+        "id": 11, "cmd": "terminal-history", "surface": surface.id, "marker_epoch": epoch,
+    });
+    // The shell may still print its prompt: compare a frame with the line
+    // before and after it once both lines agree.
+    let mut lines = 0;
+    let (line, reply) = loop {
+        let before = client.line_reply(&body);
+        client.send(&binary_request(12, &body, b""));
+        let Some(Got::Binary(header, reply)) = client.next() else { panic!("a binary reply") };
+        assert_eq!(header.kind(), FrameKind::Reply);
+        let call = header.call().unwrap();
+        assert_eq!((call.request_id, call.flags), (12, CallFlags::BINARY));
+        let after = client.line_reply(&body);
+        lines += 2;
+        if before == after {
+            break (after, reply);
+        }
+        assert!(lines < 10, "the history kept changing");
+    };
+    assert_eq!(line["ok"], json!(true), "{line}");
+    assert!(!line["data"]["pages"].as_array().unwrap().is_empty(), "{line}");
+    let rebuilt = history_line_of(&reply);
+    assert_eq!(rebuilt, line);
+    assert_eq!(serde_json::to_vec(&rebuilt).unwrap(), serde_json::to_vec(&line).unwrap());
+    assert!(reply.len() < serde_json::to_vec(&line).unwrap().len(), "raw is smaller than base64");
+
+    let counted = client.mux.ipc_stats().snapshot().base64_encodes;
+    assert_eq!((counted.lines, counted.frames), (lines, 0));
+    assert_eq!(client.finish(), ConnectionEnd::PeerClosed);
+}
+
+/// p05-ipc-149: `fs.read`, `fs.write` and `agent-session-media` are feature
+/// routes answered on frames: a refusal comes back as the ERROR frame of
+/// the line's reply (this test daemon serves neither fs-v1 nor acpmux).
+#[test]
+fn frame_dispatch_binary_routes_answer_on_frames_as_their_lines() {
+    let mut client = Client::granted("binary-routes");
+    let requests = [
+        (json!({"id": 21, "cmd": "fs.read", "path": "/x", "max_bytes": 4}), b"".as_slice()),
+        (json!({"id": 22, "cmd": "fs.write", "path": "/x", "mode": "create"}), b"abc"),
+        (json!({"id": 23, "cmd": "agent-session-media", "surface": 1, "path": "a.png"}), b""),
+    ];
+    for (request_id, (body, raw)) in (40..).zip(requests) {
+        let line = client.line_reply(&body);
+        assert_eq!(line["ok"], json!(false), "{line}");
+        client.send(&binary_request(request_id, &body, raw));
+        match client.next() {
+            Some(Got::Frame(header, framed)) => {
+                assert_eq!(header.kind(), FrameKind::Error, "{body}");
+                assert_eq!(header.call().unwrap().request_id, request_id);
+                assert_eq!(framed, line, "{body}");
+            }
+            other => panic!("expected the ERROR frame of {body}: {other:?}"),
+        }
+    }
+    let (header, _) = client.frame_reply(50, &json!({"cmd": "ping"}));
+    assert_answers(&header, FrameKind::Reply, 50, "ping");
+    assert_eq!(client.finish(), ConnectionEnd::PeerClosed);
+}
+
+/// p05-ipc-149: a binary method's REQUEST must be a binary body of this
+/// daemon's layout, with the binary flag, and raw bytes only where the
+/// method takes them; anything else closes with `bad_message`.
+#[test]
+fn frame_dispatch_a_bad_binary_body_closes_with_bad_message() {
+    let read = json!({"cmd": "fs.read", "path": "/x", "max_bytes": 1});
+    let method_id = method("fs.read").id.raw();
+
+    let mut client = Client::granted("binary-raw");
+    client.send(&binary_request(31, &read, b"zz"));
+    client.closed_with(CallRefusal::BadBinaryBody { method_id, reason: "raw_bytes_refused" });
+
+    let mut client = Client::granted("binary-layout");
+    let mut frame = binary_request(32, &read, b"");
+    frame[cmux_ipc::HEADER_LEN] = crate::binary_body::LAYOUT_VERSION + 1;
+    client.send(&frame);
+    client.closed_with(CallRefusal::BadBinaryBody { method_id, reason: "layout" });
+
+    let mut client = Client::granted("binary-flag");
+    client.send(&request(33, &read));
+    client.closed_with(CallRefusal::FlagsRefused { method_id, flags: 0 });
 }

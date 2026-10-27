@@ -4,6 +4,7 @@
 //! renderer grants. Each function is one `Command` arm of
 //! `handle_command_with_cancellation`.
 
+use super::MessageWriter;
 use super::MutationRequest;
 use super::frontend_shell;
 use super::get_surface;
@@ -419,11 +420,15 @@ pub(super) fn move_terminal(
     }))
 }
 
+/// `terminal-history` as a line's `data` (a framed request's binary body is
+/// answered before dispatch, connection_frame.rs).
 pub(super) fn terminal_history(
     mux: &Arc<Mux>,
+    writer: &MessageWriter,
     params: TerminalHistoryParams,
 ) -> anyhow::Result<Value> {
-    terminal_history::history(mux, params)
+    let reply = terminal_history::history(mux, params)?;
+    Ok(super::bulk_reply::json_data(mux.ipc_stats(), writer, reply))
 }
 
 pub(super) fn terminal_read_range(

@@ -78,6 +78,8 @@ pub struct IpcStats {
     write_syscalls: AtomicU64,
     write_stalls: AtomicU64,
     bad_message: AtomicU64,
+    base64_lines: AtomicU64,
+    base64_frames: AtomicU64,
 }
 
 impl Default for IpcStats {
@@ -95,6 +97,8 @@ impl Default for IpcStats {
             write_syscalls: AtomicU64::new(0),
             write_stalls: AtomicU64::new(0),
             bad_message: AtomicU64::new(0),
+            base64_lines: AtomicU64::new(0),
+            base64_frames: AtomicU64::new(0),
         }
     }
 }
@@ -142,6 +146,18 @@ impl IpcStats {
         self.messages_written.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A reply's bulk bytes were base64-encoded into its JSON, answering a
+    /// request of `transport` (a line, or a REQUEST frame of a method that
+    /// has no binary body). A framed `payload: binary` request gets its
+    /// bytes raw, so `frames` stays 0 for those methods (p05-ipc-149).
+    pub fn base64_encoded(&self, transport: IpcTransport) {
+        let counter = match transport {
+            IpcTransport::Lines => &self.base64_lines,
+            IpcTransport::Frames => &self.base64_frames,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A connection closed because a message was malformed.
     pub fn bad_message(&self) {
         self.bad_message.fetch_add(1, Ordering::Relaxed);
@@ -175,6 +191,10 @@ impl IpcStats {
                 syscalls: write_syscalls,
                 syscalls_per_message: ratio(write_syscalls, messages_written),
                 stalls: self.write_stalls.load(Ordering::Relaxed),
+            },
+            base64_encodes: IpcBase64Snapshot {
+                lines: self.base64_lines.load(Ordering::Relaxed),
+                frames: self.base64_frames.load(Ordering::Relaxed),
             },
             bad_message: self.bad_message.load(Ordering::Relaxed),
         }
@@ -375,6 +395,9 @@ pub struct IpcSnapshot {
     pub sent: Vec<IpcKindSnapshot>,
     pub parses: IpcParsesSnapshot,
     pub writes: IpcWritesSnapshot,
+    /// Bulk replies whose bytes went into their JSON as base64, by the
+    /// transport of their request.
+    pub base64_encodes: IpcBase64Snapshot,
     /// Connections closed for a malformed message, on any transport.
     pub bad_message: u64,
 }
@@ -404,6 +427,12 @@ pub struct IpcParseSnapshot {
     pub requests: u64,
     pub json_parses: u64,
     pub json_parses_per_request: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct IpcBase64Snapshot {
+    pub lines: u64,
+    pub frames: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]

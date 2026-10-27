@@ -12,6 +12,7 @@
 
 use super::AttachWireShape;
 use super::BudgetedText;
+use super::FramePayload;
 use super::RenderService;
 use super::VtStateMessage;
 use super::api_revision_wire;
@@ -146,10 +147,9 @@ pub(super) trait MessageSink: Send + Sync {
     fn client_stream(&self, _id: ClientStreamId) -> Option<OutboundStream> {
         None
     }
-    /// `text` as the payload of a frame with `header`, in the control FIFO
-    /// with replies and control events. Only a local Unix connection that
-    /// granted frames carries them.
-    fn send_frame(&self, _header: FrameHeader, _text: Arc<BudgetedText>) -> std::io::Result<()> {
+    /// `payload` as a frame with `header`, in the control FIFO with replies
+    /// and control events. Only a local Unix connection granted frames.
+    fn send_frame(&self, _header: FrameHeader, _payload: FramePayload) -> std::io::Result<()> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "this sink carries no frames"))
     }
     /// `text` as the payload of a frame with `header` on `stream`'s FIFO,
@@ -290,7 +290,8 @@ impl MessageWriter {
             return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection closed"));
         }
         let ok = reply.get("ok") != Some(&Value::Bool(false));
-        let result = self.reply_text(reply).and_then(|text| self.send_framed_reply(text, ok));
+        let result =
+            self.reply_text(reply).and_then(|text| self.send_framed_reply(text.into(), ok));
         if result.is_err() {
             self.close();
         }
@@ -303,22 +304,20 @@ impl MessageWriter {
         self.project_api_revision(self.project_conversation_tabs(text)?)
     }
 
-    /// `text`, projected already, as the framed request's reply, if this
-    /// writer answers one that has none yet; else as a control line.
-    fn send_framed_reply(&self, text: Arc<BudgetedText>, ok: bool) -> std::io::Result<()> {
+    /// `payload` (JSON text projected already, or a binary body) as the
+    /// framed request's reply, if this writer answers one that has none yet;
+    /// else JSON text as a control line.
+    pub(super) fn send_framed_reply(&self, payload: FramePayload, ok: bool) -> std::io::Result<()> {
         let Some(call) = self.reply.as_ref().filter(|call| call.claim_reply()) else {
-            return self.sink.send_control(text);
+            return self.sink.send_control(payload.into_text()?);
         };
-        let frame = |ok: bool, text: Arc<BudgetedText>| {
-            let header = call.reply_header(ok, text.len()).map_err(|bad| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, bad.to_string())
-            })?;
-            self.sink.send_frame(header, text)
+        let frame = |ok: bool, payload: FramePayload| {
+            self.sink.send_frame(call.reply_header(ok, &payload)?, payload)
         };
         call.send_reply_with(
             ok,
-            || frame(ok, text),
-            || frame(false, self.reply_text(&stream_ended_reply())?),
+            || frame(ok, payload),
+            || frame(false, FramePayload::Text(self.reply_text(&stream_ended_reply())?)),
         )
     }
 
@@ -613,7 +612,7 @@ impl MessageWriter {
         let result = self
             .project_conversation_tabs(text)
             .and_then(|text| self.project_api_revision(text))
-            .and_then(|text| self.send_framed_reply(text, true));
+            .and_then(|text| self.send_framed_reply(text.into(), true));
         if result.is_err() {
             self.close();
         }

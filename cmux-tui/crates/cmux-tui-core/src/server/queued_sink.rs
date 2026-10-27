@@ -3,6 +3,7 @@
 //! writes to (moved out of bounded_outbound.rs).
 
 use super::super::BudgetedText;
+use super::super::FramePayload;
 use super::super::MessageSink;
 use super::super::OutboundStream;
 use super::super::RENDER_ATTACH_MAX_BYTES;
@@ -247,9 +248,9 @@ impl MessageSink for QueuedSink {
         self.outbound.client_stream(id)
     }
 
-    fn send_frame(&self, header: FrameHeader, text: Arc<BudgetedText>) -> std::io::Result<()> {
+    fn send_frame(&self, header: FrameHeader, payload: FramePayload) -> std::io::Result<()> {
         match self.control {
-            Some(SinkControl::Unix(_)) => self.outbound.push_frame(header, text),
+            Some(SinkControl::Unix(_)) => self.outbound.push_frame(header, payload),
             // Frames are granted only to local Unix peers (p05-ipc-060).
             Some(SinkControl::WebSocket(_)) | None => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
