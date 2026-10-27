@@ -178,3 +178,98 @@ fn output_ring_attach_viewers_share_one_ring_and_byte_viewers_keep_their_bytes()
     drop(bytes_viewer);
     surface.kill();
 }
+
+/// The hosted path publishes colored output as a frame: those bytes go into
+/// the ring in output order with the plain bytes around them, the ring's end
+/// stays the snapshot offset, and the advance that ends at the colored chunk
+/// carries its colors.
+#[test]
+fn output_ring_attach_colored_frames_reach_the_ring_in_output_order() {
+    let (_mux, surface) = quiet_terminal("output-ring-colored");
+    let pty = surface.as_pty().unwrap();
+    let (stream, grant) = ring_attach(&surface);
+    let ring = OutputRingReader::open(grant.descriptor.as_fd()).unwrap();
+    let ready = surface.take_viewer_snapshot(&stream.receiver, None).unwrap();
+
+    let mut published: Vec<u8> = Vec::new();
+    let plain = b"plain before\r\n".to_vec();
+    pty.broadcast_attach_output_flow(&plain, 0);
+    published.extend(&plain);
+    let colored = b"colored\r\n".to_vec();
+    let colors = Box::new(TerminalColors::default());
+    pty.broadcast_attach_frame(AttachFrame::output_with_colors(colored.clone(), colors.clone(), 0));
+    published.extend(&colored);
+    let colored_end = ready.offset + published.len() as u64;
+    let after = b"plain after\r\n".to_vec();
+    pty.broadcast_attach_output_flow(&after, 31);
+    published.extend(&after);
+
+    let end = ring.end();
+    assert_eq!(end, ready.offset + published.len() as u64);
+    assert_eq!(end, surface.snapshot_stream_position().unwrap().1, "the ring end is the offset");
+    let mut in_ring = Vec::new();
+    ring.read_into(ready.offset, end, &mut in_ring).unwrap();
+    assert_eq!(in_ring, published, "the ring holds both paths' bytes in output order");
+
+    let interrupt = crate::stream_interrupt::StreamInterrupt::new();
+    let next = || stream.receiver.recv_viewer_event(&interrupt, Some(Instant::now())).unwrap();
+    let colored_advance = RingAdvance::new(colored_end, 0, Some(colors));
+    assert!(
+        matches!(next(), ViewerEvent::Ring(advance) if advance == colored_advance),
+        "the colors apply at the end of the colored chunk"
+    );
+    let last = RingAdvance::new(end, 31, None);
+    assert!(matches!(next(), ViewerEvent::Ring(advance) if advance == last));
+    drop(stream);
+    surface.kill();
+}
+
+/// The terminal's end unmaps the daemon's writable view of its ring and no
+/// ring is made again; a reader that mapped it before keeps every byte,
+/// the exit's mode reset last.
+#[test]
+fn output_ring_attach_the_terminal_end_drops_the_ring_and_readers_keep_the_bytes() {
+    let (_mux, surface) = quiet_terminal("output-ring-end");
+    let pty = surface.as_pty().unwrap();
+    let (stream, grant) = ring_attach(&surface);
+    let ring = OutputRingReader::open(grant.descriptor.as_fd()).unwrap();
+    drop(grant);
+    let printed = feed(pty, b"last words\r\n");
+    assert!(pty.taps.lock().unwrap().ring.is_live());
+
+    pty.publish_final_frame();
+
+    assert!(!pty.taps.lock().unwrap().ring.is_live(), "the daemon unmapped its ring");
+    let end = ring.end();
+    assert_eq!(end, surface.snapshot_stream_position().unwrap().1, "the exit reset was published");
+    let mut in_ring = Vec::new();
+    ring.read_into(ring.base(), end, &mut in_ring).unwrap();
+    assert_eq!(&in_ring[..printed.len()], &printed[..], "the reader's mapping keeps the bytes");
+    let again =
+        surface.attach_snapshot_ring_stream(AttachLifecycle::default(), 1 << 20, false).unwrap();
+    assert!(
+        matches!(again.ring, Err(snapshot_attach::RingUnavailable::Exited)),
+        "an ended terminal makes no ring again"
+    );
+    drop((stream, again));
+    surface.kill();
+}
+
+/// A hosted terminal's exit ends its ring the same way.
+#[test]
+fn output_ring_attach_a_hosted_exit_drops_the_ring() {
+    let (_mux, surface) = quiet_terminal("output-ring-hosted-end");
+    let pty = surface.as_pty().unwrap();
+    let (stream, grant) = ring_attach(&surface);
+    let ring = OutputRingReader::open(grant.descriptor.as_fd()).unwrap();
+    let printed = feed(pty, b"bye\r\n");
+
+    pty.finish_hosted_exit();
+
+    assert!(!pty.taps.lock().unwrap().ring.is_live(), "the daemon unmapped its ring");
+    let mut in_ring = Vec::new();
+    ring.read_into(grant.base, grant.base + printed.len() as u64, &mut in_ring).unwrap();
+    assert_eq!(in_ring, printed);
+    drop(stream);
+    surface.kill();
+}

@@ -28,9 +28,10 @@ mod output_rope;
 #[cfg(test)]
 pub(super) use output_arena::OUTPUT_ARENA_BLOCK_BYTES;
 pub(super) use output_arena::OutputArena;
-pub(crate) use output_ring::RingAdvance;
 #[cfg(unix)]
-pub(crate) use output_ring::{OutputRingGrant, TerminalOutputRing};
+pub(crate) use output_ring::OutputRingGrant;
+pub(crate) use output_ring::RingAdvance;
+use output_ring::TerminalRingSlot;
 #[cfg(test)]
 pub(super) use output_rope::OUTPUT_ROPE_COPY_MAX_BYTES;
 pub(super) use output_rope::OutputRope;
@@ -44,8 +45,7 @@ pub(super) struct AttachTaps {
     output: OutputArena,
     /// Made on the first ring attach, then written with every output byte
     /// until the terminal ends ([`output_ring`]).
-    #[cfg(unix)]
-    ring: Option<TerminalOutputRing>,
+    pub(super) ring: TerminalRingSlot,
 }
 
 impl AttachTaps {
@@ -59,25 +59,12 @@ impl AttachTaps {
         Some(self.output.chunk(bytes))
     }
 
-    /// Writes `bytes` into the terminal's ring, if it has one: its new end.
-    /// The caller counted them in the snapshot offset under the same
-    /// terminal lock, so the ring's end stays that offset.
-    #[cfg(unix)]
-    fn publish_ring(&mut self, bytes: &[u8]) -> Option<u64> {
-        self.ring.as_mut().map(|ring| ring.publish(bytes))
-    }
-
-    #[cfg(not(unix))]
-    fn publish_ring(&mut self, _bytes: &[u8]) -> Option<u64> {
-        None
-    }
-
     /// PTY output the parser accepted, to every viewer: byte viewers share
     /// one chunk of it (echoing `flow`), ring viewers get an advance to the
     /// ring's new end. Viewers that are gone are dropped; true when one is
     /// left.
     pub(super) fn broadcast_output(&mut self, bytes: &[u8], flow: u64) -> bool {
-        let advance = self.publish_ring(bytes).map(|end| RingAdvance::new(end, flow, None));
+        let advance = self.ring.publish(bytes).map(|end| RingAdvance::new(end, flow, None));
         let frame = self.output_chunk(bytes).map(|chunk| AttachFrame::with_flow(chunk, flow));
         self.taps.retain(|tap| {
             if tap.ring {
@@ -93,7 +80,7 @@ impl AttachTaps {
     /// first, and reaches a ring viewer as an advance with the frame's flow
     /// and colors; anything else reaches every viewer as is.
     pub(super) fn broadcast_frame(&mut self, frame: &AttachFrame) {
-        let advance = frame.output().and_then(|bytes| self.publish_ring(bytes)).map(|end| {
+        let advance = frame.output().and_then(|bytes| self.ring.publish(bytes)).map(|end| {
             RingAdvance::new(
                 end,
                 frame.flow(),
@@ -104,22 +91,6 @@ impl AttachTaps {
             (Some(advance), true) => tap.try_send_ring(advance.clone()),
             _ => tap.try_send(frame.clone()),
         });
-    }
-
-    /// The ring a ring viewer attached at snapshot `offset` reads, made now
-    /// when the terminal has none. The caller holds the terminal lock, so
-    /// no output moves the offset meanwhile.
-    #[cfg(unix)]
-    pub(super) fn ring_grant(
-        &mut self,
-        offset: u64,
-    ) -> Result<OutputRingGrant, cmux_ipc::output_ring::RingError> {
-        let ring = match &mut self.ring {
-            Some(ring) => ring,
-            None => self.ring.insert(TerminalOutputRing::create(offset)?),
-        };
-        debug_assert_eq!(ring.end(), offset, "the ring's end is the snapshot offset");
-        ring.grant()
     }
 }
 

@@ -271,7 +271,7 @@ F10
 7. Ordering: replies follow their events on the control sequence; stream items stay in their stream FIFO;
    priority never reorders inside a sequence.
 8. No blocking call on the app main thread; no main-thread sendmsg.
-9. risk:high tasks (103, 104, 108, 111, 115, 119, 120, 132, 133, 130) need `Review (<reviewer>): SHIP at <sha>`.
+9. risk:high tasks (103, 104, 108, 111, 111b, 115, 119, 120, 132, 133, 130) need `Review (<reviewer>): SHIP at <sha>`.
    F10 tasks (120-138) also need a PL-daemon review; ring tasks a PL-holder review; 097 and 113 a PL-ghostty
    review; 080, 127, 137, 138, 150, 155 a PL-qos review.
 10. Owners to tell: PL-conn (all; owns D3 and the design), PL-daemon (core:), PL-ghostty, PL-holder, PL-cef-helper
@@ -481,8 +481,9 @@ check it.
 | 109 | Page relay off the main actor | M | normal | - | 104 |
 | 110 | cmux-ipc output ring from holder segment code | M | normal | - | 050 |
 | 111 | Daemon ring per terminal, RING/RING_ADVANCE | L | high | - | 110, 051, 074, 076 |
+| 111b | Bind terminal-output-ring-v1 in the attach-frames writer | M | high | - | 111, p01-process-126 |
 | 112 | Swift SharedOutputRing | M | normal | - | 054 |
-| 113 | App ring streams | M | normal | - | 111, 112, 097 |
+| 113 | App ring streams | M | normal | - | 111, 111b, 112, 097 |
 | 114 | Resume by offset | M | normal | - | 113 |
 | 115 | SHARED_BUFFER pool (bench-gated) | L | high | Q7 | 051, 071, 090 |
 | 116 | Ring sizing evidence | S | low | - | 113 |
@@ -1076,6 +1077,17 @@ core:server/attach_frames.rs, core:server/capabilities.rs. Change: ring on the f
 order; RING frame with the RO fd; RING_ADVANCE merged (newest end wins); grant only to local same-euid peers.
 Acceptance: ring bytes equal parser bytes at the same offsets; remote/WebSocket/bridge never get RING; one
 RING_ADVANCE in flight per stream; receipt. Test: RUST(output_ring_attach).
+
+**p05-ipc-111b bind the ring (risk:high).** Files: core:server/cmd_attach.rs, core:server/attach_frames.rs,
+core:server/capabilities.rs. Change: 111 leaves `terminal-output-ring-v1` unbound, because no attach-frames writer
+is on the branch. The writer that p01-process-126 lands attaches a ring viewer when `grants_output_ring` allows the
+connection. It writes RING through `RingAnnouncement::send_from` (the read-only fd goes with the first byte,
+SCM_RIGHTS; a resumed send carries none). It announces a `RefusedRing` grant again when the budget has room, and
+sends each merged advance as RING_ADVANCE. Then it adds `OutputRing` to `IpcTransports::BOUND`. Acceptance:
+identify advertises the ring only to a local same-euid peer once attach-frames-v1 is bound; a socket test receives
+RING with exactly one fd that maps PROT_READ and holds the parsed bytes; a full budget delays RING and never loses
+the fd; remote/WebSocket/bridge never get RING. Test: RUST(output_ring_attach attach_frames attach_streams).
+Depends: 111, p01-process-126.
 
 **p05-ipc-112 SharedOutputRing.** Files: app:CmuxNextIPC/SharedOutputRing.swift, Tests/CmuxNextIPCTests/SharedOutputRingTests.swift.
 Change: verify mmap(PROT_WRITE, MAP_SHARED) fails (success = protocol error), then PROT_READ map and close the fd;

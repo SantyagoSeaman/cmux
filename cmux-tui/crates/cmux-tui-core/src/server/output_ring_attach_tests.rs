@@ -3,14 +3,14 @@
 //! RING_ADVANCE per merged end; the bytes the reader maps are the bytes the
 //! daemon parsed, at the offsets the frames name.
 
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 
 use cmux_ipc::output_ring::{DEFAULT_CAPACITY, LAYOUT, OutputRingReader};
 use cmux_ipc::{Aux, FrameKind, FrameReader, Message, ReaderLimits};
 use serde_json::{Value, json};
 
-use super::{AttachFrameEncoder, AttachFrameError, BudgetedFrame};
+use super::{AttachFrameEncoder, AttachFrameError, BudgetedFrame, RefusedRing};
 use crate::server::AttachWireShape;
 use crate::server::render_service::OutboundByteBudget;
 use crate::stream_interrupt::StreamInterrupt;
@@ -96,7 +96,7 @@ fn output_ring_attach_frames_name_the_parsed_bytes() {
             4096,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
-            std::os::fd::AsRawFd::as_raw_fd(&announcement.descriptor),
+            announcement.descriptor.as_raw_fd(),
             0,
         )
     };
@@ -128,7 +128,10 @@ fn output_ring_attach_advances_carry_their_sidecar_and_keep_the_stream_rules() {
     };
     assert!(matches!(early.error, AttachFrameError::NoRing));
     encoder.ring(grant, &budget).unwrap();
-    assert!(matches!(encoder.ring(second, &budget), Err(AttachFrameError::RingAgain)));
+    assert!(matches!(
+        encoder.ring(second, &budget),
+        Err(RefusedRing { error: AttachFrameError::RingAgain, .. })
+    ));
 
     let colors = TerminalColors::default();
     let end = encoder.offset() + 4;
@@ -150,5 +153,101 @@ fn output_ring_attach_advances_carry_their_sidecar_and_keep_the_stream_rules() {
     assert_eq!(behind.advance.end, end - 1, "a refused advance comes back whole");
     assert_eq!(encoder.offset(), end);
     drop(attach.stream);
+    surface.kill();
+}
+
+/// A full outbound budget refuses the RING frame but hands the grant back,
+/// descriptor and all: once the budget has room the same descriptor is
+/// announced, so a full budget never costs the viewer its ring.
+#[test]
+fn output_ring_attach_a_full_budget_hands_the_grant_back() {
+    let (_mux, surface) = quiet_terminal("output-ring-full-budget");
+    let attach =
+        surface.attach_snapshot_ring_stream(AttachLifecycle::default(), 1 << 20, false).unwrap();
+    let grant = attach.ring.unwrap();
+    let descriptor = grant.descriptor.as_raw_fd();
+    let budget = Arc::new(OutboundByteBudget::new(1 << 10));
+    assert!(budget.try_retain(1 << 10), "fill the budget");
+    let mut encoder =
+        AttachFrameEncoder::new(STREAM, SURFACE, AttachWireShape::default(), grant.end).unwrap();
+
+    let Err(refused) = encoder.ring(grant, &budget) else { panic!("a RING over a full budget") };
+    let AttachFrameError::Write(error) = &refused.error else { panic!("{}", refused.error) };
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(refused.grant.descriptor.as_raw_fd(), descriptor, "the descriptor came back");
+    let Err(early) = encoder.ring_advance(RingAdvance::new(refused.grant.end, 0, None), &budget)
+    else {
+        panic!("a refused RING announced no ring");
+    };
+    assert!(matches!(early.error, AttachFrameError::NoRing));
+
+    budget.release(1 << 10);
+    let announcement = encoder.ring(refused.grant, &budget).unwrap();
+    assert_eq!(announcement.descriptor.as_raw_fd(), descriptor, "the same descriptor announced");
+    drop(announcement);
+    assert_eq!(
+        budget.retained_bytes.load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "the frame gave its charge back"
+    );
+    drop(attach.stream);
+    surface.kill();
+}
+
+/// The RING frame crosses a socket with its descriptor on the first byte:
+/// a peer that reads the stream with `FdReceiver` gets the frame and
+/// exactly one descriptor together, and maps the ring read-only.
+#[test]
+fn output_ring_attach_the_ring_frame_carries_its_descriptor_over_a_socket() {
+    let (_mux, surface) = quiet_terminal("output-ring-scm-rights");
+    let attach =
+        surface.attach_snapshot_ring_stream(AttachLifecycle::default(), 1 << 20, false).unwrap();
+    let (stream, grant) = (attach.stream, attach.ring.unwrap());
+    let ready = surface.take_viewer_snapshot(&stream.receiver, None).unwrap();
+    let parsed = surface.inject_output_for_test(b"over the socket\r\n");
+    let budget = Arc::new(OutboundByteBudget::new(1 << 20));
+    let mut encoder =
+        AttachFrameEncoder::new(STREAM, SURFACE, AttachWireShape::default(), ready.offset).unwrap();
+    let announcement = encoder.ring(grant, &budget).unwrap();
+
+    let (daemon, app) = std::os::unix::net::UnixStream::pair().unwrap();
+    let sent = announcement.send_from(daemon.as_fd(), 0).unwrap();
+    assert_eq!(sent, announcement.wire_len());
+    assert_eq!(announcement.send_from(daemon.as_fd(), sent).unwrap(), sent, "nothing is left");
+    drop(daemon);
+
+    // A send resumed after byte 0 carries the rest and no second descriptor.
+    let (resumed, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    assert_eq!(announcement.send_from(resumed.as_fd(), 5).unwrap(), announcement.wire_len());
+    drop(resumed);
+    let mut rest_fds = cmux_ipc::fds::FdReceiver::default();
+    let mut rest = Vec::new();
+    while rest_fds.recv(peer.as_raw_fd(), &mut rest, 1 << 16, |_| {}).unwrap() > 0 {}
+    assert_eq!(rest.len(), announcement.wire_len() - 5);
+    assert_eq!(rest_fds.queued(), 0, "the descriptor rides only byte 0");
+
+    let mut fds = cmux_ipc::fds::FdReceiver::default();
+    let mut reader = FrameReader::new(ReaderLimits::default());
+    reader.negotiate_frames();
+    loop {
+        let read = reader
+            .read_with(|room| fds.recv_into(app.as_raw_fd(), room, |_| {}))
+            .expect("the RING frame reads");
+        if read == 0 {
+            break;
+        }
+    }
+    assert_eq!(fds.queued(), 1, "one descriptor rode the frame");
+    let Message::Frame(frame) = reader.next_message().unwrap().expect("one frame") else {
+        panic!("a JSON line instead of the RING frame");
+    };
+    assert_eq!(frame.header().kind(), FrameKind::Ring);
+    assert_eq!(frame.header().aux(), Aux::Offset(ready.offset));
+    let descriptor = fds.take(1).unwrap().pop().unwrap();
+    let ring = OutputRingReader::open(descriptor.as_fd()).unwrap();
+    let mut in_ring = Vec::new();
+    ring.read_into(ready.offset, ready.offset + parsed.len() as u64, &mut in_ring).unwrap();
+    assert_eq!(in_ring, parsed, "the received descriptor maps the ring");
+    drop(stream);
     surface.kill();
 }

@@ -165,15 +165,74 @@ impl std::error::Error for RefusedRingAdvance {
     }
 }
 
-/// A stream's RING frame and the ring's read-only descriptor, which the
-/// writer passes with the frame's first byte (SCM_RIGHTS), so the reader
-/// gets both together and in stream order (app-daemon-connection-DESIGN.md
-/// 4.3). Only a connection granted `terminal-output-ring-v1` gets one
-/// (server/capabilities.rs, `grants_output_ring`).
+/// An [`OutputRingGrant`] that was not announced, handed back with its
+/// descriptor so the writer can announce it again once the budget has room:
+/// the viewer has no other way to its ring.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(super) struct RefusedRing {
+    pub(super) grant: OutputRingGrant,
+    pub(super) error: AttachFrameError,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for RefusedRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for RefusedRing {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// A stream's RING frame and the ring's read-only descriptor, which
+/// [`Self::send_from`] passes with the frame's first byte (SCM_RIGHTS), so
+/// the reader gets both together and in stream order
+/// (app-daemon-connection-DESIGN.md 4.3; Mojo sends a message's handles
+/// with its first bytes, mojo/core/channel_posix.cc). Only a connection
+/// granted `terminal-output-ring-v1` gets one (server/capabilities.rs,
+/// `grants_output_ring`).
 #[cfg(unix)]
 pub(super) struct RingAnnouncement {
     pub(super) frame: BudgetedFrame,
     pub(super) descriptor: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl RingAnnouncement {
+    /// Sends the frame's wire bytes (header, then meta) from `sent` on,
+    /// the descriptor with byte 0 (`cmux_ipc::fds::send_with_fds`): the
+    /// bytes sent so far. A non-blocking writer calls it again from what it
+    /// returned until that is [`Self::wire_len`]. The descriptor rides only
+    /// the call that sends byte 0, and a `WouldBlock` there sends nothing,
+    /// so the reader gets it exactly once, with the frame's first byte.
+    pub(super) fn send_from(
+        &self,
+        socket: std::os::fd::BorrowedFd<'_>,
+        sent: usize,
+    ) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        let header = self.frame.header.encode();
+        let mut wire = Vec::with_capacity(self.wire_len());
+        wire.extend_from_slice(&header);
+        wire.extend_from_slice(self.frame.payload());
+        let Some(rest) = wire.get(sent..).filter(|rest| !rest.is_empty()) else {
+            return Ok(sent.min(wire.len()));
+        };
+        let descriptor = [self.descriptor.as_raw_fd()];
+        let fds: &[std::os::fd::RawFd] = if sent == 0 { &descriptor } else { &[] };
+        let written = cmux_ipc::fds::send_with_fds(socket.as_raw_fd(), rest, fds)?;
+        Ok(sent + written)
+    }
+
+    /// Bytes [`Self::send_from`] sends in all.
+    pub(super) fn wire_len(&self) -> usize {
+        self.frame.header.frame_len()
+    }
 }
 
 /// A frame payload charged to an outbound byte budget until it drops, as a
@@ -391,13 +450,29 @@ impl AttachFrameEncoder {
 
     /// The stream's RING frame for `grant`, which it consumes: the
     /// descriptor leaves with the frame. Once per stream, before any
-    /// [`Self::ring_advance`].
+    /// [`Self::ring_advance`]. A refused grant comes back whole, descriptor
+    /// and all, as a refused advance does.
     #[cfg(unix)]
     pub(super) fn ring(
         &mut self,
         grant: OutputRingGrant,
         budget: &Arc<OutboundByteBudget>,
-    ) -> Result<RingAnnouncement, AttachFrameError> {
+    ) -> Result<RingAnnouncement, RefusedRing> {
+        match self.encode_ring(&grant, budget) {
+            Ok(frame) => {
+                self.ring = true;
+                Ok(RingAnnouncement { frame, descriptor: grant.descriptor })
+            }
+            Err(error) => Err(RefusedRing { grant, error }),
+        }
+    }
+
+    #[cfg(unix)]
+    fn encode_ring(
+        &self,
+        grant: &OutputRingGrant,
+        budget: &Arc<OutboundByteBudget>,
+    ) -> Result<BudgetedFrame, AttachFrameError> {
         if self.ring {
             return Err(AttachFrameError::RingAgain);
         }
@@ -409,9 +484,7 @@ impl AttachFrameEncoder {
         )?;
         let payload = BudgetedBytes::finish(meta);
         let header = self.header(FrameKind::Ring, payload.bytes.len(), grant.end)?;
-        let frame = BudgetedFrame::new(header, payload)?;
-        self.ring = true;
-        Ok(RingAnnouncement { frame, descriptor: grant.descriptor })
+        BudgetedFrame::new(header, payload)
     }
 
     /// One RING_ADVANCE to `advance.end`, then the `output` sidecar EVENT of

@@ -323,13 +323,10 @@ impl Surface {
             #[cfg(unix)]
             SnapshotViewerOutput::Ring => {
                 let offset = pty.snapshot_position.load().1;
-                let grant = pty.taps.lock().unwrap().ring_grant(offset);
+                let grant = pty.taps.lock().unwrap().ring.grant(offset);
                 let pair =
                     if grant.is_ok() { AttachTap::ring_pair } else { AttachTap::snapshot_pair };
-                (
-                    pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes),
-                    Some(grant.map_err(RingUnavailable::Ring)),
-                )
+                (pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes), Some(grant))
             }
         };
         receiver.set_local_history(local_history);

@@ -204,10 +204,11 @@ impl IpcCapability {
 /// once its implementation is bound. The task that lands a transport adds its
 /// capability to [`Self::BOUND`]: the frame reader (p05-ipc-061) `Frames`,
 /// streams and `cancel-stream` (p05-ipc-074) `AttachStreams`, attach frames
-/// `AttachFrames`, the ring `OutputRing` (the daemon side of p05-ipc-111 is
-/// the terminal ring, `Surface::attach_snapshot_ring_stream`, and its RING /
-/// RING_ADVANCE encoding, server/attach_frames.rs; it is bound with the
-/// attach-frames writer that sends them).
+/// `AttachFrames`, the ring `OutputRing` (p05-ipc-111 made the terminal
+/// ring, `Surface::attach_snapshot_ring_stream`, its RING / RING_ADVANCE
+/// encoding and the RING descriptor send, `RingAnnouncement::send_from` in
+/// server/attach_frames.rs; p05-ipc-111b binds it in the attach-frames
+/// writer that p01-process-126 lands).
 pub(super) struct IpcTransports(AtomicU8);
 
 impl IpcTransports {
