@@ -43,6 +43,9 @@ Warnings (never refuse):
             on the fleet, and the id's `trace` catalog names to read it under. A marker the push touches
             that marks no declaration warns too.
   owner     the push touches an area in plans/cmux-next/OWNERS.md; names the owner and the doc to read.
+  refactor-switch  the push adds a RefactorSwitchKey case (CmuxNextCompat/RefactorSwitches.swift) or a
+            SWITCH_NAMES entry (cmux-tui-core/src/switches.rs, CMUX_TUI_SWITCHES) that no file in
+            plans/cmux-next/refactor-switches/ registers; one line per name.
 
 `app-size` is a net count over the push, not a per-line rule, in source lines as CI's check-app-size.sh --base
 counts them (count-swift-code-lines.py's lexer: blank and comment lines never count, either way). It refuses
@@ -4996,6 +4999,101 @@ def owner_warnings(files: list[str], owners: list[tuple[str, list[str], str, str
     return out
 
 
+# The refactor switch catalogs and their registry (p15-oracle-018, plans/cmux-next/refactor-switches/README.md). Like
+# Chrome's AboutFlagsTest.EveryFlagHasMetadata (chrome/browser/about_flags_unittest.cc: every about:flags entry has a
+# flag-metadata.json row with owners and an expiry), a new switch name needs its registry file; here it only warns.
+# The installed hook snapshot holds no oracle/ folder, so the two catalog shapes oracle/switches.py --check reads
+# (app_catalog, daemon_catalog) are read here from the push's blobs.
+SWITCH_REGISTRY = "plans/cmux-next/refactor-switches/"
+APP_SWITCH_CATALOG = SOURCES + "CmuxNextCompat/RefactorSwitches.swift"
+DAEMON_SWITCH_CATALOG = RUST_CRATES + "cmux-tui-core/src/switches.rs"
+SWIFT_TOKENS = re.compile(r'"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
+SWITCH_KEY_ENUM = re.compile(r"\benum\s+RefactorSwitchKey\b[^{]*\{")
+SWITCH_KEY_CASE = re.compile(r'\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*(?:=\s*"([^"]*)")?\s*$')
+SWITCH_NAMES_ARRAY = re.compile(r"\bSWITCH_NAMES\s*:\s*&\s*\[\s*&\s*(?:'static\s+)?str\s*\]\s*=\s*&\s*\[([^\]]*)\]")
+
+
+def line_at(text: str, offset: int) -> int:
+    """The 1-based line of TEXT that holds OFFSET."""
+    return text.count("\n", 0, offset) + 1
+
+
+def app_switch_names(text: str) -> dict[str, int]:
+    """{raw value: 1-based line} of each case of `enum RefactorSwitchKey` in TEXT (a bare `case name` is its own raw
+    value), as oracle/switches.py's app_catalog reads it."""
+    code = SWIFT_TOKENS.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    match = SWITCH_KEY_ENUM.search(code)
+    if match is None:
+        return {}
+    depth, end = 1, match.end()
+    while end < len(code) and depth:
+        depth += {"{": 1, "}": -1}.get(code[end], 0)
+        end += 1
+    names: dict[str, int] = {}
+    for case in re.finditer(r"\bcase\b([^\n;]*)", code[match.end():end - 1]):
+        start = match.end() + case.start(1)
+        offset = start
+        # The stripped text blanked the string literals; the raw text at the same offsets keeps them.
+        for item in text[start:match.end() + case.end(1)].split(","):
+            named = SWITCH_KEY_CASE.match(item)
+            if named:
+                names.setdefault(named.group(2) if named.group(2) is not None else named.group(1), line_at(text, offset))
+            offset += len(item) + 1
+    return names
+
+
+def daemon_switch_names(text: str) -> dict[str, int]:
+    """{name: 1-based line} of each string literal of `SWITCH_NAMES` in TEXT (switches.rs: the names
+    CMUX_TUI_SWITCHES accepts), as oracle/switches.py's daemon_catalog reads it."""
+    code = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
+    match = SWITCH_NAMES_ARRAY.search(code)
+    if match is None:
+        return {}
+    names: dict[str, int] = {}
+    for literal in re.finditer(r'"([^"\\]*)"', match.group(1)):
+        names.setdefault(literal.group(1), line_at(code, match.start(1) + literal.start()))
+    return names
+
+
+def registered_switch_keys(repo: Path, head: str) -> dict[str, set[str]]:
+    """{"app_key": keys, "daemon_key": keys} of the registry files at HEAD. A file that is not a JSON object is
+    skipped: switches.py --check refuses it."""
+    listed = git(repo, "ls-tree", "--name-only", head, "--", SWITCH_REGISTRY, check=False).split("\n")
+    paths = [p for p in listed if p.endswith(".json")]
+    keys: dict[str, set[str]] = {"app_key": set(), "daemon_key": set()}
+    for text in blobs(repo, [(head, p) for p in paths]).values():
+        try:
+            entry = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            for field_name, found in keys.items():
+                if isinstance(entry.get(field_name), str):
+                    found.add(entry[field_name])
+    return keys
+
+
+def refactor_switch_warnings(repo: Path, base: str, head: str, texts: dict[tuple[str, str], str],
+                             changed: set[str]) -> list[str]:
+    """One warning per switch name the push adds to RefactorSwitchKey or SWITCH_NAMES (a name at HEAD the base
+    catalog lacks) that no registry file at HEAD names as its app_key or daemon_key. Never a refusal."""
+    catalogs = [(path, read, field_name, env) for path, read, field_name, env in (
+        (APP_SWITCH_CATALOG, app_switch_names, "app_key", "--cmux-switches / CMUX_NEXT_SWITCHES"),
+        (DAEMON_SWITCH_CATALOG, daemon_switch_names, "daemon_key", "CMUX_TUI_SWITCHES")) if path in changed]
+    if not catalogs:
+        return []
+    registered = registered_switch_keys(repo, head)
+    out = []
+    for path, read, field_name, env in catalogs:
+        before = read(texts.get((base, path), ""))
+        for name, line in read(texts.get((head, path), "")).items():
+            if name not in before and name not in registered[field_name]:
+                out.append(f"{path}:{line}: adds refactor switch {name!r} ({env}) with no {SWITCH_REGISTRY}<name>.json "
+                           f"whose {field_name} is {name!r}; register it (owner, plan, expiry; README.md there) and "
+                           "run `python3 -I scripts/cmux-next/oracle/switches.py --check`.")
+    return out
+
+
 # ---------------------------------------------------------------- run
 
 def check_failure(name: str, error: Exception) -> str:
@@ -5122,6 +5220,10 @@ def measure(repo: Path, base: str, head: str) -> tuple[list[tuple[Rule, list[Add
             warnings += [("owner", w) for w in owner_warnings(names_list, parse_owners(texts[(head, OWNERS)]))]
         except Exception as error:  # a broken warning must not switch off the refusals above
             warnings.append(("guardrails", check_failure("owner", error)))
+    try:
+        warnings += [("refactor-switch", w) for w in refactor_switch_warnings(repo, base, head, texts, set(changes))]
+    except Exception as error:  # a broken warning must not switch off the refusals above
+        warnings.append(("guardrails", check_failure("refactor-switch", error)))
     return found, warnings
 
 
