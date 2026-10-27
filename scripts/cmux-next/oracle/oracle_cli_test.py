@@ -752,6 +752,146 @@ class ExpectationTests(unittest.TestCase):
         self.assertIn("bug-id", out.getvalue())
 
 
+SHA = "0123456789abcdef0123456789abcdef01234567"
+PARITY_LINES = (
+    "p15-oracle-235 [ windows ] daemon-ops/case-001#/value [ Failure ]  # cwd is C:\\o on the lane\n"
+    "p15-oracle-235 [ windows ] daemon-ops/case-002 [ Skip ]  # no ConPTY in the lane session\n"
+)
+
+
+@unittest.skipUnless(HAS_EXPECTATIONS, "expectations.py (p15-oracle-015) is not beside oracle.py")
+class PlatformParityTests(unittest.TestCase):
+    """`diff --platform-parity`: a Windows (or mac) run of one commit against its Linux run (p15-oracle-235)."""
+
+    def setUp(self):
+        self.raw = tempfile.TemporaryDirectory()
+        self.addCleanup(self.raw.cleanup)
+        self.tmp = Path(self.raw.name)
+        write_corpus(self.tmp / "corpus", suites=("daemon-ops",), per_suite=4, extra={
+            "daemon-ops/case-004": {"id": "daemon-ops/case-004", "platforms": ["linux", "mac"],
+                                    "steps": [{"id": "s1", "op": "snapshot"}]},
+        })
+        for name in ("Expectations.d", "NeverFix.d"):
+            (self.tmp / "expectations" / name).mkdir(parents=True)
+        self.lines(PARITY_LINES)
+
+    def lines(self, text):
+        (self.tmp / "expectations" / "Expectations.d" / "daemon-ops.txt").write_text(text)
+
+    def run_platform(self, platform, driver, *, arch, ref=SHA, **overrides):
+        store = oracle.load_expectations(self.tmp / "expectations", platform=platform, arm=None, product="daemon",
+                                         build=overrides.get("build", "debug"))
+        cases, _ = oracle.load_corpus(self.tmp / "corpus")
+        out = self.tmp / platform
+        oracle.perform_run(options(self.tmp, out=out, run_id=platform, platform=platform, ref=ref, retry_limit=0, **overrides),
+                           cases, driver.open_session, store.expected, {})
+        path = out / "receipt.json"
+        receipt = json.loads(path.read_text())
+        receipt["host"] = {"name": f"{platform}-host", "os": platform, "osVersion": "1", "arch": arch}
+        path.write_text(json.dumps(receipt))
+
+    def windows_driver(self, wrong=("daemon-ops/case-001",)):
+        return FakeDriver(value_of=lambda cid, n: "C:\\o" if cid in wrong else "v-" + cid)
+
+    def parity(self, *extra):
+        argv = ["diff", "--platform-parity", "--base-run", str(self.tmp / "linux"), "--head-run", str(self.tmp / "windows"),
+                "--expectations-root", str(self.tmp / "expectations"), "--out", str(self.tmp / "cmp"), *extra]
+        code = quiet(oracle.main, argv)
+        path = self.tmp / "cmp" / "comparison.json"
+        return code, json.loads(path.read_text()) if path.is_file() else None
+
+    def test_windows_lane_matches_linux_except_reasoned_windows_lines(self):
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="AMD64")
+        code, cmp = self.parity()
+        self.assertEqual(code, 0, cmp)
+        self.assertEqual(cmp["explained"], ["daemon-ops/case-001"])
+        self.assertEqual(cmp["summary"]["equal"], 2)  # case-000 and case-003
+        self.assertEqual(sorted(cmp["not_comparable"]), ["daemon-ops/case-002", "daemon-ops/case-004"])
+        self.assertIn("no ConPTY in the lane session", cmp["not_comparable"]["daemon-ops/case-002"])
+        self.assertIn("not selected on windows", cmp["not_comparable"]["daemon-ops/case-004"])
+        parity = cmp["platform_parity"]
+        self.assertEqual((parity["reference"], parity["platform"], parity["sha"]), ("linux", "windows", SHA))
+        self.assertEqual([line["reason"] for line in parity["lines"]],
+                         ["cwd is C:\\o on the lane", "no ConPTY in the lane session"])
+        self.assertEqual(parity["unreasoned"], [])
+        report = json.loads(Path(cmp["divergence"]).read_text())
+        self.assertEqual(report["hostPolicy"], "same-arch-any-os")
+
+    def test_an_unlisted_windows_difference_diverges(self):
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(("daemon-ops/case-001", "daemon-ops/case-003")), arch="AMD64")
+        code, cmp = self.parity()
+        self.assertEqual(code, 1)
+        self.assertEqual(cmp["divergent"], ["daemon-ops/case-003"])
+
+    def test_a_line_without_a_platform_tag_explains_no_platform_difference(self):
+        self.lines(PARITY_LINES + "p15-oracle-015 daemon-ops/case-003#/value [ Failure ]\n")
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(("daemon-ops/case-001", "daemon-ops/case-003")), arch="AMD64")
+        code, cmp = self.parity()
+        self.assertEqual(code, 1)
+        self.assertEqual(cmp["divergent"], ["daemon-ops/case-003"])
+
+    def test_a_windows_line_without_a_reason_refuses_parity_and_fails_check(self):
+        self.lines(PARITY_LINES + "p15-oracle-235 [ windows ] daemon-ops/case-003#/value [ Failure ]\n")
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="AMD64")
+        code, cmp = self.parity()
+        self.assertEqual(code, oracle.EXIT_REFUSED)
+        self.assertFalse(cmp["ok"])
+        self.assertIn("without a reason", cmp["refused"])
+        self.assertEqual(len(cmp["platform_parity"]["unreasoned"]), 1)
+        self.assertIn("daemon-ops/case-003#/value", cmp["platform_parity"]["unreasoned"][0])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = oracle.main(["check", "--corpus", str(self.tmp / "corpus"),
+                                "--expectations-root", str(self.tmp / "expectations")])
+        self.assertEqual(code, 1)
+        self.assertIn("a [ windows ] line needs a reason", out.getvalue())
+
+    def test_two_commits_or_two_configs_are_refused(self):
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="AMD64", ref="f" * 40)
+        code, cmp = self.parity()
+        self.assertEqual(code, oracle.EXIT_REFUSED)
+        self.assertIn("one commit", cmp["refused"])
+        self.run_platform("windows", self.windows_driver(), arch="AMD64", build="bench")
+        code, cmp = self.parity()
+        self.assertEqual(code, oracle.EXIT_REFUSED)
+        self.assertIn("build", cmp["refused"])
+
+    def test_another_arch_is_a_host_mismatch(self):
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="ARM64")
+        code, cmp = self.parity()
+        self.assertEqual(code, oracle.EXIT_REFUSED)
+        self.assertTrue(cmp["refused"].startswith("host-mismatch"), cmp["refused"])
+
+    def test_the_linux_run_is_the_base_side(self):
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="AMD64")
+        argv = ["diff", "--platform-parity", "--base-run", str(self.tmp / "windows"), "--head-run", str(self.tmp / "linux"),
+                "--expectations-root", str(self.tmp / "expectations"), "--out", str(self.tmp / "cmp")]
+        self.assertEqual(quiet(oracle.main, argv), 2)
+        self.assertEqual(quiet(oracle.main, ["diff", "--platform-parity", "--head-run", str(self.tmp / "windows")]), 2)
+
+    def test_every_case_left_out_is_refused_not_passed(self):
+        self.lines(PARITY_LINES + "p15-oracle-235 [ windows ] daemon-ops/* [ Skip ]  # the lane has no daemon yet\n")
+        self.run_platform("linux", FakeDriver(), arch="x86_64")
+        self.run_platform("windows", self.windows_driver(), arch="AMD64")
+        code, cmp = self.parity()
+        self.assertEqual(code, oracle.EXIT_REFUSED)
+        self.assertTrue(cmp["refused"].startswith("nothing compared"), cmp["refused"])
+        self.assertEqual(len(cmp["not_comparable"]), 5)
+
+    def test_trailing_comment(self):
+        self.assertEqual(oracle.trailing_comment("p15-oracle-235 [ windows ] s/c#/a [ Failure ]  # why"), "why")
+        self.assertIsNone(oracle.trailing_comment("p15-oracle-235 [ windows ] s/c#/a [ Failure ]"))
+        self.assertIsNone(oracle.trailing_comment("#12 [ windows ] s/c [ Skip ] #"))
+        self.assertEqual(oracle.trailing_comment("#12 [ windows ] s/c [ Skip ] # lane"), "lane")
+
+
 class CheckTests(unittest.TestCase):
     def test_semantic_rules_name_the_step(self):
         case = oracle.Case("alpha/bad", "alpha", Path("x"), {

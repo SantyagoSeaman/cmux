@@ -79,6 +79,15 @@ run format baselines.py (016) reads (a `cases` list, the case name without its s
 `diff` exit codes: 0 no unexplained divergence, 1 divergences, 2 bad input, 3 refused (host
 mismatch, an incomplete or mismatched shard set, nothing compared), 4 diff.py internal error.
 
+`diff --platform-parity --base-run LINUX_RUN --head-run MAC_OR_WINDOWS_RUN` (spec 3F.4; tasks 114 and
+235) compares one commit's runs on two platforms (for example daemon-ops on a Windows lane against the
+VM's run): same --ref, same config apart from the host keys, same arch under diff.py's
+same-arch-any-os policy. A difference is explained only by a pointer-scoped `[ mac ]` or `[ windows ]`
+Expectations line; a case one platform cannot run is a `[ <p> ] ... [ Skip ]` line. Every line tagged
+with a platform ends with `# reason` (why that platform differs): `check` refuses one without, and a
+parity comparison over its suite is refused (exit 3). comparison.json gets a `platform_parity` key
+with every platform line of the compared suites and its reason.
+
 Sibling interfaces this file calls:
     diff.py A_DIR B_DIR --out divergence.json [--expected FILE] [--case GLOB]       (014)
     baselines.Store(root).read(suite, case, pdir, arm), platform_dir(platform, product),
@@ -1329,11 +1338,14 @@ def comparability(a: RunView, b: RunView, *, partial: bool, order_parity: bool =
     return None
 
 
-def run_diff_py(a_dir: Path, b_dir: Path, out: Path, expected: Sequence[Path]) -> Tuple[int, Dict[str, Any]]:
+def run_diff_py(a_dir: Path, b_dir: Path, out: Path, expected: Sequence[Path],
+                host_policy: Optional[str] = None) -> Tuple[int, Dict[str, Any]]:
     script = require_sibling("diff", "p15-oracle-014")
     command = [sys.executable, "-I", str(Path(script.__file__)), str(a_dir), str(b_dir), "--out", str(out)]
     for path in expected:
         command += ["--expected", str(path)]
+    if host_policy:
+        command += ["--host-policy", host_policy]
     proc = subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         document = json.loads(out.read_text(encoding="utf-8"))
@@ -1349,13 +1361,15 @@ def run_diff_py(a_dir: Path, b_dir: Path, out: Path, expected: Sequence[Path]) -
 def compare_views(a: RunView, b: RunView, *, a_dir: Path, b_dir: Path, out: Path, labels: Tuple[str, str],
                   partial: bool, expected: Sequence[Path], rules: Sequence[Dict[str, str]],
                   not_comparable: Optional[Dict[str, str]] = None, refused: Optional[str] = None,
-                  as_json: bool = False, order_parity: bool = False) -> int:
+                  as_json: bool = False, order_parity: bool = False, host_policy: Optional[str] = None,
+                  extra: Optional[Dict[str, Any]] = None) -> int:
     """Checks that the sides are comparable, then hands every comparison to diff.py.
 
     diff.py owns the host check, the first divergence per case and expected differences, so an
     all-match comparison from two hosts is refused like a divergent one. Flaky cases are
     reported as flaky by diff.py and never count as compared. With `order_parity`, a case that
     leaked state on one side only is a divergence too: its leak depends on the order.
+    `host_policy` is diff.py's --host-policy (same-host when None); `extra` adds keys to comparison.json.
     """
     target = out / "divergence.json"
     target.unlink(missing_ok=True)
@@ -1367,7 +1381,7 @@ def compare_views(a: RunView, b: RunView, *, a_dir: Path, b_dir: Path, out: Path
         if rules:
             write_json(out / "expectation-rules.json", list(rules))
             files.append(out / "expectation-rules.json")
-        code, document = run_diff_py(a_dir, b_dir, target, files)
+        code, document = run_diff_py(a_dir, b_dir, target, files, host_policy)
         if code == DIFF_HOST_MISMATCH:
             refused = "host-mismatch: " + "; ".join(f"{k}: {', '.join(v)}" for k, v in sorted(document["mismatched"].items()))
     summary = document.get("summary") or {}
@@ -1400,6 +1414,7 @@ def compare_views(a: RunView, b: RunView, *, a_dir: Path, b_dir: Path, out: Path
         "leaked_state": leaks,
         "leaks_differ": leaks_differ,
         "ok": refused is None and code == DIFF_OK and not leaks_differ,
+        **(extra or {}),
     }
     write_json(out / "comparison.json", comparison)
     if as_json:
@@ -1425,6 +1440,198 @@ def compare_views(a: RunView, b: RunView, *, a_dir: Path, b_dir: Path, out: Path
     if refused is not None:
         return EXIT_REFUSED
     return 0 if comparison["ok"] else 1
+
+
+# ---------------------------------------------------------------------------------------
+# Platform parity (spec 3F.4; p15-oracle-114 for mac, p15-oracle-235 for windows)
+#
+# One commit's suites on Linux, the reference side (the VM's runs are the baselines every other
+# platform is held to), against the same suites on a mac mini or a Windows lane. Blink keeps a
+# platform/<p> result only where <p> really differs (docs/testing/web_test_baseline_fallback.md) and
+# tags it in TestExpectations; here every value a platform gives differently is a pointer-scoped
+# `[ <p> ]` line, every case it cannot run is a `[ <p> ] ... [ Skip ]` line, and each such line
+# says why in a trailing `# reason`.
+
+PARITY_REFERENCE = "linux"
+PARITY_HOST_POLICY = "same-arch-any-os"
+# Config keys a run sets for its own host; every other key (product, suites, filters, build, arm,
+# switches, repeat, retries, batch limit) must be equal or the two sides ran different things.
+PARITY_HOST_KEYS = frozenset({"platform", "jobs", "shard_index", "shard_total", "seed", "binary"})
+# platform.machine() names one arch differently per OS (Windows AMD64, macOS arm64, Linux aarch64).
+ARCH_NAMES = {"amd64": "x86_64", "x64": "x86_64", "x86_64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}
+
+
+def canonical_arch(arch: Any) -> Any:
+    return ARCH_NAMES.get(arch.lower(), arch) if isinstance(arch, str) else arch
+
+
+def canonical_host(host: Any) -> Any:
+    return {**host, "arch": canonical_arch(host.get("arch"))} if isinstance(host, dict) else host
+
+
+@dataclass(frozen=True)
+class PlatformLine:
+    """An Expectations or NeverFix line tagged with a platform, and the reason written after it."""
+
+    entry: Any
+    platform: str
+    reason: Optional[str]
+
+    @property
+    def where(self) -> str:
+        return self.entry.where
+
+    def problem(self) -> Optional[str]:
+        if self.reason:
+            return None
+        return (f"{self.where}: {self.entry.target}: a [ {self.platform} ] line needs a reason; "
+                f"end it with `# why {self.platform} differs`")
+
+    def to_json(self) -> Dict[str, Any]:
+        return {"where": self.where, "target": self.entry.target, "platform": self.platform, "bug": self.entry.bug,
+                "results": sorted(self.entry.results), "reason": self.reason}
+
+
+def trailing_comment(raw: str) -> Optional[str]:
+    """The `# text` after an expectations line (expectations.py drops it while parsing)."""
+    tokens = raw.split()
+    for index, token in enumerate(tokens[1:], start=1):
+        if token.startswith("#"):
+            return " ".join(tokens[index:]).lstrip("#").strip() or None
+    return None
+
+
+def platform_lines(entries: Iterable[Any], platforms: Iterable[str]) -> List[PlatformLine]:
+    """Every line tagged with one of `platforms`, with its trailing reason read from its file."""
+    wanted = set(platforms)
+    texts: Dict[str, List[str]] = {}
+    lines = []
+    for entry in entries:
+        tagged = sorted(wanted & set(entry.tags))
+        if not tagged:
+            continue
+        if entry.file not in texts:
+            path = Path(entry.file) if Path(entry.file).is_absolute() else REPO / entry.file
+            try:
+                texts[entry.file] = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                texts[entry.file] = []
+        text = texts[entry.file]
+        raw = text[entry.lineno - 1] if 0 < entry.lineno <= len(text) else ""
+        lines.append(PlatformLine(entry, tagged[0], trailing_comment(raw)))
+    return lines
+
+
+def platform_skip(lines: Sequence[PlatformLine], case_id: str, config: Any) -> Optional[PlatformLine]:
+    """The platform line that skips `case_id` in a side's configuration, if one does."""
+    suite, name = split_case_id(case_id)
+    for line in lines:
+        entry = line.entry
+        if entry.suite == suite and entry.case in (name, "*") and "Skip" in entry.results and entry.matches(config):
+            return line
+    return None
+
+
+def platform_rules(lines: Sequence[PlatformLine], configs: Sequence[Any]) -> List[Dict[str, str]]:
+    """Pointer-scoped Failure platform lines of either side as diff.py rules.
+
+    A line with no platform tag holds on both sides alike, so it explains no platform difference.
+    """
+    rules = []
+    for line in lines:
+        e = line.entry
+        if e.kind != "expectations" or e.pointer is None or e.case == "*" or "Failure" not in e.outcomes:
+            continue
+        if not any(e.matches(config) for config in configs):
+            continue
+        rule = {"pointer": e.pointer, "reason": f"[ {line.platform} ] {e.where}: {line.reason}",
+                "case": glob.escape(f"{e.suite}/{e.case}"), "step": glob.escape(e.step) if e.step else "*"}
+        if e.bug:
+            rule["task"] = e.bug
+        rules.append(rule)
+    return rules
+
+
+def parity_mismatch(reference: Mapping[str, Any], other: Mapping[str, Any]) -> Optional[str]:
+    """Why two receipts are not one commit's selection on two platforms."""
+    shas = (reference.get("sha") or "", other.get("sha") or "")
+    if not all(shas) or shas[0] != shas[1]:
+        return (f"platform parity compares one commit: the sides ran {shas[0] or 'no --ref'} and "
+                f"{shas[1] or 'no --ref'} (pass the same full SHA as --ref to both runs)")
+    configs = [{k: v for k, v in r["config"].items() if k not in PARITY_HOST_KEYS} for r in (reference, other)]
+    keys = sorted(k for k in set(configs[0]) | set(configs[1]) if configs[0].get(k) != configs[1].get(k))
+    if keys:
+        return f"the two platforms ran different configs: {', '.join(keys)} differ"
+    return None
+
+
+def write_parity_side(view: RunView, run_dir: Path, cases: Sequence[str], target: Path) -> RunView:
+    """One side cut to the compared cases: a one-shard run of them, with its arch named one way."""
+    target.mkdir(parents=True, exist_ok=True)
+    keep = set(cases)
+    receipt = view.receipt
+    records = {cid: {**r, "host": canonical_host(r["host"])} if "host" in r else r
+               for cid, r in receipt["cases"].items() if cid in keep}
+    cut = {**receipt, "host": canonical_host(receipt.get("host")), "cases": records, "shards": [0],
+           "seeds": {"0": None}, "order": [cid for cid in receipt.get("order", ()) if cid in keep],
+           "selection": {"count": len(keep), "digest": digest(sorted(keep))}}
+    write_json(target / "receipt.json", cut)
+    with (run_dir / "checkpoints.jsonl").open(encoding="utf-8") as source, \
+            (target / "checkpoints.jsonl").open("w", encoding="utf-8") as sink:
+        for line in source:
+            if line.strip() and json.loads(line)["case"] in keep:
+                sink.write(line)
+    return RunView(cut, (target,), (0,), 1, view.complete, {"0": None})
+
+
+def platform_parity(reference: RunView, other: RunView, *, out: Path, root: Path, partial: bool, as_json: bool) -> int:
+    """Compares a mac or windows run with the Linux run of the same commit through diff.py.
+
+    A case one side does not select (its `platforms` leave that side out), or that a platform Skip
+    line skips on one side, is left out with that reason. A divergence is explained only by a
+    pointer-scoped platform line. A platform line with no written reason refuses the comparison.
+    """
+    expectations = require_sibling("expectations", "p15-oracle-015")
+    ref_platform, platform = reference.receipt["platform"], other.receipt["platform"]
+    if ref_platform != PARITY_REFERENCE:
+        raise UsageError(f"--platform-parity: --base-run is the {PARITY_REFERENCE} run, not a {ref_platform} run")
+    if platform == PARITY_REFERENCE:
+        raise UsageError(f"--platform-parity: --head-run is the mac or windows run, not a {platform} run")
+    refused = parity_mismatch(reference.receipt, other.receipt)
+    configs = []
+    for receipt in (reference.receipt, other.receipt):
+        config = receipt["config"]
+        arm = config.get("arm")
+        configs.append(expectations.RunConfig(platform=receipt["platform"], arm=arm if arm in ARMS else None,
+                                              product=receipt["product"], build=config["build"]))
+    store = expectations.Expectations.load_root(root)
+    suites = {split_case_id(cid)[0] for r in (reference.receipt, other.receipt) for cid in r["cases"]}
+    lines = [line for line in platform_lines(store.entries, (ref_platform, platform)) if line.entry.suite in suites]
+    unreasoned = [problem for problem in (line.problem() for line in lines) if problem]
+    if unreasoned and refused is None:
+        refused = f"{len(unreasoned)} platform line(s) without a reason: " + "; ".join(unreasoned)
+
+    excluded: Dict[str, str] = {}
+    for mine, config, theirs in ((reference.receipt, configs[0], other.receipt), (other.receipt, configs[1], reference.receipt)):
+        for cid, record in mine["cases"].items():
+            if cid not in theirs["cases"]:
+                excluded[cid] = f"not selected on {theirs['platform']}: the case's platforms leave it out"
+            elif record.get("outcome") == "skipped" and theirs["cases"][cid].get("outcome") != "skipped":
+                line = platform_skip(lines, cid, config)
+                if line is not None:
+                    excluded[cid] = f"skipped on {mine['platform']} by {line.where}: {line.reason}"
+    compared = sorted((set(reference.receipt["cases"]) & set(other.receipt["cases"])) - set(excluded))
+    if not compared and refused is None:
+        refused = f"nothing compared: every case is left out on one platform ({len(excluded)} not comparable)"
+    a = write_parity_side(reference, write_merged(reference, out / "a-merged"), compared, out / ref_platform)
+    b = write_parity_side(other, write_merged(other, out / "b-merged"), compared, out / platform)
+    extra = {"platform_parity": {"reference": ref_platform, "platform": platform, "sha": other.receipt.get("sha"),
+                                 "host_policy": PARITY_HOST_POLICY, "lines": [line.to_json() for line in lines],
+                                 "unreasoned": unreasoned}}
+    return compare_views(a, b, a_dir=out / ref_platform, b_dir=out / platform, out=out, labels=(ref_platform, platform),
+                         partial=partial, expected=[], rules=platform_rules(lines, configs),
+                         not_comparable=excluded, refused=refused, as_json=as_json,
+                         host_policy=PARITY_HOST_POLICY, extra=extra)
 
 
 # ---------------------------------------------------------------------------------------
@@ -1785,9 +1992,18 @@ def comparison_rules(view: RunView, root: Path) -> List[Dict[str, str]]:
 def cmd_diff(args: argparse.Namespace) -> int:
     if args.order_parity and not (args.base_run and args.head_run and not args.baselines):
         raise UsageError("--order-parity compares two existing runs: give --base-run and --head-run")
+    if args.platform_parity and not (args.base_run and args.head_run and not args.baselines and not args.order_parity):
+        raise UsageError("--platform-parity compares two existing runs: --base-run (Linux) and --head-run (mac or windows)")
     out = args.out or DEFAULT_OUT_BASE / ("diff-" + new_run_id())
     check_out_dir(out)
     out.mkdir(parents=True, exist_ok=True)
+    if args.platform_parity:
+        reference, reference_errors = merge_runs(args.base_run, require_complete=False)
+        other, other_errors = merge_runs(args.head_run, require_complete=False)
+        if reference_errors or other_errors:
+            raise UsageError("; ".join(reference_errors + other_errors))
+        return platform_parity(reference, other, out=out, root=args.expectations_root, partial=args.partial,
+                               as_json=args.json)
     if args.head_run:
         head, head_errors = merge_runs(args.head_run, require_complete=False)
         if args.baselines:
@@ -2102,6 +2318,8 @@ def cmd_check(args: argparse.Namespace) -> int:
                 errors.append(f"expectations: {diagnostic.render()}")
             else:
                 print(f"expectations: {diagnostic.render()}")
+        errors.extend(f"expectations: {problem}" for problem in
+                      (line.problem() for line in platform_lines(store.store.entries, PLATFORMS)) if problem)
     elif args.stale:
         errors.append("--stale needs expectations.py (p15-oracle-015)")
     if args.coverage:
@@ -2174,6 +2392,10 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("--order-parity", action="store_true",
                       help="with --base-run/--head-run: one config run in two orders or batch limits (shuffle "
                            "seeds, --batch-limit 1); every verdict and every LeakedState must match")
+    diff.add_argument("--platform-parity", action="store_true",
+                      help="--base-run is one commit's Linux run, --head-run its mac or windows run; a difference is "
+                           "explained only by a [ mac ] or [ windows ] pointer line, and every such line needs a "
+                           "trailing `# reason`")
     diff.add_argument("--fresh", action="store_true",
                       help="on the VM, rerun both sides even when the queue has a receipt (confirm, flake checks)")
     diff.add_argument("--out", type=Path, help="comparison directory")
