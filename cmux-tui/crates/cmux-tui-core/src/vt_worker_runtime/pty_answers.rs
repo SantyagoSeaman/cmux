@@ -10,8 +10,8 @@
 //!   a final from the answer finals only: `c` (DA1, DA2), `n` (DSR, color
 //!   scheme), `R` (CPR, DECXCPR), `$y` (DECRPM), `?...u` (Kitty keyboard
 //!   flags), `t` (size reports).
-//! - OSC 4, 5, 10-19 and 21 (color reports), printable ASCII, ended by BEL
-//!   or ST.
+//! - OSC 4, 5, 10-19 and 21 (color reports) and 7501 (program status
+//!   support), printable ASCII, ended by BEL or ST.
 //! - DCS `>|` (XTVERSION), `!|` (DA3), `0$r`/`1$r` (DECRQSS), `0+r`/`1+r`
 //!   (XTGETTCAP), printable ASCII, ended by ST.
 //! - APC `G` (Kitty graphics replies), printable ASCII, ended by ST.
@@ -161,9 +161,11 @@ fn csi(bytes: &[u8]) -> Result<Scan, AnswerError> {
 }
 
 /// The OSC numbers a worker's parser answers: palette (4), special colors
-/// (5), dynamic colors (10-19) and the Kitty color protocol (21).
+/// (5), dynamic colors (10-19), the Kitty color protocol (21) and the
+/// program status support query (7501; its parser has the daemon's OSC 7501
+/// owner, as spawn.rs sets one).
 fn osc_answers(number: u32) -> bool {
-    matches!(number, 4 | 5 | 10..=19 | 21)
+    matches!(number, 4 | 5 | 10..=19 | 21 | 7501)
 }
 
 /// An OSC answer after `ESC ]`.

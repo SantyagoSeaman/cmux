@@ -131,6 +131,26 @@ fn a_page_need_is_bounded_by_the_largest_grid() {
 }
 
 #[test]
+fn a_terminal_has_one_open_media_request_at_most() {
+    let request = || Event::KittyMediaRequest {
+        id: 1,
+        request: cmux_kitty_media::MediaRequest {
+            medium: cmux_kitty_media::FileMedium::File,
+            name: b"L3RtcC9pbWFnZS5wbmc=".to_vec(),
+            offset: 0,
+            size: 0,
+        },
+    };
+    let mut guard = guard();
+    assert!(check(&mut guard, request()).is_ok());
+    assert_eq!(check(&mut guard, request()), Err(BadMessage::MediaRequest(1)));
+    let mut answered = self::guard();
+    assert!(check(&mut answered, request()).is_ok());
+    answered.media_answered(1);
+    assert!(check(&mut answered, request()).is_ok());
+}
+
+#[test]
 fn every_bad_message_is_named_bad_message() {
     assert_eq!(BadMessage::HelloOrder.reason(), "bad_message");
     assert_eq!(BadMessage::Page { id: 1, what: "magic" }.reason(), BAD_MESSAGE_REASON);

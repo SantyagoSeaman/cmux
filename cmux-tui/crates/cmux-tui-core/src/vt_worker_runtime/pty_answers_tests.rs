@@ -28,6 +28,7 @@ const ANSWERS: &[&[u8]] = &[
     b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\",
     b"\x1b]4;1;rgb:cccc/0000/0000\x07",
     b"\x1b]21;foreground=rgb:ff/ff/ff\x1b\\",
+    b"\x1b]7501;v=1\x1b\\",
     b"\x1bP>|libghostty 1.3.0\x1b\\",
     b"\x1bP1$r0;1m\x1b\\",
     b"\x1bP0+r\x1b\\",

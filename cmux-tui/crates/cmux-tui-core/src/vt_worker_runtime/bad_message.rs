@@ -55,6 +55,8 @@ pub enum BadMessage {
     PageNeed { id: u64, needed: u64, bound: u64 },
     /// A screen page that broke its layout, or a screen past the ring.
     Page { id: u64, what: &'static str },
+    /// A Kitty media request while the terminal's last one is unanswered.
+    MediaRequest(u64),
 }
 
 impl BadMessage {
@@ -89,6 +91,7 @@ impl std::fmt::Display for BadMessage {
                 write!(f, "terminal {id} page need {needed} over {bound}")
             }
             Self::Page { id, what } => write!(f, "terminal {id} page: {what}"),
+            Self::MediaRequest(id) => write!(f, "terminal {id}: a second open media request"),
         }
     }
 }
@@ -137,6 +140,8 @@ struct TerminalLedger {
     peak_cols: u16,
     peak_rows: u16,
     answers: AnswerScanner,
+    /// A KITTY_MEDIA_REQUEST the broker has not answered yet.
+    media_pending: bool,
 }
 
 impl TerminalLedger {
@@ -177,6 +182,7 @@ impl WorkerOutputGuard {
             peak_cols: 0,
             peak_rows: 0,
             answers: AnswerScanner::default(),
+            media_pending: false,
         };
         ledger.grow(geometry);
         self.terminals.insert(id, ledger);
@@ -305,7 +311,25 @@ impl WorkerOutputGuard {
                 check_need(id, ledger, needed)?;
                 Ok(Some(event))
             }
-            Event::AttachFailed { .. } => Ok(Some(event)),
+            // Bounded and checked field by field on decode (wire.rs); the
+            // records take them as from the daemon's own parser.
+            Event::AttachFailed { .. } | Event::ProgramStatus { .. } => Ok(Some(event)),
+            Event::KittyMediaRequest { .. } => {
+                // The terminal's parse waits for the answer, so a worker
+                // never has two requests open for one terminal.
+                if ledger.media_pending {
+                    return Err(BadMessage::MediaRequest(id));
+                }
+                ledger.media_pending = true;
+                Ok(Some(event))
+            }
+        }
+    }
+
+    /// The broker sent KITTY_MEDIA, the answer to `id`'s open request.
+    pub fn media_answered(&mut self, id: u64) {
+        if let Some(ledger) = self.terminals.get_mut(&id) {
+            ledger.media_pending = false;
         }
     }
 
@@ -364,7 +388,9 @@ fn event_terminal(event: &Event) -> u64 {
         | Event::Bell { id, .. }
         | Event::Lapped { id, .. }
         | Event::PageTooSmall { id, .. }
-        | Event::AttachFailed { id, .. } => *id,
+        | Event::AttachFailed { id, .. }
+        | Event::ProgramStatus { id, .. }
+        | Event::KittyMediaRequest { id, .. } => *id,
     }
 }
 

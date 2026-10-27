@@ -353,6 +353,7 @@ fn ghostty_answers_pass_the_answer_set() {
         b"\x1b]11;?\x1b\\",
         b"\x1b]4;1;?\x07",
         b"\x1b]21;foreground=?\x1b\\",
+        b"\x1b]7501;?\x1b\\",
         b"\x1bP$qm\x1b\\",
         b"\x1bP$qr\x1b\\",
         b"\x1bP+q544e\x1b\\",
@@ -364,6 +365,9 @@ fn ghostty_answers_pass_the_answer_set() {
             let answers = answers.clone();
             move |bytes| answers.lock().expect("answers").extend_from_slice(bytes)
         })),
+        // The worker's parser has an OSC 7501 owner, so it answers the
+        // support query.
+        on_program_status: Some(Box::new(|_| {})),
         ..ghostty_vt::Callbacks::default()
     };
     let mut terminal = ghostty_vt::Terminal::new(80, 24, 0, callbacks).expect("terminal");

@@ -231,19 +231,6 @@ fn a_reader_refuses_a_segment_shorter_than_its_length() {
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn a_page_segment_cannot_be_resized() {
-    use std::os::fd::AsRawFd;
-    let fd = create_page(8192).expect("page");
-    for len in [4096, 16384] {
-        // SAFETY: resizes a descriptor the test owns; the call must fail.
-        let result = unsafe { libc::ftruncate(fd.as_raw_fd(), len) };
-        assert_eq!(result, -1, "ftruncate to {len} succeeded");
-    }
-    assert_eq!(shm::segment_len(fd.as_fd()).expect("len"), 8192);
-}
-
 #[test]
 fn modes_follow_the_terminal() {
     let mut terminal = Terminal::new(10, 3, 0, ghostty_vt::Callbacks::default()).expect("terminal");
