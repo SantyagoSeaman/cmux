@@ -703,9 +703,10 @@ impl Hub {
             && let Some(sid) = existing_sid.take()
         {
             tracing::info!(session = %session.id, agent_session = %sid, "starting a fresh Claude conversation: {why}");
-            // A chat woken from hibernation before its first turn has nothing to restore: it
-            // starts fresh with no row and no restored transcript (`idle.rs`).
-            let untouched = self.waking(session) && meta.turn_count == 0;
+            // A chat woken from hibernation had no turn when it hibernated (`idle.rs` keeps one
+            // with turns but none stored awake), so it has nothing to restore: it starts fresh
+            // with no row and no restored transcript. (The prompt waking it is counted already.)
+            let untouched = self.waking(session);
             if !untouched {
                 self.append(
                     session,
