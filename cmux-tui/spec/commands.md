@@ -1932,8 +1932,18 @@ offset so replay can distinguish motion from a settled position.
 Result:
 
 ```text
-object{committed:boolean}
+object{committed:true,admitted?:boolean}
 ```
+
+`admitted` is sent only to a client that declared `frontend-journal-v2` in
+`set-client-info`. `admitted:true` means the reply went before the journal
+commit: the event passed every check the journal writer makes without reading
+the journal and is queued in journal order, and the writer commits it after
+the reply (admit then reply, daemon setting `admitThenReply`). An admitted
+event that the writer still refuses (an `event_id` reused with different
+content) is dropped and counted; it does not fail later journal writes. Every
+other reply, including every reply to a client without `frontend-journal-v2`,
+is sent after the journal commit.
 
 ### export-layout
 

@@ -20216,6 +20216,9 @@
       }
     },
     "response:journal-frontend-event": {
+      "/data/admitted": {
+        "ty": "boolean"
+      },
       "/data/committed": {
         "ty": "literal",
         "required": true,

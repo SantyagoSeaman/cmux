@@ -13253,13 +13253,25 @@
       },
       "presence": "required",
       "nullable": false
+     },
+     "admitted": {
+      "type": {
+       "kind": "scalar",
+       "name": "boolean"
+      },
+      "presence": "optional",
+      "nullable": false,
+      "default": false,
+      "capability": "frontend-journal-v2",
+      "description": "True when the reply went before the journal commit: the event is checked and queued in journal order, and the writer commits it after the reply. Sent only to a client that declared frontend-journal-v2."
      }
     },
     "additional_properties": false
    },
    "stream": null,
    "constraints": [
-    "The server derives producer identity from the authenticated control client."
+    "The server derives producer identity from the authenticated control client.",
+    "Without frontend-journal-v2, committed:true is sent after the journal commit."
    ],
    "method_id": 2560,
    "priority": "control",

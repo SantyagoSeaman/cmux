@@ -4996,6 +4996,7 @@ class JournalFrontendEventRequest:
 class JournalFrontendEventResult:
     __cmux_schema_path__: ClassVar[str] = 'commands/journal-frontend-event/result'
     committed: Literal[True]
+    admitted: Union[bool, MissingType] = field(default=MISSING)
 
 
 @dataclass(frozen=True)

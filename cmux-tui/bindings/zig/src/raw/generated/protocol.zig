@@ -7,7 +7,7 @@ const client_runtime = @import("../client.zig");
 
 pub const schema_version: u16 = 2;
 pub const mux_protocol: u16 = 12;
-pub const ir_sha256 = "7eb274630f633e9ac0d047904d92944dbb00b4f9dcb8b2c809d8a6871ce0a777";
+pub const ir_sha256 = "8647f35fa8a0a45668b8f63a828bca544070a7f41c98e77b31278594e5723921";
 
 pub const AccessRequestKind = enum {
     file,
@@ -8939,7 +8939,13 @@ pub const JournalFrontendEventRequest = struct {
 };
 
 pub const JournalFrontendEventResult = struct {
+    /// True when the reply went before the journal commit: the event is checked and queued in journal order, and the writer commits it after the reply. Sent only to a client that declared frontend-journal-v2.
+    admitted: ?bool = null,
     committed: bool,
+
+    pub const cmux_wire_optional_nonnull_fields = [_][]const u8{
+        "admitted",
+    };
 };
 
 pub fn journalFrontendEvent(client: anytype, request: JournalFrontendEventRequest) !wire.Decoded(JournalFrontendEventResult) {

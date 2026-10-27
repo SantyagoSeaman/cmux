@@ -19,12 +19,15 @@ use crate::{Mux, panic_free::RecoverPoison};
 
 // Output coalescing only ever held terminal output, which shipped builds no
 // longer journal (output_store.rs); the ingress tests still exercise it.
+mod admitted_events;
 #[cfg(test)]
 mod coalesce;
 mod completion;
 pub(crate) mod contention;
 mod effect_intents;
 mod writer_qos;
+#[cfg(test)]
+pub(crate) use admitted_events::AdmittedEventStats;
 pub(crate) use completion::JournalBatchReceipt;
 use completion::{JournalIngressCompletion, complete_batch_error, complete_batch_success};
 pub(crate) use effect_intents::{EffectSend, PendingRegistryReceipt};
@@ -469,6 +472,8 @@ struct JournalIngressState {
     queue_space_epoch: Mutex<u64>,
     queue_space_changed: Condvar,
     request_waits: writer_qos::RequestWaits,
+    /// Durable events queued without a receipt (`admitted_events`).
+    admitted: admitted_events::AdmittedEvents,
     #[cfg(test)]
     failure_notifier: Mutex<Option<SyncSender<String>>>,
     #[cfg(test)]
@@ -578,6 +583,7 @@ impl JournalIngressState {
 impl JournalIngressSender {
     pub(crate) fn new(enabled: bool) -> (Self, Option<JournalIngressReceivers>) {
         let state = Arc::new(JournalIngressState::default());
+        state.admitted.enable_from_env();
         if !enabled {
             return (
                 Self {
@@ -1216,6 +1222,12 @@ fn run(mux: Weak<Mux>, receivers: JournalIngressReceivers) {
                             let later = batch.split_off(batch.len() / 2);
                             pending.push_front(later);
                             pending.push_front(batch);
+                        } else if batch.first().is_some_and(QueuedJournalEvent::is_admitted) {
+                            // Its request already replied: the writer only
+                            // applies, so the event's own failure drops it
+                            // (journal-degraded), never the writer.
+                            receivers.state.admitted.degraded(&summary);
+                            drop((writer, mux));
                         } else if batch.first().is_some_and(|event| event.completion.is_none())
                             && uncompleted_nonretryable_failures
                                 < JOURNAL_TERMINAL_FAILURE_RETRY_ATTEMPTS

@@ -195,9 +195,8 @@ impl RegistryConnection {
                 event,
             } = *event
             {
-                validate_identifier("frontend journal principal", principal_id)?;
-                validate_identifier("frontend journal generation", event.generation())?;
-                validate_identifier("frontend journal event id", event.event_id())?;
+                // The checks an admitted event passed before its reply.
+                event.validate(principal_id)?;
                 let mut subjects = BTreeSet::from([
                     JournalSubject { kind: "session".into(), id: session_id.clone() },
                     JournalSubject { kind: "client".into(), id: principal_id.clone() },
@@ -271,24 +270,18 @@ impl RegistryConnection {
                         rows,
                         cell_width,
                         cell_height,
-                    } => {
-                        anyhow::ensure!(
-                            *cols > 0 && *rows > 0 && *cell_width > 0 && *cell_height > 0,
-                            "frontend journal geometry must be positive"
-                        );
-                        (
-                            "frontend.resized",
-                            json!({
-                                "format":"cmux.frontend-geometry.v1",
-                                "frontend_projection_id":frontend_projection_id,
-                                "generation":generation,
-                                "cols":cols,
-                                "rows":rows,
-                                "cell_width":cell_width,
-                                "cell_height":cell_height,
-                            }),
-                        )
-                    }
+                    } => (
+                        "frontend.resized",
+                        json!({
+                            "format":"cmux.frontend-geometry.v1",
+                            "frontend_projection_id":frontend_projection_id,
+                            "generation":generation,
+                            "cols":cols,
+                            "rows":rows,
+                            "cell_width":cell_width,
+                            "cell_height":cell_height,
+                        }),
+                    ),
                     crate::FrontendJournalEvent::Viewport {
                         event_id: _,
                         frontend_projection_id,

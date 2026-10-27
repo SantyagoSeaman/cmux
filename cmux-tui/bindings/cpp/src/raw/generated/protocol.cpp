@@ -31985,6 +31985,11 @@ Result<JournalFrontendEventRequest> Codec<JournalFrontendEventRequest>::decode(c
 Result<Json> Codec<JournalFrontendEventResult>::encode(const JournalFrontendEventResult& value) {
     (void)value;
     Json::Object object;
+    if (value.admitted) {
+        auto encoded = encode_value(*value.admitted);
+        if (!encoded) return std::move(encoded).error();
+        object.emplace("admitted", std::move(encoded).value());
+    }
     object.emplace("committed", Json(true));
     return Json(std::move(object));
 }
@@ -31993,6 +31998,12 @@ Result<JournalFrontendEventResult> Codec<JournalFrontendEventResult>::decode(con
     auto source = value.as_object();
     if (!source) return std::move(source).error();
     JournalFrontendEventResult result{};
+    const Json* field_admitted = value.find("admitted");
+    if (field_admitted) {
+        auto decoded = decode_value<bool>(*field_admitted);
+        if (!decoded) return std::move(decoded).error();
+        result.admitted = std::move(decoded).value();
+    }
     const Json* field_committed = value.find("committed");
     if (!field_committed) {
         return make_error(ErrorCode::decode, "missing required field 'committed'");

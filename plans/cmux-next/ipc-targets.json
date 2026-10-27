@@ -74,6 +74,24 @@
       "file": "Packages/macOS/CmuxNext/Sources/CmuxNextDaemon/Connection/ResourceOperationClient.swift",
       "key": "resourceRequest",
       "reason": "The typed funnel itself: it sends a generated ResourceRequestLine through DaemonConnection's one resource request path (p05-ipc-045)."
+    },
+    {
+      "queue": "Q3",
+      "file": "cmux-tui/crates/cmux-tui-core/src/mux/journal.rs",
+      "key": "journal_frontend_event -> send_durable",
+      "reason": "Waits only when the reply must follow the commit: a client without frontend-journal-v2 reads protocol 10's committed:true as durable, and the in-process frontend waits while the admitThenReply setting is off. A frontend-journal-v2 client's event is admitted (journal_ingress/admitted_events.rs, p05-ipc-126)."
+    },
+    {
+      "queue": "Q3",
+      "file": "cmux-tui/crates/cmux-tui-core/src/mux/journal.rs",
+      "key": "journal_local_frontend_event -> journal_frontend_event (wraps send_durable)",
+      "reason": "Waits only when the reply must follow the commit: a client without frontend-journal-v2 reads protocol 10's committed:true as durable, and the in-process frontend waits while the admitThenReply setting is off. A frontend-journal-v2 client's event is admitted (journal_ingress/admitted_events.rs, p05-ipc-126)."
+    },
+    {
+      "queue": "Q3",
+      "file": "cmux-tui/crates/cmux-tui-core/src/server/cmd_frontend.rs",
+      "key": "journal_frontend_event -> journal_frontend_event (wraps send_durable)",
+      "reason": "Waits only when the reply must follow the commit: a client without frontend-journal-v2 reads protocol 10's committed:true as durable, and the in-process frontend waits while the admitThenReply setting is off. A frontend-journal-v2 client's event is admitted (journal_ingress/admitted_events.rs, p05-ipc-126)."
     }
   ],
   "ipc5_ops": [

@@ -104,34 +104,62 @@ impl Mux {
         self.journal_ingress.install_nonretryable_failure_hook_for_test(entered, release);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_admit_then_reply_for_test(&self, enabled: bool) {
+        self.journal_ingress.set_admit_then_reply_for_test(enabled);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admitted_journal_event_stats(
+        &self,
+    ) -> crate::journal_ingress::AdmittedEventStats {
+        self.journal_ingress.admitted_event_stats()
+    }
+
     pub(crate) fn terminal_journal_enabled(&self) -> bool {
         self.journal_ingress.enabled()
     }
 
+    /// The in-process frontend's events: no wire contract, so they are
+    /// admitted whenever the F10 setting is on.
     #[track_caller]
     pub fn journal_local_frontend_event(
         &self,
         event: crate::FrontendJournalEvent,
     ) -> anyhow::Result<()> {
         let principal_id = crate::server::public_client_id(&self.session_public_id, 0)?.to_string();
-        self.journal_frontend_event(principal_id, event)
+        self.journal_frontend_event(principal_id, event, FrontendJournalReply::AfterAdmit).map(drop)
     }
 
     pub(crate) fn session_public_id(&self) -> SessionPublicId {
         self.session_public_id.clone()
     }
 
+    /// Journal one frontend observation. With `AfterAdmit` and the F10
+    /// setting on, it is checked and queued in lane order and the reply
+    /// goes before the commit (`journal_ingress::admitted_events`).
+    /// Otherwise the request waits for the commit: a client without
+    /// `frontend-journal-v2` reads `committed:true` as durable.
     #[track_caller]
     pub(crate) fn journal_frontend_event(
         &self,
         principal_id: String,
         event: crate::FrontendJournalEvent,
-    ) -> anyhow::Result<()> {
-        self.journal_ingress.send_durable(crate::journal_ingress::JournalIngressEvent::Frontend {
+        reply: FrontendJournalReply,
+    ) -> anyhow::Result<FrontendJournalReply> {
+        event.validate(&principal_id)?;
+        let event = crate::journal_ingress::JournalIngressEvent::Frontend {
             principal_id,
             occurred_at_ms: crate::workspace_registry::unix_epoch_ms()?,
             event,
-        })
+        };
+        if reply == FrontendJournalReply::AfterAdmit && self.journal_ingress.admits_before_commit()
+        {
+            self.journal_ingress.admit_durable(event)?;
+            return Ok(FrontendJournalReply::AfterAdmit);
+        }
+        self.journal_ingress.send_durable(event)?;
+        Ok(FrontendJournalReply::AfterCommit)
     }
 
     /// A `terminal.output.gap` marker (surface/journal_reconnect.rs): small
@@ -657,4 +685,15 @@ impl Mux {
         }
         Ok(commit)
     }
+}
+
+/// When a `journal-frontend-event` reply goes: what the caller accepts, and
+/// what happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrontendJournalReply {
+    /// After the writer committed the event (`committed:true`).
+    AfterCommit,
+    /// Once the event is queued in lane order; the writer commits it after
+    /// the reply (`admitted:true`, `frontend-journal-v2`).
+    AfterAdmit,
 }

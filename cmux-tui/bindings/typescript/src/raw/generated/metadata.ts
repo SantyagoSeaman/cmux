@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 7eb274630f633e9ac0d047904d92944dbb00b4f9dcb8b2c809d8a6871ce0a777. */
+/* cmux-tui mux protocol 12, IR 8647f35fa8a0a45668b8f63a828bca544070a7f41c98e77b31278594e5723921. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "7eb274630f633e9ac0d047904d92944dbb00b4f9dcb8b2c809d8a6871ce0a777" as const;
+export const SDK_IR_SHA256 = "8647f35fa8a0a45668b8f63a828bca544070a7f41c98e77b31278594e5723921" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -2314,7 +2314,8 @@ export const COMMAND_METADATA = {
     "fields": {},
     "stream": null,
     "constraints": [
-      "The server derives producer identity from the authenticated control client."
+      "The server derives producer identity from the authenticated control client.",
+      "Without frontend-journal-v2, committed:true is sent after the journal commit."
     ]
   },
   "list-agents": {
@@ -27633,6 +27634,17 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
     "result": {
       "additional_properties": false,
       "fields": {
+        "admitted": {
+          "capability": "frontend-journal-v2",
+          "default": false,
+          "description": "True when the reply went before the journal commit: the event is checked and queued in journal order, and the writer commits it after the reply. Sent only to a client that declared frontend-journal-v2.",
+          "nullable": false,
+          "presence": "optional",
+          "type": {
+            "kind": "scalar",
+            "name": "boolean"
+          }
+        },
         "committed": {
           "nullable": false,
           "presence": "required",

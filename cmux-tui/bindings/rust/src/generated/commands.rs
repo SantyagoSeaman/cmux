@@ -1,5 +1,5 @@
 // This file is generated. Do not edit by hand.
-// cmux-tui mux protocol 12, IR 7eb274630f633e9ac0d047904d92944dbb00b4f9dcb8b2c809d8a6871ce0a777.
+// cmux-tui mux protocol 12, IR 8647f35fa8a0a45668b8f63a828bca544070a7f41c98e77b31278594e5723921.
 // The emitter owns this layout so generation is independent of the installed rustfmt.
 
 use super::metadata::*;
@@ -2819,6 +2819,9 @@ pub struct JournalFrontendEventRequest {
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalFrontendEventResult {
+    /// True when the reply went before the journal commit: the event is checked and queued in journal order, and the writer commits it after the reply. Sent only to a client that declared frontend-journal-v2.
+    #[serde(default, deserialize_with = "crate::presence::deserialize_optional_non_null", skip_serializing_if = "Option::is_none")]
+    pub admitted: Option<bool>,
     pub committed: bool,
 }
 

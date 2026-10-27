@@ -362,6 +362,9 @@ pub const CLEAR_HISTORY_KEY_CAPABILITY: &str = "clear-history-key-v1";
 pub const SURFACE_SUBSCRIBE_FILTER_CAPABILITY: &str = "surface-subscribe-filter";
 pub const SESSION_JOURNAL_CAPABILITY: &str = "session-journal-v1";
 pub const FRONTEND_JOURNAL_CAPABILITY: &str = "frontend-journal-v1";
+/// A client that declares it reads `journal-frontend-event`'s `admitted`:
+/// its events may reply before their journal commit (F10, p05-ipc-126).
+pub const FRONTEND_JOURNAL_ADMITTED_CAPABILITY: &str = "frontend-journal-v2";
 /// Journal administration is restricted to the owner-only Unix socket. Use
 /// that stable security principal for receipts so a reconnect can safely
 /// replay a command instead of creating a second event.

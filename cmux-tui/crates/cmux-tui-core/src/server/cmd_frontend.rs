@@ -6,10 +6,12 @@
 use super::CREATION_ATTEMPT_KEYS_CAPABILITY;
 use super::CREATION_RECEIPTS_CAPABILITY;
 use super::CREATION_SELECTOR_FALLBACKS_CAPABILITY;
+use super::FRONTEND_JOURNAL_ADMITTED_CAPABILITY;
 use super::MAX_CREATION_SELECTOR_FALLBACKS;
 use super::origin_gate;
 use super::paired_surface_size;
 use crate::WorkspaceMutation;
+use crate::mux::FrontendJournalReply;
 use crate::panic_free::JsonFields;
 use crate::resource::ResourceOperation;
 
@@ -88,8 +90,21 @@ pub(super) fn journal_frontend_event(
 ) -> anyhow::Result<Value> {
     let session_id = mux.session_public_id();
     let principal_id = public_client_id(&session_id, client)?.to_string();
-    mux.journal_frontend_event(principal_id, event)?;
-    Ok(json!({"committed":true}))
+    // `committed:true` stays for every client (protocol 10's literal). Only a
+    // client that negotiated `frontend-journal-v2` reads `admitted`, so only
+    // its reply may go before the journal commit.
+    let reads_admitted =
+        mux.control_clients.supports_capability(client, FRONTEND_JOURNAL_ADMITTED_CAPABILITY);
+    let accepts = if reads_admitted {
+        FrontendJournalReply::AfterAdmit
+    } else {
+        FrontendJournalReply::AfterCommit
+    };
+    let reply = mux.journal_frontend_event(principal_id, event, accepts)?;
+    if !reads_admitted {
+        return Ok(json!({"committed":true}));
+    }
+    Ok(json!({"committed":true,"admitted":reply == FrontendJournalReply::AfterAdmit}))
 }
 
 pub(super) fn sidebar_plugin(
@@ -487,3 +502,7 @@ fn create_surface_with_receipt(
         mux.receipted_surface_creation(resource_operation, selector_candidates, fields, &mutation)?;
     Ok(json!({"surface": surface, "replayed": replayed}))
 }
+
+#[cfg(test)]
+#[path = "cmd_frontend_tests.rs"]
+mod tests;

@@ -217,6 +217,7 @@ mod host_close;
 mod host_death_tests;
 mod idle_close;
 mod journal;
+pub(crate) use journal::FrontendJournalReply;
 mod journal_maintenance;
 mod journal_plugin_host;
 mod journal_retention;
