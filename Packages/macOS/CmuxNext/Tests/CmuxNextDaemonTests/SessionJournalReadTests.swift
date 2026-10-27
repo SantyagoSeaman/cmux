@@ -52,7 +52,10 @@ import Testing
     private static func readCancel(_ daemon: FakeDaemon, of stream: String) throws -> String {
         let cancel = try daemon.readRequest()
         #expect(cancel["operation"] as? String == "stream.cancel")
-        #expect((cancel["params"] as? [String: Any])?["stream"] as? String == stream)
+        let params = try #require(cancel["params"] as? [String: Any])
+        #expect(params["stream"] as? String == stream)
+        // The daemon resolves both selectors before it cancels (resource_connection.rs, cancel_resource_stream).
+        #expect(params["machine"] as? String == "current" && params["session"] as? String == "current")
         return try #require(cancel["id"] as? String)
     }
 
@@ -173,6 +176,28 @@ import Testing
         let error = await #expect(throws: DaemonError.self) { try await read.value }
         if case .malformedResponse? = error {} else { Issue.record("expected malformedResponse, got \(String(describing: error))") }
         #expect(Self.routes(transport) == 0)
+        #expect(!transport.isClosed)
+    }
+
+    @Test func aStreamThatEndedOnItsOwnSendsNoCancel() async throws {
+        let daemon = try FakeDaemon()
+        let transport = try Self.connect(daemon, events: ReplyEventOrderTests.Routed())
+        defer { transport.close() }
+
+        transport.routeStream("stream_done") { _ in }
+        // The end is routed before the ping's reply, so the stream is over when the ping returns.
+        let ping = Task { try await transport.request(cmd: "ping", timeout: .seconds(20)) { Data(#"{"id":\#($0),"cmd":"ping"}"#.utf8) } }
+        let pingID = try daemon.readRequestID()
+        daemon.write([Self.end("stream_done", "completed"), #"{"id":\#(pingID),"ok":true,"data":{}}"#])
+        _ = try await ping.value
+
+        await transport.cancelResourceStream("stream_done", timeout: .seconds(1))
+        let next = Task { try await transport.request(cmd: "ping", timeout: .seconds(20)) { Data(#"{"id":\#($0),"cmd":"ping"}"#.utf8) } }
+        let request = try daemon.readRequest()
+        #expect(request["cmd"] as? String == "ping", "an ended stream sent \(request)")
+        let nextID = try #require((request["id"] as? NSNumber)?.uint64Value)
+        daemon.write([#"{"id":\#(nextID),"ok":true,"data":{}}"#])
+        _ = try await next.value
         #expect(!transport.isClosed)
     }
 

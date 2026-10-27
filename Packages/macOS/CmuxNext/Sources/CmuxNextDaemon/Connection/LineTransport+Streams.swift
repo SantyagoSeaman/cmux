@@ -92,7 +92,8 @@ extension LineTransport: ResourceStreamCarrier {
     /// cmux-tui/spec/resource-api-v2.md: it succeeds only when the exact empty response and the stream's
     /// `stream_end(canceled)` both arrive within `timeout`, in either order. Otherwise the connection is
     /// abandoned (``abandon(_:)``), which ends every request and stream on it, and its owner reconnects.
-    /// A stream that ended already, or that another cancel is releasing, sends nothing.
+    /// A stream that ended before the cancel is written (checked under the socket lock, so the reader
+    /// cannot end it in between), or that another cancel is releasing, sends nothing.
     func cancelResourceStream(_ streamID: String, timeout: Duration) async {
         let (ends, endSeen) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingNewest(1))
         guard claimCancel(streamID, onEnd: { canceled in
@@ -101,11 +102,22 @@ extension LineTransport: ResourceStreamCarrier {
         }) else { return }
         let deadline = DemandTimer(owner: "LineTransport.streamCancel", clock: clock)
         deadline.schedule(after: timeout) { endSeen.finish() }
-        var confirmed = false
-        let response = try? await sendStreamRequest(Self.streamCancel, params: ["stream": .string(streamID)], timeout: timeout)
-        if let response, (try? ResourceRequestEnvelope.decodeResult([String: JSONValue].self, from: response))?.isEmpty == true {
-            var iterator = ends.makeAsyncIterator()
-            confirmed = await iterator.next() == true
+        let params: [String: JSONValue] = ["machine": .string("current"), "session": .string("current"), "stream": .string(streamID)]
+        let confirmed: Bool
+        do {
+            let response = try await sendStreamRequest(Self.streamCancel, params: params, timeout: timeout) {
+                guard state.withLock({ $0.streamSinks[streamID] != nil }) else { throw StreamEndedFirst() }
+            }
+            if (try? ResourceRequestEnvelope.decodeResult([String: JSONValue].self, from: response))?.isEmpty == true {
+                var iterator = ends.makeAsyncIterator()
+                confirmed = await iterator.next() == true
+            } else {
+                confirmed = false
+            }
+        } catch is StreamEndedFirst {
+            confirmed = true
+        } catch {
+            confirmed = false
         }
         deadline.cancel()
         _ = state.withLock { $0.cancelingStreams.remove(streamID) }
@@ -158,13 +170,17 @@ extension LineTransport: ResourceStreamCarrier {
         var reason: String?
     }
 
+    /// The stream ended on its own before its cancel was written, so no cancel goes out.
+    private struct StreamEndedFirst: Error {}
+
     /// Sends one `cmux.protocol/2` request that takes no idempotency key (a stream open or cancel) and
-    /// returns its `ok:true` response. `encoded` runs once the line is built, just before it is written.
+    /// returns its `ok:true` response. `encoded` runs under the socket lock once the line is built, just
+    /// before it is written; when it throws, nothing is written and the request fails with its error.
     private func sendStreamRequest(_ operation: DaemonCommandName, params: [String: JSONValue], timeout: Duration,
-                                   encoded: () -> Void = {}) async throws -> Response {
+                                   encoded: () throws -> Void = {}) async throws -> Response {
         try await request(cmd: operation, timeout: timeout) { id in
             let line = try ResourceRequestEnvelope(id: id, operation: operation.wire, params: params, idempotencyKey: nil).line()
-            encoded()
+            try encoded()
             return line
         }
     }
