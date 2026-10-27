@@ -7,7 +7,15 @@ use crate::Mux;
 use crate::journal_ingress::{
     JournalIngressEvent, JournalIngressSender, TERMINAL_OUTPUT_INGRESS_BYTES,
 };
-use crate::resource::TerminalPublicId;
+use crate::resource::{
+    ContentPublicId, PanePublicId, ScreenPublicId, SplitPublicId, TabPublicId, TerminalPublicId,
+    WorkspacePublicId,
+};
+use crate::workspace_registry::{
+    RegistryIntent, RegistryLayoutNode, RegistryPane, RegistryScreen, RegistryTab,
+    RegistryTerminal, RegistryViewport, RegistryWorkspace, ResourceChange, ResourcePatch,
+    TerminalLifecycle, TerminalOnExit, WorkspaceMutation, WorkspaceRegistry,
+};
 
 fn terminal_id(value: u128) -> Arc<TerminalPublicId> {
     Arc::new(TerminalPublicId::parse(format!("term_{value:032x}")).unwrap())
@@ -79,7 +87,7 @@ fn an_intent_queued_behind_256_kib_terminal_batches_commits_first() {
 }
 
 #[test]
-fn a_small_terminal_batch_shares_the_intent_transaction_after_it() {
+fn a_small_terminal_batch_shares_the_intent_transaction_before_it() {
     let (sender, receivers) = JournalIngressSender::new(true);
     let receivers = receivers.unwrap();
     sender.send(JournalIngressEvent::TerminalResize {
@@ -98,10 +106,238 @@ fn a_small_terminal_batch_shares_the_intent_transaction_after_it() {
     assert!(matches!(
         &round[0][..],
         [
-            QueuedJournalEvent { event: JournalIngressEvent::Producer { .. }, .. },
             QueuedJournalEvent { event: JournalIngressEvent::TerminalResize { .. }, .. },
+            QueuedJournalEvent { event: JournalIngressEvent::Producer { .. }, .. },
         ]
     ));
+}
+
+#[test]
+fn a_resize_sharing_a_tab_move_transaction_sequences_with_the_topology_it_names() {
+    let mut registry = WorkspaceRegistry::in_memory("lane-order-move").unwrap();
+    let topology = MoveTopology::new();
+    registry
+        .commit_resource_patch(
+            &WorkspaceMutation::daemon("lane-order-move-seed", "test").unwrap(),
+            "workspace.create",
+            &serde_json::json!({"operation":"workspace.create"}),
+            None,
+            Some(0),
+            &topology.seed_patch(),
+            &serde_json::json!({"workspace_id":topology.workspace.public_id}),
+            &serde_json::json!([{"kind":"workspace.created"}]),
+        )
+        .unwrap();
+    let seeded_records = registry.session_journal_after(0, 256).unwrap().records.len();
+
+    // A tab move intent and the moved PTY's resize land in one writer round.
+    let key = "lane-order-move-key";
+    let fingerprint = serde_json::json!({"move":"tab"});
+    registry
+        .prepare_resource_effect(key, "tab.move", &fingerprint, &serde_json::json!({}), None, None)
+        .unwrap();
+    registry.mark_resource_effect_executing(key, "tab.move", &fingerprint).unwrap();
+    let (intent, _finish) = registry
+        .prepare_effect_patch_intent(
+            key,
+            "tab.move",
+            &fingerprint,
+            &topology.move_patch(),
+            &serde_json::json!({"tab_id":topology.tab}),
+            &serde_json::json!([{"kind":"upsert","resource":"tab"}]),
+            false,
+        )
+        .unwrap();
+    let (sender, receivers) = JournalIngressSender::new(true);
+    let receivers = receivers.unwrap();
+    queue_durable(
+        &sender,
+        QueuedJournalEvent {
+            event: JournalIngressEvent::Effect(Box::new(RegistryIntent::Effect(intent))),
+            completion: None,
+        },
+    );
+    sender.send(JournalIngressEvent::TerminalResize {
+        terminal_id: Arc::new(topology.terminal.clone()),
+        generation: Arc::from("lane-order-move"),
+        occurred_at_ms: 1,
+        cols: 100,
+        rows: 30,
+        cell_width: 8,
+        cell_height: 16,
+    });
+    let round = receive_round(&receivers).unwrap();
+    assert_eq!(round.len(), 1, "the resize rides along in the intent's transaction");
+    let events = round[0].iter().map(|queued| &queued.event).collect::<Vec<_>>();
+    registry.append_journal_ingress_events(&events).unwrap();
+
+    let batch_records =
+        registry.session_journal_after(0, 256).unwrap().records.split_off(seeded_records);
+    let (resizes, move_records): (Vec<_>, Vec<_>) =
+        batch_records.into_iter().partition(|record| record.kind == "terminal.resized");
+    let [resize] = &resizes[..] else { panic!("one resize record: {resizes:?}") };
+    assert!(!move_records.is_empty(), "the move commits journal records");
+    assert!(
+        move_records.iter().all(|record| record.sequence > resize.sequence),
+        "the resize names the pre-move topology, so it sequences before the move: resize {}, \
+         move {:?}",
+        resize.sequence,
+        move_records.iter().map(|record| (record.sequence, &record.kind)).collect::<Vec<_>>()
+    );
+    let subject_ids = |kind: &str| {
+        resize
+            .subjects
+            .iter()
+            .filter(|subject| subject.kind == kind)
+            .map(|subject| subject.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(subject_ids("pane"), [topology.source_pane.to_string()]);
+    assert_eq!(subject_ids("tab"), [topology.tab.to_string()]);
+    assert_eq!(subject_ids("screen"), [topology.screen.to_string()]);
+    assert_eq!(subject_ids("workspace"), [topology.workspace.public_id.to_string()]);
+    let moved = registry.resource_topology_snapshot().unwrap();
+    assert!(
+        moved
+            .tabs
+            .iter()
+            .any(|tab| tab.public_id == topology.tab && tab.pane_id == topology.target_pane),
+        "the move applied in the same transaction"
+    );
+}
+
+/// One workspace whose screen splits two panes; the terminal's tab starts
+/// in `source_pane` and moves to the empty `target_pane`.
+struct MoveTopology {
+    workspace: RegistryWorkspace,
+    screen: ScreenPublicId,
+    source_pane: PanePublicId,
+    target_pane: PanePublicId,
+    tab: TabPublicId,
+    terminal: TerminalPublicId,
+}
+
+impl MoveTopology {
+    const LEGACY_TERMINAL_ID: &str = "00000000000040008000000000000001";
+
+    fn new() -> Self {
+        Self {
+            workspace: RegistryWorkspace {
+                id: 1,
+                public_id: WorkspacePublicId::parse(format!("ws_{:032x}", 1)).unwrap(),
+                key: "one".into(),
+                name: "One".into(),
+                name_source: Default::default(),
+                name_revision: 0,
+                group_key: "default".into(),
+            },
+            screen: ScreenPublicId::parse(format!("screen_{:032x}", 1)).unwrap(),
+            source_pane: PanePublicId::parse(format!("pane_{:032x}", 1)).unwrap(),
+            target_pane: PanePublicId::parse(format!("pane_{:032x}", 2)).unwrap(),
+            tab: TabPublicId::parse(format!("tab_{:032x}", 1)).unwrap(),
+            terminal: TerminalPublicId::parse(format!("term_{:032x}", 1)).unwrap(),
+        }
+    }
+
+    fn pane(&self, public_id: &PanePublicId, active_tab: Option<&TabPublicId>) -> ResourceChange {
+        ResourceChange::UpsertPane(RegistryPane {
+            public_id: public_id.clone(),
+            screen_id: self.screen.clone(),
+            name: None,
+            active_tab: active_tab.cloned(),
+            creation_ordinal: if *public_id == self.source_pane { 1 } else { 2 },
+        })
+    }
+
+    fn tab_in(&self, pane_id: &PanePublicId) -> ResourceChange {
+        ResourceChange::UpsertTab(RegistryTab {
+            public_id: self.tab.clone(),
+            pane_id: pane_id.clone(),
+            position: 0,
+            content_id: ContentPublicId::Terminal(self.terminal.clone()),
+            name: Some("zsh".into()),
+            name_source: Default::default(),
+            name_revision: 0,
+            browser_url: None,
+            terminal_id: Some(Self::LEGACY_TERMINAL_ID.into()),
+        })
+    }
+
+    fn seed_patch(&self) -> ResourcePatch {
+        let workspace_id = self.workspace.public_id.clone();
+        ResourcePatch {
+            changes: vec![
+                ResourceChange::UpsertWorkspace {
+                    workspace: self.workspace.clone(),
+                    position: 0,
+                    active_screen: Some(self.screen.clone()),
+                },
+                ResourceChange::UpsertScreen(RegistryScreen {
+                    public_id: self.screen.clone(),
+                    workspace_id: workspace_id.clone(),
+                    position: 0,
+                    name: None,
+                    layout: RegistryLayoutNode::Split {
+                        split: SplitPublicId::parse(format!("split_{:032x}", 1)).unwrap(),
+                        direction: "right".into(),
+                        ratio: 0.5,
+                        first: Box::new(RegistryLayoutNode::Leaf {
+                            pane: self.source_pane.clone(),
+                        }),
+                        second: Box::new(RegistryLayoutNode::Leaf {
+                            pane: self.target_pane.clone(),
+                        }),
+                    },
+                    active_pane: self.source_pane.clone(),
+                    zoomed_pane: None,
+                    auto_layout: None,
+                    viewport: RegistryViewport::default(),
+                }),
+                self.pane(&self.source_pane, Some(&self.tab)),
+                self.pane(&self.target_pane, None),
+                ResourceChange::UpsertTerminal {
+                    public_id: self.terminal.clone(),
+                    terminal: RegistryTerminal {
+                        terminal_id: Self::LEGACY_TERMINAL_ID.into(),
+                        workspace_key: "one".into(),
+                        incarnation: None,
+                        lifecycle: TerminalLifecycle::Launching,
+                        launch_spec: serde_json::json!({
+                            "command": ["/bin/zsh"], "cwd": "/tmp", "rows": 24, "cols": 80
+                        }),
+                        exit: None,
+                        on_exit: TerminalOnExit::Close,
+                    },
+                },
+                self.tab_in(&self.source_pane),
+                ResourceChange::SetWorkspaceOrder { workspace_ids: vec![workspace_id.clone()] },
+                ResourceChange::SetScreenOrder {
+                    workspace_id: workspace_id.clone(),
+                    screen_ids: vec![self.screen.clone()],
+                },
+                ResourceChange::SetTabOrder {
+                    pane_id: self.source_pane.clone(),
+                    tab_ids: vec![self.tab.clone()],
+                },
+                ResourceChange::SetActiveWorkspace { workspace_id: Some(workspace_id) },
+            ],
+        }
+    }
+
+    fn move_patch(&self) -> ResourcePatch {
+        ResourcePatch {
+            changes: vec![
+                self.tab_in(&self.target_pane),
+                self.pane(&self.source_pane, None),
+                self.pane(&self.target_pane, Some(&self.tab)),
+                ResourceChange::SetTabOrder { pane_id: self.source_pane.clone(), tab_ids: vec![] },
+                ResourceChange::SetTabOrder {
+                    pane_id: self.target_pane.clone(),
+                    tab_ids: vec![self.tab.clone()],
+                },
+            ],
+        }
+    }
 }
 
 #[test]

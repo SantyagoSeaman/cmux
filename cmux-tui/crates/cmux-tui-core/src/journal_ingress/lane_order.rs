@@ -13,8 +13,12 @@
 //! terminal events commits them before the writer drains again.
 //!
 //! A small terminal batch (the barriers, resizes and gaps shipped builds
-//! send) commits in the durable batch's transaction, after its events: the
+//! send) commits in the durable batch's transaction, before its events: the
 //! two share one fsync, and the intent's commit grows by only a few rows.
+//! Terminal records go first because the writer computes their topology
+//! subjects at transaction start (`writer_batch.rs`): a registry intent
+//! after them can move or create the terminal without making those
+//! subjects stale for their sequence position.
 //!
 //! At idle the writer waits on the wake channel with no timeout, and no hold
 //! applies to a round that drained durable events, so an intent starts its
@@ -86,11 +90,12 @@ pub(super) fn receive_round(
     }
 }
 
-/// The durable batch first, with a small terminal batch in its transaction;
-/// a larger terminal batch is its own transaction after it.
+/// The durable batch first, with a small terminal batch in its transaction
+/// ahead of its events; a larger terminal batch is its own transaction
+/// after it.
 fn order_round(
-    mut durable: Vec<QueuedJournalEvent>,
-    terminal: Vec<QueuedJournalEvent>,
+    durable: Vec<QueuedJournalEvent>,
+    mut terminal: Vec<QueuedJournalEvent>,
 ) -> VecDeque<Vec<QueuedJournalEvent>> {
     if durable.is_empty() || terminal.is_empty() {
         return [durable, terminal].into_iter().filter(|batch| !batch.is_empty()).collect();
@@ -99,8 +104,8 @@ fn order_round(
         .iter()
         .fold(0_usize, |bytes, queued| bytes.saturating_add(queued.event.estimated_bytes()));
     if terminal_bytes <= TERMINAL_RIDE_ALONG_BYTES {
-        durable.extend(terminal);
-        return VecDeque::from([durable]);
+        terminal.extend(durable);
+        return VecDeque::from([terminal]);
     }
     VecDeque::from([durable, terminal])
 }
