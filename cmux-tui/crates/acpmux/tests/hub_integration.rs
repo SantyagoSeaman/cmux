@@ -1576,6 +1576,8 @@ mod claude_failover;
 mod lifecycle_fixes;
 #[path = "hub_integration/session_hibernate.rs"]
 mod session_hibernate;
+#[path = "hub_integration/bg_tasks.rs"]
+mod bg_tasks;
 #[path = "hub_integration/quit_spawn.rs"]
 mod quit_spawn;
 

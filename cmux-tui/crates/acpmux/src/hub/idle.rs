@@ -80,8 +80,9 @@ impl Hub {
             // A Claude chat with turns but none stored would wake as a fresh conversation with
             // its transcript restored into the prompt (`claude_resume_refusal`): kept awake.
             && !(session.meta().claude_unstored && session.meta().turn_count > 0)
-            // A process still running in the background (a dev server, a
-            // watcher) ends with the harness: never reap it for idleness.
+            // A harness's own background process (a dev server, a watcher) ends
+            // with the harness: never reap it for idleness. A task the daemon owns
+            // (`bg_tasks.rs`) is not in this table and outlives the harness.
             && !self.any_process_running(session)
             // Nor a background subagent, which the harness's exit would end too.
             && session.subagents.lock().unwrap_or_else(|e| e.into_inner()).background_running() == 0

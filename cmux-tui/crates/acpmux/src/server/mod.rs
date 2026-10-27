@@ -1491,6 +1491,7 @@ mod peer_status;
 pub mod peer_text;
 mod pending;
 mod place;
+mod bg_tasks;
 mod processes;
 mod worktrees;
 use crate::hub::is_permission_ask;
