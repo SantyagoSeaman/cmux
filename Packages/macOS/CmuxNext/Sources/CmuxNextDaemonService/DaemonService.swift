@@ -354,17 +354,15 @@ public final class DaemonService {
         let machineID = machineID
         armStartupDeadline()
         observeRetryEvents()
-        let wake = retryWake
+        let wake = retryWake, clock = startupClock
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { path in
             if path.status == .satisfied { wake.fire() }
         }
         monitor.start(queue: DispatchQueue(label: "com.cmuxterm.next.daemon.path.\(machineID)", qos: .utility))
         pathMonitor = monitor
-        let clock = startupClock
-        var configuration = DaemonConnection.Configuration(retryWake: wake, terminalEnvironment: nil, sessionEvents: true)
-        configuration.echoesPlacementShift = echoesPlacementShift
-        configuration.hangWatch = hangWatch
+        let configuration = DaemonConnection.Configuration.remote(retryWake: wake, echoesPlacementShift: echoesPlacementShift,
+                                                                  hangWatch: hangWatch, terminalStreams: terminalStreams)
         // task-owner: the remote machine's connection lifecycle (`runTask`); shutdownConnection cancels it. Off main:
         // it awaits each connect, the store's run and the backoff; its step on main per connection is
         // `admitConnection` (recipe R-hop).
@@ -557,6 +555,8 @@ public final class DaemonService {
     /// Receives every command task `send` starts, so an action run from the
     /// control socket can await it (`ActionRegistry.track`).
     @ObservationIgnored public var workTracker: ((ActionWork) -> Void)?
+    /// The device remote terminal views stream as (`start(remote:)`, p05-ipc-151); nil: a connection per view.
+    @ObservationIgnored public var terminalStreams: TerminalStreamsDevice?
 
     public func shutdownConnection() {
         startupDeadlineTimer?.cancel()

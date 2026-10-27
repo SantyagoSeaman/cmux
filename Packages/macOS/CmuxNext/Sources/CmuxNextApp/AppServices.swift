@@ -818,7 +818,7 @@ final class AppServices {
         // The engines' Keychain calls run on the system lane; the remembered HTTP sign-ins are listed there now.
         browserStores.loadRememberedSignIns(on: work)
         vncSignIns.loadRememberedVNCSignIns(on: work)
-        machines = MachineRegistry(local: daemon)
+        machines = MachineRegistry(local: daemon, terminalStreams: CmuxNextApp.terminalStreams(launchFeatures))
         machines.isFeatureDisabled = { [registry] in registry.disabledFeatures.contains($0) }
         BrowserLifecycleTrace.shared.configure { tab, event in
             InputJournal.shared.append(window: nil, .content(tab: tab, event: event))

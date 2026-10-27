@@ -45,8 +45,13 @@ final class MachineRegistry {
         didSet { for daemon in daemons { daemon.connectionPresence = connectionPresence } }
     }
 
-    init(local: DaemonService) {
+    /// The device remote machines' terminal views stream as on their connections, handed to each one added
+    /// (``DaemonService/terminalStreams``, p05-ipc-151); nil (feature `terminalStreams` off): a connection per view.
+    private let terminalStreams: TerminalStreamsDevice?
+
+    init(local: DaemonService, terminalStreams: TerminalStreamsDevice? = nil) {
         self.local = local
+        self.terminalStreams = terminalStreams
         tabIndex.track(local, as: .local)
     }
 
@@ -194,6 +199,7 @@ final class MachineRegistry {
         cloud.append(session)
         tabIndex.track(session.daemon, as: .cloud)
         session.daemon.connectionPresence = connectionPresence
+        session.daemon.terminalStreams = terminalStreams
     }
 
     func remove(_ machineID: String) -> CloudMachineSession? {
@@ -210,6 +216,7 @@ final class MachineRegistry {
         ssh.append(session)
         tabIndex.track(session.daemon, as: .ssh)
         session.daemon.connectionPresence = connectionPresence
+        session.daemon.terminalStreams = terminalStreams
     }
 
     func removeSSH(_ machineID: String) -> SSHMachineSession? {
@@ -226,6 +233,7 @@ final class MachineRegistry {
         servers.append(session)
         tabIndex.track(session.daemon, as: .server)
         session.daemon.connectionPresence = connectionPresence
+        session.daemon.terminalStreams = terminalStreams
     }
 
     func removeServer(_ machineID: String) -> ServerMachineSession? {
