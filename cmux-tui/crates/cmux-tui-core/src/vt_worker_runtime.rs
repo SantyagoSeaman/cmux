@@ -3,32 +3,24 @@
 //! the broker of this module). terminal-host-model-DESIGN.md, option E;
 //! plans/cmux-next/chrome-parity/p01-process.md, tasks 134 and 137.
 //!
-//! Which mode a daemon runs is a per-channel default plus one override, the
-//! way Chromium rolls out a process-model change: a feature has a default
-//! state (`base::Feature`, `FEATURE_ENABLED_BY_DEFAULT` in
-//! base/feature_list.h), the default can differ per channel
-//! (`chrome::GetChannel()`, chrome/common/channel_info.h), and an explicit
-//! `--enable-features` / `--disable-features` switch wins over the default
-//! (`FeatureList::InitFromCommandLine`, base/feature_list.cc). Here:
-//!
-//! - DEV builds default to [`VtParseMode::Process`] (task 137, which lands
-//!   after the phase B rows 135, 136, 141, 142 and 209-211 pass).
-//! - NIGHTLY, staging, RC, Release and an unbundled daemon (a standalone
-//!   CLI, the cargo tests) default to [`VtParseMode::Threads`]. NIGHTLY moves
-//!   only with its own task.
-//! - `CMUX_TUI_VT_WORKERS=process` turns workers on in any build;
-//!   `CMUX_TUI_VT_WORKERS=threads` keeps a DEV daemon on the pool threads.
-//!   The `threads` fallback is kept for one release after the DEV default
-//!   changed, then removed with the phase A path for workers.
-//!
-//! The build kind is injected: it comes from the app bundle around the
-//! daemon executable (`cmux-tui` `app_identity`), never from an inherited
-//! environment, so a daemon started from another build's terminal keeps
-//! its own build's default.
+//! Behind the `vtWorkerProcesses` feature (`schemas/features/features.d`),
+//! off on every channel until the phase B rows (135, 136, 141, 142 and
+//! 209-211) pass; task 137 then turns its DEV default on in the registry, not
+//! here. The mode resolves from the daemon's feature [`Snapshot`], the same
+//! way `holder_runtime` resolves `terminalHolder`: the channel default, the
+//! `CMUX_ENABLE_FEATURES` / `CMUX_DISABLE_FEATURES` lists, then managed
+//! policy and the signed document's `DisabledFeatures`, which win over
+//! everything. [`VT_WORKERS_ENV`] is one more env-list entry: `process`
+//! enables, `threads` disables. This is Chromium's process-model rollout:
+//! a `base::Feature` with a per-channel default and the
+//! `--enable-features` / `--disable-features` switches
+//! (`FeatureList::InitFromCommandLine`, base/feature_list.cc), where a
+//! disable wins.
 
-use cmux_agent_pane_policy::build_identity::BuildKind;
+use cmux_features::{Snapshot, Source, feature::VT_WORKER_PROCESSES};
 
-/// The environment variable that overrides the per-build default.
+/// The env switch that predates `vtWorkerProcesses`: `process` enables the
+/// feature and `threads` disables it.
 pub const VT_WORKERS_ENV: &str = "CMUX_TUI_VT_WORKERS";
 
 /// Where terminal output is parsed.
@@ -50,16 +42,8 @@ impl VtParseMode {
         }
     }
 
-    /// The mode a build runs when nothing overrides it.
-    pub const fn default_for(build: BuildKind) -> Self {
-        match build {
-            BuildKind::Dev => Self::Process,
-            BuildKind::Nightly
-            | BuildKind::Staging
-            | BuildKind::Rc
-            | BuildKind::Release
-            | BuildKind::Unbundled => Self::Threads,
-        }
+    fn from_enabled(enabled: bool) -> Self {
+        if enabled { Self::Process } else { Self::Threads }
     }
 
     fn parse(value: &str) -> Option<Self> {
@@ -74,55 +58,59 @@ impl VtParseMode {
 /// Why a daemon runs the mode it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VtParseModeSource {
-    /// [`VtParseMode::default_for`] the daemon's build.
-    BuildDefault,
+    /// The `vtWorkerProcesses` registry default of the daemon's channel.
+    ChannelDefault,
+    /// The enable or disable list (spawn environment or client hello).
+    FeatureList,
+    /// Managed policy or the signed document's `DisabledFeatures`.
+    KillSwitch,
     /// A valid [`VT_WORKERS_ENV`] value.
-    Override,
-    /// [`VT_WORKERS_ENV`] held a value that names no mode; the build default
-    /// applies. The value is kept for the startup log line.
-    InvalidOverride(String),
+    Alias,
+    /// [`VT_WORKERS_ENV`] held a value that names no mode; the feature's
+    /// value applies. The value is kept for the startup log line.
+    InvalidAlias(String),
 }
 
 /// The parse mode of one daemon, decided once at start. The broker and the
-/// VT pool read it; it never changes while the daemon runs, so a terminal
-/// never moves between modes.
+/// VT pool read it; it never changes while the daemon runs (the feature is
+/// not `runtimeMutable`), so a terminal never moves between modes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VtWorkerPolicy {
     mode: VtParseMode,
-    build: BuildKind,
     source: VtParseModeSource,
 }
 
 impl VtWorkerPolicy {
-    /// The policy of a daemon of `build` whose [`VT_WORKERS_ENV`] is
-    /// `override_value`. Blank counts as unset.
-    pub fn resolve(build: BuildKind, override_value: Option<&str>) -> Self {
-        let override_value = override_value.filter(|value| !value.trim().is_empty());
-        let (mode, source) = match override_value {
-            None => (VtParseMode::default_for(build), VtParseModeSource::BuildDefault),
-            Some(value) => match VtParseMode::parse(value) {
-                Some(mode) => (mode, VtParseModeSource::Override),
-                None => (
-                    VtParseMode::default_for(build),
-                    VtParseModeSource::InvalidOverride(value.to_owned()),
-                ),
+    /// The policy from the daemon's resolved `features` and its
+    /// [`VT_WORKERS_ENV`] value `alias`. A disable on the feature lists wins
+    /// over the alias's `process`, `DisabledFeatures` wins over both, and the
+    /// alias's `threads` wins over an enable. Blank counts as unset.
+    pub fn resolve(features: &Snapshot, alias: Option<&str>) -> Self {
+        let feature = VtParseMode::from_enabled(features.is_enabled(VT_WORKER_PROCESSES));
+        let alias = alias.filter(|value| !value.trim().is_empty());
+        let (mode, source) = match (features.source(VT_WORKER_PROCESSES), alias) {
+            (Source::Disabled, _) => (VtParseMode::Threads, VtParseModeSource::KillSwitch),
+            (Source::Override, _) if feature == VtParseMode::Threads => {
+                (VtParseMode::Threads, VtParseModeSource::FeatureList)
+            }
+            (_, Some(value)) => match VtParseMode::parse(value) {
+                Some(mode) => (mode, VtParseModeSource::Alias),
+                None => (feature, VtParseModeSource::InvalidAlias(value.to_owned())),
             },
+            (Source::Override, None) => (feature, VtParseModeSource::FeatureList),
+            (Source::Default, None) => (feature, VtParseModeSource::ChannelDefault),
         };
-        Self { mode, build, source }
+        Self { mode, source }
     }
 
-    /// The policy of this daemon process: `build` from its app bundle,
-    /// the override from its environment.
-    pub fn for_daemon(build: BuildKind) -> Self {
-        Self::resolve(build, std::env::var(VT_WORKERS_ENV).ok().as_deref())
+    /// The policy of this daemon process: its resolved `features` and the
+    /// alias from its environment.
+    pub fn for_daemon(features: &Snapshot) -> Self {
+        Self::resolve(features, std::env::var(VT_WORKERS_ENV).ok().as_deref())
     }
 
     pub fn mode(&self) -> VtParseMode {
         self.mode
-    }
-
-    pub fn build(&self) -> BuildKind {
-        self.build
     }
 
     pub fn source(&self) -> &VtParseModeSource {
@@ -135,16 +123,23 @@ impl VtWorkerPolicy {
     }
 
     /// One line for the startup log and `debug.vt`, e.g.
-    /// `vt parse: process (dev default)`. An invalid override names its
-    /// value; the value is a mode name the person typed, not terminal data.
+    /// `vt parse: threads (vtWorkerProcesses channel default)`. An invalid
+    /// alias names its value; the value is a mode name the person typed, not
+    /// terminal data.
     pub fn describe(&self) -> String {
+        const FEATURE: &str = "vtWorkerProcesses";
         let mode = self.mode.name();
-        let build = self.build.name();
         match &self.source {
-            VtParseModeSource::BuildDefault => format!("vt parse: {mode} ({build} default)"),
-            VtParseModeSource::Override => format!("vt parse: {mode} ({VT_WORKERS_ENV})"),
-            VtParseModeSource::InvalidOverride(value) => format!(
-                "vt parse: {mode} ({build} default; ignored {VT_WORKERS_ENV}={value:?}, expected threads or process)"
+            VtParseModeSource::ChannelDefault => {
+                format!("vt parse: {mode} ({FEATURE} channel default)")
+            }
+            VtParseModeSource::FeatureList => format!("vt parse: {mode} ({FEATURE} feature list)"),
+            VtParseModeSource::KillSwitch => {
+                format!("vt parse: {mode} ({FEATURE} disabled by policy)")
+            }
+            VtParseModeSource::Alias => format!("vt parse: {mode} ({VT_WORKERS_ENV})"),
+            VtParseModeSource::InvalidAlias(value) => format!(
+                "vt parse: {mode} ({FEATURE}; ignored {VT_WORKERS_ENV}={value:?}, expected threads or process)"
             ),
         }
     }
@@ -153,95 +148,105 @@ impl VtWorkerPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cmux_features::Channel;
 
-    const ALL_BUILDS: [BuildKind; 6] = [
-        BuildKind::Dev,
-        BuildKind::Nightly,
-        BuildKind::Staging,
-        BuildKind::Rc,
-        BuildKind::Release,
-        BuildKind::Unbundled,
-    ];
+    const CHANNELS: [Channel; 3] = [Channel::Dev, Channel::Nightly, Channel::Release];
+    const NAME: &str = "vtWorkerProcesses";
 
-    #[test]
-    fn dev_defaults_to_worker_processes() {
-        let policy = VtWorkerPolicy::resolve(BuildKind::Dev, None);
-        assert_eq!(policy.mode(), VtParseMode::Process);
-        assert_eq!(policy.source(), &VtParseModeSource::BuildDefault);
-        assert!(policy.workers_enabled());
+    fn lists(channel: Channel, enable: Option<&str>, disable: Option<&str>) -> Snapshot {
+        Snapshot::from_env(channel, enable, disable)
     }
 
     #[test]
-    fn every_other_build_defaults_to_pool_threads() {
-        for build in ALL_BUILDS.into_iter().filter(|build| *build != BuildKind::Dev) {
-            let policy = VtWorkerPolicy::resolve(build, None);
-            assert_eq!(policy.mode(), VtParseMode::Threads, "{}", build.name());
-            assert!(!policy.workers_enabled(), "{}", build.name());
+    fn every_channel_defaults_to_pool_threads() {
+        for channel in CHANNELS {
+            for features in [Snapshot::defaults(channel), lists(channel, None, None)] {
+                let policy = VtWorkerPolicy::resolve(&features, None);
+                assert_eq!(policy.mode(), VtParseMode::Threads, "{channel:?}");
+                assert_eq!(policy.source(), &VtParseModeSource::ChannelDefault, "{channel:?}");
+                assert!(!policy.workers_enabled(), "{channel:?}");
+            }
         }
     }
 
     #[test]
-    fn the_bundle_ids_of_shipped_channels_keep_pool_threads() {
-        use cmux_agent_pane_policy::build_identity::BuildIdentity;
-        for (bundle_id, mode) in [
-            ("com.cmuxterm.app.debug", VtParseMode::Process),
-            ("com.cmuxterm.app.debug.cp-137", VtParseMode::Process),
-            ("com.cmuxterm.app.nightly", VtParseMode::Threads),
-            ("com.cmuxterm.app.nightly.cmux-next", VtParseMode::Threads),
-            ("com.cmuxterm.app.rc", VtParseMode::Threads),
-            ("com.cmuxterm.app.staging", VtParseMode::Threads),
-            ("com.cmuxterm.app", VtParseMode::Threads),
-        ] {
-            let build = BuildIdentity::new(Some(bundle_id), None).kind();
-            assert_eq!(VtWorkerPolicy::resolve(build, None).mode(), mode, "{bundle_id}");
-        }
-        assert_eq!(
-            VtWorkerPolicy::resolve(BuildIdentity::new(None, None).kind(), None).mode(),
-            VtParseMode::Threads
-        );
-    }
-
-    #[test]
-    fn threads_override_keeps_dev_on_the_pool() {
-        let policy = VtWorkerPolicy::resolve(BuildKind::Dev, Some("threads"));
-        assert_eq!(policy.mode(), VtParseMode::Threads);
-        assert_eq!(policy.source(), &VtParseModeSource::Override);
-    }
-
-    #[test]
-    fn process_override_turns_workers_on_in_any_build() {
-        for build in ALL_BUILDS {
-            let policy = VtWorkerPolicy::resolve(build, Some(" process\n"));
-            assert_eq!(policy.mode(), VtParseMode::Process, "{}", build.name());
-            assert_eq!(policy.source(), &VtParseModeSource::Override);
+    fn the_feature_lists_turn_workers_on_and_off_on_every_channel() {
+        for channel in CHANNELS {
+            let on = VtWorkerPolicy::resolve(&lists(channel, Some(NAME), None), None);
+            assert_eq!(on.mode(), VtParseMode::Process, "{channel:?}");
+            assert_eq!(on.source(), &VtParseModeSource::FeatureList);
+            let both = VtWorkerPolicy::resolve(&lists(channel, Some(NAME), Some(NAME)), None);
+            assert_eq!(both.mode(), VtParseMode::Threads, "{channel:?}: disable wins");
+            let hello = Snapshot::from_pairs(channel, [(NAME, true)]);
+            assert!(VtWorkerPolicy::resolve(&hello, None).workers_enabled(), "{channel:?}");
         }
     }
 
     #[test]
-    fn blank_override_is_unset() {
-        for build in ALL_BUILDS {
+    fn the_env_alias_selects_the_mode_on_every_channel() {
+        for channel in CHANNELS {
+            let defaults = Snapshot::defaults(channel);
+            let process = VtWorkerPolicy::resolve(&defaults, Some(" process\n"));
+            assert_eq!(process.mode(), VtParseMode::Process, "{channel:?}");
+            assert_eq!(process.source(), &VtParseModeSource::Alias);
+            let on = lists(channel, Some(NAME), None);
+            let threads = VtWorkerPolicy::resolve(&on, Some("threads"));
+            assert_eq!(threads.mode(), VtParseMode::Threads, "{channel:?}: alias disable wins");
+            assert_eq!(threads.source(), &VtParseModeSource::Alias);
+        }
+    }
+
+    #[test]
+    fn a_disable_beats_the_alias() {
+        for channel in CHANNELS {
+            let off = lists(channel, None, Some(NAME));
+            let policy = VtWorkerPolicy::resolve(&off, Some("process"));
+            assert_eq!(policy.mode(), VtParseMode::Threads, "{channel:?}");
+            assert_eq!(policy.source(), &VtParseModeSource::FeatureList);
+        }
+    }
+
+    #[test]
+    fn disabled_features_beat_every_other_input() {
+        for channel in CHANNELS {
+            let killed = lists(channel, Some(NAME), None).with_disabled([NAME]);
+            let policy = VtWorkerPolicy::resolve(&killed, Some("process"));
+            assert_eq!(policy.mode(), VtParseMode::Threads, "{channel:?}");
+            assert_eq!(policy.source(), &VtParseModeSource::KillSwitch);
             assert_eq!(
-                VtWorkerPolicy::resolve(build, Some("  ")),
-                VtWorkerPolicy::resolve(build, None),
-                "{}",
-                build.name()
+                policy.describe(),
+                "vt parse: threads (vtWorkerProcesses disabled by policy)"
             );
         }
     }
 
     #[test]
-    fn invalid_override_keeps_the_build_default_and_says_so() {
-        let release = VtWorkerPolicy::resolve(BuildKind::Release, Some("on"));
-        assert_eq!(release.mode(), VtParseMode::Threads);
-        assert_eq!(release.source(), &VtParseModeSource::InvalidOverride("on".into()));
-        assert!(release.describe().contains("ignored CMUX_TUI_VT_WORKERS=\"on\""));
-        let dev = VtWorkerPolicy::resolve(BuildKind::Dev, Some("PROCESS"));
-        assert_eq!(dev.mode(), VtParseMode::Process);
-        assert!(matches!(dev.source(), VtParseModeSource::InvalidOverride(_)));
+    fn blank_alias_is_unset() {
+        for channel in CHANNELS {
+            for features in [Snapshot::defaults(channel), lists(channel, Some(NAME), None)] {
+                assert_eq!(
+                    VtWorkerPolicy::resolve(&features, Some("  ")),
+                    VtWorkerPolicy::resolve(&features, None),
+                    "{channel:?}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn mode_names_round_trip_through_the_override() {
+    fn invalid_alias_keeps_the_feature_value_and_says_so() {
+        let release = VtWorkerPolicy::resolve(&Snapshot::defaults(Channel::Release), Some("on"));
+        assert_eq!(release.mode(), VtParseMode::Threads);
+        assert_eq!(release.source(), &VtParseModeSource::InvalidAlias("on".into()));
+        assert!(release.describe().contains("ignored CMUX_TUI_VT_WORKERS=\"on\""));
+        let enabled = lists(Channel::Dev, Some(NAME), None);
+        let dev = VtWorkerPolicy::resolve(&enabled, Some("PROCESS"));
+        assert_eq!(dev.mode(), VtParseMode::Process, "values are case-sensitive");
+        assert!(matches!(dev.source(), VtParseModeSource::InvalidAlias(_)));
+    }
+
+    #[test]
+    fn mode_names_round_trip_through_the_alias() {
         for mode in [VtParseMode::Threads, VtParseMode::Process] {
             assert_eq!(VtParseMode::parse(mode.name()), Some(mode));
         }
@@ -250,11 +255,12 @@ mod tests {
     #[test]
     fn describe_names_mode_and_source() {
         assert_eq!(
-            VtWorkerPolicy::resolve(BuildKind::Dev, None).describe(),
-            "vt parse: process (dev default)"
+            VtWorkerPolicy::resolve(&Snapshot::defaults(Channel::Dev), None).describe(),
+            "vt parse: threads (vtWorkerProcesses channel default)"
         );
         assert_eq!(
-            VtWorkerPolicy::resolve(BuildKind::Nightly, Some("process")).describe(),
+            VtWorkerPolicy::resolve(&Snapshot::defaults(Channel::Nightly), Some("process"))
+                .describe(),
             "vt parse: process (CMUX_TUI_VT_WORKERS)"
         );
     }

@@ -14,6 +14,10 @@
     "unclassified": "Compiled into Release and not yet classified (MQ7)."
   },
   "followups": {
+    "p01-process-137": {
+      "title": "Daemon VT parse mode -> feature vtWorkerProcesses (process daemon); CMUX_TUI_VT_WORKERS stays as an override alias",
+      "resolution": "feature:vtWorkerProcesses"
+    },
     "p12-perf-process-105": {
       "title": "Daemon holder mode -> feature terminalHolder (process both); the env names stay as override aliases",
       "resolution": "feature:terminalHolder"
@@ -1552,6 +1556,14 @@
       "followup": "p12-perf-process-105",
       "sites": [
         {"at": "Packages/macOS/CmuxNext/Sources/CmuxNextDaemon/Launch/DaemonDiagnosticKnobs.swift:22", "kind": "use", "cond": "", "release": true}
+      ]
+    },
+    "CMUX_TUI_VT_WORKERS": {
+      "class": "releasePerfPath",
+      "note": "Named only as the generated vtWorkerProcesses feature's replaced env switch.",
+      "followup": "p01-process-137",
+      "sites": [
+        {"at": "Packages/macOS/CmuxNext/Sources/CmuxNextFeatures/Features.generated.swift:1946", "kind": "use", "cond": "", "release": true}
       ]
     },
     "CMUX_UITEST_STACK": {
@@ -3096,6 +3108,17 @@
         {"at": "cmux-tui/crates/cmux-tui/src/update_notice.rs:63", "kind": "use", "cond": "", "release": true},
         {"at": "cmux-tui/crates/cmux-tui/src/update_notice.rs:346", "kind": "use", "cond": "cfg(test) && #[test]", "release": false},
         {"at": "cmux-tui/crates/cmux-tui/src/update_notice.rs:349", "kind": "use", "cond": "cfg(test) && #[test]", "release": false}
+      ]
+    },
+    "CMUX_TUI_VT_WORKERS": {
+      "class": "releasePerfPath",
+      "note": "VT parse mode alias of vtWorkerProcesses: process enables the VT worker processes, threads disables them.",
+      "followup": "p01-process-137",
+      "sites": [
+        {"at": "cmux-tui/crates/cmux-tui-core/src/vt_worker_runtime.rs:24", "kind": "constant", "cond": "cfg(unix)", "release": null},
+        {"at": "cmux-tui/crates/cmux-tui-core/src/vt_worker_runtime.rs:109", "kind": "via VT_WORKERS_ENV", "cond": "cfg(unix)", "release": null},
+        {"at": "cmux-tui/crates/cmux-tui-core/src/vt_worker_runtime.rs:140", "kind": "via VT_WORKERS_ENV", "cond": "cfg(unix)", "release": null},
+        {"at": "cmux-tui/crates/cmux-tui-core/src/vt_worker_runtime.rs:142", "kind": "via VT_WORKERS_ENV", "cond": "cfg(unix)", "release": null}
       ]
     },
     "CMUX_TUI_WARM_MACHINES": {

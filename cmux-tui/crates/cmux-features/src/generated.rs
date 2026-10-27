@@ -55,6 +55,11 @@ pub(crate) const TABLE: &[crate::FeatureDef] = &[
         defaults: crate::Defaults { dev: false, nightly: false, release: false },
         process: crate::Process::Daemon,
     },
+    crate::FeatureDef {
+        name: "vtWorkerProcesses",
+        defaults: crate::Defaults { dev: false, nightly: false, release: false },
+        process: crate::Process::Daemon,
+    },
 ];
 
 /// One handle per daemon feature, for `Snapshot::is_enabled`.
@@ -80,5 +85,7 @@ pub mod feature {
         TERMINAL_HOLDER = "terminalHolder",
         /// Terminal sizing counts one participant per app connection: all of an app's views of one terminal are leases of one participant (its latest active view sets its size), and disconnecting that participant ends only that terminal's views, not the app's connection.
         TERMINAL_SIZING_PER_APP = "terminalSizingPerApp",
+        /// The daemon parses terminal output in sandboxed cmux-vt-worker processes, sharded by trust class, instead of its own VT pool threads (terminal-host-model-DESIGN.md option E).
+        VT_WORKER_PROCESSES = "vtWorkerProcesses",
     );
 }
