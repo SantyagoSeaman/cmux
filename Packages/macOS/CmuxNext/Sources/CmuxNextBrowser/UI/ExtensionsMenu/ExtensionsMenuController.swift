@@ -104,6 +104,10 @@ final class ExtensionsMenuController {
     /// Opens the bubble below `anchor`, right-aligned to it (Chrome's `TOP_RIGHT` arrow).
     func show(host: any BrowserExtensionActionHosting, handler: any ExtensionMenuHandling, anchor: NSView) {
         guard let window = anchor.window else { return }
+        func __cpu() -> Double { var ts = timespec(); clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); return Double(ts.tv_sec) * 1e3 + Double(ts.tv_nsec) / 1e6 }
+        var __t = __cpu(); var __marks: [String] = []
+        func __mark(_ n: String) { let now = __cpu(); __marks.append("\(n)=\(String(format: "%.2f", now - __t))"); __t = now }
+        defer { print("EXTMENU-PHASES " + __marks.joined(separator: " ")) }
         self.host = host
         self.handler = handler
         anchorView = anchor
@@ -120,19 +124,25 @@ final class ExtensionsMenuController {
             self.observedInputs = inputs
             self.render()
         }
+        __mark("observe")
         anchorRect = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
         panel.adoptThemeScope(of: anchor)
+        __mark("theme")
         guard popup.show(size: content.frame.size, anchor: anchorRect, in: window, preferred: anchor.toolbarPopupSide, trailing: true,
                          makeKey: true) != nil else { return closed() }
+        __mark("popup")
         panel.makeFirstResponder(card)
+        __mark("responder")
         reportedShown = true
         onShownChange?(anchor, true)
+        __mark("shownChange")
         // The open does not wait for Chromium: the refresh runs on the next turn.
         refreshTask?.cancel()
         refreshTask = Task { @MainActor [weak self] in
             guard let self, !Task.isCancelled, self.isShown else { return }
             self.host?.extensionStore.refresh()
         }
+        __mark("task")
     }
 
     /// Builds the rows and decodes the icons ahead of a click, so an open only shows the panel
