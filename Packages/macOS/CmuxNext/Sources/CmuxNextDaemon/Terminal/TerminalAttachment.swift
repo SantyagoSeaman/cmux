@@ -153,13 +153,14 @@ public actor TerminalAttachment: TerminalByteChannel {
         let sequencer = SequencerBox()
         let decoder = transport.decoder
         transport.start(
-            onEvent: { name, line, _ in
+            onEvent: { [weak transport = self.transport] name, line, _ in
                 var surface = resolvedSurface.value.withLock { $0 }
                 if surface == Self.unresolvedSurface, let named = Self.initialSurface(name: name, line: line, decoder: decoder) {
                     resolvedSurface.value.withLock { $0 = named }
                     surface = named
                 }
-                guard let decoded = Self.decodeAttachLine(name: name, line: line, surface: surface, decoder: decoder),
+                guard let transport,
+                      let decoded = Self.decodeAttachLine(name: name, line: line, surface: surface, on: transport),
                       let event = sequencer.value.withLock({ $0.admit(decoded) })
                 else { return }
                 if case .sizeState(let state, let selfParticipant) = event {

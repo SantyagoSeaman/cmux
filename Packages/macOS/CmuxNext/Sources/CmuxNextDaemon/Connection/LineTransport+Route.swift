@@ -10,7 +10,12 @@ extension LineTransport {
     /// Routes one line by its fields, on the reader thread. ``LineRouteScan`` reads them from the reader's
     /// bytes, so a reply or an event is parsed once, by its reader. Only a line the scan cannot read is decoded
     /// as an ``Envelope`` here, and a reply that is not `ok:true`, once, for its error fields.
-    func route<Line: RandomAccessCollection<UInt8>>(_ bytes: Line, decoder: WireDecoder, onEvent: CausedEventHandler)
+    ///
+    /// Returns false once the connection is closed (``reportBadMessage(reason:detail:)``, `close()`): that line
+    /// is not routed and the reader stops, so nothing read after a bad message reaches a handler or a waiter
+    /// (Chrome's ReportBadMessage). The check sits in the state lock each routed line takes anyway.
+    @discardableResult
+    func route<Line: RandomAccessCollection<UInt8>>(_ bytes: Line, decoder: WireDecoder, onEvent: CausedEventHandler) -> Bool
     where Line.Index == Int {
         let line = Data(bytes)
         let envelope: Envelope
@@ -22,7 +27,7 @@ extension LineTransport {
             decoded = true
         } else {
             recorder?.lineRead(.ignored)
-            return
+            return true
         }
         // A v2 stream line goes to the stream handler of a dedicated
         // connection (`SessionJournalRead`); on the control connection it
@@ -30,7 +35,8 @@ extension LineTransport {
         let streamed = envelope.type == "stream_item" || envelope.type == "stream_end"
         let streamKind: DaemonWireStats.FrameKind = envelope.type == "stream_end" ? .streamEnd : .streamItem
         if streamed, let streamID = envelope.streamID {
-            let streamRoute = state.withLock { state -> StreamRoute in
+            let streamRoute = state.withLock { state -> StreamRoute? in
+                guard state.closed == nil else { return nil }
                 if state.controlStreams.contains(streamID) {
                     if envelope.type == "stream_end" { state.controlStreams.remove(streamID) }
                     return .control
@@ -39,37 +45,47 @@ extension LineTransport {
                 return .unrouted
             }
             switch streamRoute {
+            case nil: return false
             case .control: break
             case .handler(let handler):
                 recorder?.lineRead(streamKind)
-                return handler(streamID, line)
+                handler(streamID, line)
+                return true
             case .unrouted:
                 recorder?.lineRead(.ignored)
-                return
+                return true
             }
         }
         if let name = streamed ? Self.streamEvent : envelope.event {
-            let index = state.withLock { state -> UInt64 in
+            let index = state.withLock { state -> UInt64? in
+                guard state.closed == nil else { return nil }
                 if name == "daemon-shutdown" { state.sawShutdown = true }
                 state.eventCount += 1
                 return state.eventCount
             }
+            guard let index else { return false }
             recorder?.lineRead(streamed ? streamKind : .event)
             onEvent(name, line, index, envelope.cause)
-            return
+            return true
         }
         guard envelope.ok != nil || envelope.id != nil else {
             recorder?.lineRead(.ignored)
-            return
+            return true
         }
-        let routed: (UInt64, PendingRequest)? = state.withLock { state in
-            guard let id = envelope.id ?? state.pending.oldestID(), let entry = state.pending.remove(id: id) else { return nil }
+        let routed = state.withLock { state -> ReplyRoute in
+            // `failAll` failed every waiter when it closed the connection, under this lock.
+            guard state.closed == nil else { return .closed }
+            guard let id = envelope.id ?? state.pending.oldestID(), let entry = state.pending.remove(id: id) else { return .dropped }
             removeDeadline(&state, id: id)
-            return (state.eventCount, entry)
+            return .waiter(barrier: state.eventCount, entry)
         }
-        guard let (barrier, entry) = routed else {
+        let barrier: UInt64, entry: PendingRequest
+        switch routed {
+        case .closed: return false
+        case .dropped:
             recorder?.lineRead(.droppedReply)
-            return
+            return true
+        case .waiter(let eventBarrier, let pending): (barrier, entry) = (eventBarrier, pending)
         }
         let waiter = entry.waiter
         if let sent = entry.sent { recorder?.replied(sent) }
@@ -78,12 +94,23 @@ extension LineTransport {
             if case .reply(_, let slot) = waiter {
                 slot.resolve(.success(Response(line: line, eventBarrier: barrier, recorder: recorder)))
             }
-            return
+            return true
         }
-        guard let fail = waiter.failure else { return }
+        guard let fail = waiter.failure else { return true }
         // The error's fields: this line's one parse (its waiter reads no data from it).
         let failure = decoded ? envelope : (try? decoder.decode(Envelope.self, from: line)) ?? envelope
         fail(DaemonError.command(cmd: waiter.cmd, message: failure.error ?? "unknown error", code: failure.errorCode,
                                  details: failure.errorDetails, retryable: failure.retryable))
+        return true
+    }
+
+    /// Where one reply line goes (`route`).
+    private enum ReplyRoute {
+        /// The connection closed: the reader stops.
+        case closed
+        /// No waiter has its id (a reply after its deadline, or to a request that wanted none).
+        case dropped
+        /// Its waiter, with the stream-0 events routed before it.
+        case waiter(barrier: UInt64, PendingRequest)
     }
 }

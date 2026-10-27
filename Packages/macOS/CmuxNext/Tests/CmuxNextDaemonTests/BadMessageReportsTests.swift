@@ -134,4 +134,57 @@ import Testing
         #expect(!transport.sendLine(Data("{}".utf8)))
         #expect(sunk.all == [.init(peer: "daemon control", reason: "undecodable_event", detail: "hello")])
     }
+
+    /// A handler on the reader thread that reports a bad message stops the reader at once: the lines read in the
+    /// same chunk after it reach no handler (Chrome's ReportBadMessage: nothing more from that peer is dispatched).
+    @Test func nothingBufferedAfterAReportedBadMessageIsRouted() async throws {
+        let sunk = Sunk()
+        let transport = try await LineTransport.open(
+            path: Self.socketPath("buffered"),
+            bridge: Self.bridge(#"b'{"event":"bad"}\n{"event":"after"}\n{"ok":true,"id":1}\n'"#),
+            role: .terminalAttach, stats: nil, badMessages: sunk.ledger())
+        defer { transport.close() }
+        let routed = ReplyEventOrderTests.Routed()
+        let (closed, closing) = AsyncStream.makeStream(of: TransportCloseReason.self)
+        transport.start(onEvent: { name, _, index in
+                            routed.record(name, index)
+                            if name == "bad" { transport.reportBadMessage(reason: "undecodable_attach_line", detail: name) }
+                        },
+                        onClose: { reason in
+                            closing.yield(reason)
+                            closing.finish()
+                        })
+        var closes = closed.makeAsyncIterator()
+        let reason = await closes.next()
+        #expect(reason == .lost("bad message: undecodable_attach_line"))
+        #expect(routed.lines.withLock { $0.map(\.name) } == ["bad"], "the event after the bad one is not routed")
+        #expect(sunk.all.map(\.reason) == ["undecodable_attach_line"])
+    }
+
+    /// The attach decoder's site: a known attach event that does not decode is reported with its event name
+    /// (never its payload) and closes the attach connection as lost; the good output after it is never decoded.
+    @Test func anUndecodableAttachLineClosesTheAttachConnection() async throws {
+        let sunk = Sunk()
+        let transport = try await LineTransport.open(
+            path: Self.socketPath("attach"),
+            bridge: Self.bridge(#"b'{"event":"output","surface":3,"data":12}\n{"event":"output","surface":3,"data":"YQ=="}\n'"#),
+            role: .terminalAttach, stats: nil, badMessages: sunk.ledger())
+        defer { transport.close() }
+        let decoded = Mutex<[DecodedAttachLine?]>([])
+        let (closed, closing) = AsyncStream.makeStream(of: TransportCloseReason.self)
+        transport.start(onEvent: { name, line, _ in
+                            let attachLine = TerminalAttachment.decodeAttachLine(name: name, line: line, surface: SurfaceID(rawValue: 3),
+                                                                                 on: transport)
+                            decoded.withLock { $0.append(attachLine) }
+                        },
+                        onClose: { reason in
+                            closing.yield(reason)
+                            closing.finish()
+                        })
+        var closes = closed.makeAsyncIterator()
+        let reason = await closes.next()
+        #expect(reason == .lost("bad message: undecodable_attach_line"))
+        #expect(decoded.withLock { $0 } == [nil], "only the bad line was handled, and it decoded to nothing")
+        #expect(sunk.all == [.init(peer: "daemon terminal_attach", reason: "undecodable_attach_line", detail: "output")])
+    }
 }

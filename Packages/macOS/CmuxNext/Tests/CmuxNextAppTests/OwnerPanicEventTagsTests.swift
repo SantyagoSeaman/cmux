@@ -25,6 +25,18 @@ import Testing
         #expect(tags["tui_arch"] == "aarch64")
     }
 
+    /// A peer's bad message (p10-stability-178) is not an owner crash: its line, which carries a `message`, an
+    /// empty `location` and `test: false` like a panic, is never sent as a RustPanic.
+    @Test func aBadMessageLineIsNotSentAsAPanic() throws {
+        let data = try line([
+            "session": "main", "message": "bad_message invalid_utf8 from client 3 ws: at 4", "location": "",
+            "thread": "ws", "test": false, "kind": "bad_message", "peer": "client 3 ws", "reason": "invalid_utf8",
+        ])
+        #expect(OwnerPanicForwarder.event(fromLine: data) == nil)
+        let panic = try line(["message": "boom", "location": "src/a.rs:1:2", "test": false, "kind": "panic"])
+        #expect(OwnerPanicForwarder.event(fromLine: panic) != nil)
+    }
+
     @Test func anOlderLineWithoutTheFactsStillReports() throws {
         let data = try line(["message": "boom", "location": "src/a.rs:1:2", "version": "0.1.0"])
         let event = try #require(OwnerPanicForwarder.event(fromLine: data))

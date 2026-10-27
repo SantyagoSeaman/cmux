@@ -381,8 +381,8 @@ final class LineTransport: Sendable {
         var reader = FrameReader(limits: FrameReader.Limits(maxLine: Self.maxLineBytes, maxFramePayload: FrameHeader.maxPayloadCap))
         var chunk = [UInt8](repeating: 0, count: Self.socketBufferBytes)
         var closeDetail = "EOF"
-        // wakeup-allow: bounded: blocking read on a dedicated thread; EOF, errors and bad messages end it, EINTR retries
-        while true {
+        // wakeup-allow: bounded: blocking read on a dedicated thread; EOF, errors, bad messages and close end it, EINTR retries
+        reading: while true {
             // SAFETY: read writes at most $0.count bytes into the array's own storage, which the closure lends
             // for the call and nothing else touches meanwhile.
             let count = unsafe chunk.withUnsafeMutableBytes { unsafe Darwin.read(fd, $0.baseAddress, $0.count) }
@@ -402,7 +402,8 @@ final class LineTransport: Sendable {
                 // An empty line carries nothing; a frame cannot come before frames are negotiated.
                 if case .json(let bytes) = message, !bytes.isEmpty {
                     outputStream?.outputCopied(2 * bytes.count)  // out of the reader as the line, then into its Data
-                    handle(bytes, decoder: decoder, onEvent: onEvent)
+                    // A handler that reported a bad message closed the connection: nothing buffered after it routes.
+                    guard handle(bytes, decoder: decoder, onEvent: onEvent) else { break reading }
                 }
                 next = Self.nextMessage(&reader)
             }
@@ -432,9 +433,10 @@ final class LineTransport: Sendable {
 
     /// Routes one line inside a hang scope of ``lineHangDeadline`` (Chrome watches each IO-thread task
     /// the same way, base/threading/hang_watcher.cc).
-    private func handle<Line: RandomAccessCollection<UInt8>>(_ bytes: Line, decoder: WireDecoder, onEvent: CausedEventHandler)
+    /// False once the connection closed: the reader stops (``route(_:decoder:onEvent:)``).
+    private func handle<Line: RandomAccessCollection<UInt8>>(_ bytes: Line, decoder: WireDecoder, onEvent: CausedEventHandler) -> Bool
     where Line.Index == Int {
         guard let hangWatched else { return route(bytes, decoder: decoder, onEvent: onEvent) }
-        hangWatched.run { route(bytes, decoder: decoder, onEvent: onEvent) }
+        return hangWatched.run { route(bytes, decoder: decoder, onEvent: onEvent) }
     }
 }

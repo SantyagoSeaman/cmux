@@ -31,6 +31,8 @@ public final class OwnerPanicForwarder: Sendable {
     private let queue = DispatchQueue(label: "com.cmuxterm.app.next.owner-panic-forwarder", qos: .utility)
     private let watcher = Mutex<(any DispatchSourceFileSystemObject)?>(nil)
     private let logger = Logger(subsystem: "com.cmuxterm.app.next", category: "crash")
+    /// The `kind` of a bad-message record (cmux-panic-log `bad_message::RECORD_KIND`).
+    static let badMessageKind = "bad_message"
 
     /// - Parameters:
     ///   - log: The panic log to read.
@@ -100,11 +102,15 @@ public final class OwnerPanicForwarder: Sendable {
     }
 
     /// The Sentry event for one log line; nil for a test line or a line
-    /// that is not a panic record.
+    /// that is not a panic record. A `bad_message` record (cmux-panic-log
+    /// `bad_message.rs`) is a peer that broke the wire, not a crash of the
+    /// process; its daemon writes it to its own log, and a line of one that
+    /// reached a panic log is still not sent as a panic.
     static func event(fromLine line: Data, source: RustPanicSource = .owner) -> Event? {
         guard let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let message = record["message"] as? String,
-              record["test"] as? Bool != true else { return nil }
+              record["test"] as? Bool != true,
+              record["kind"] as? String != Self.badMessageKind else { return nil }
         let location = record["location"] as? String ?? ""
         let event = Event(level: .error)
         let exception = Exception(value: message, type: "RustPanic")

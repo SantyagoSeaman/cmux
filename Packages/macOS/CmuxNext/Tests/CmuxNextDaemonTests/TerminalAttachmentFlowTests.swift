@@ -8,8 +8,9 @@ struct TerminalAttachmentFlowTests {
     private let surface = SurfaceID(rawValue: 3)
 
     private func decode(_ json: String) throws -> DecodedAttachLine {
-        try #require(TerminalAttachment.decodeAttachLine(name: "output", line: Data(json.utf8), surface: surface,
-                                                         decoder: WireCoding.decoder()))
+        let decoded = try TerminalAttachment.decodeAttachLine(name: "output", line: Data(json.utf8), surface: surface,
+                                                              decoder: WireCoding.decoder())
+        return try #require(decoded)
     }
 
     @Test func anOutputCarriesTheFlowItEchoes() throws {
@@ -29,9 +30,24 @@ struct TerminalAttachmentFlowTests {
 
     @Test func otherEventsCarryNoFlow() throws {
         let line = Data(#"{"event":"scroll-changed","surface":3,"offset":4,"at_bottom":false}"#.utf8)
-        let decoded = try #require(TerminalAttachment.decodeAttachLine(name: "scroll-changed", line: line, surface: surface,
-                                                                       decoder: WireCoding.decoder()))
+        let parsed = try TerminalAttachment.decodeAttachLine(name: "scroll-changed", line: line, surface: surface,
+                                                             decoder: WireCoding.decoder())
+        let decoded = try #require(parsed)
         #expect(decoded.flow == nil)
+    }
+
+    /// A known attach event that does not decode broke the attach contract (p10-stability-178): it throws, naming
+    /// the event and never the payload, so the connection reports it as a bad message and closes.
+    @Test func aKnownEventThatDoesNotDecodeThrowsUndecodableLine() {
+        let line = Data(#"{"event":"output","surface":3,"data":12}"#.utf8)
+        #expect(throws: TerminalAttachment.UndecodableLine(event: "output")) {
+            try TerminalAttachment.decodeAttachLine(name: "output", line: line, surface: surface, decoder: WireCoding.decoder())
+        }
+        // An event the view ignores is not a contract break.
+        #expect(throws: Never.self) {
+            try TerminalAttachment.decodeAttachLine(name: "digest", line: Data("{}".utf8), surface: surface,
+                                                    decoder: WireCoding.decoder())
+        }
     }
 
     /// The flow rides behind its chunk to the session (`inputEcho`): the queue merges output before it

@@ -116,17 +116,39 @@ extension TerminalAttachment {
         }
     }
 
+    /// An attach line of a known event kind that does not decode: the daemon broke the attach contract. The
+    /// connection reports it as a bad message (``LineTransport/reportBadMessage(reason:detail:)``) and closes.
+    struct UndecodableLine: Error, Equatable {
+        /// The bad-message reason every such line reports under.
+        static let reason = "undecodable_attach_line"
+        /// The event name (never the payload): the report's detail.
+        var event: String
+    }
+
     /// Maps one attach-connection line to a channel event. Returns nil for
-    /// events that belong to another surface or that views ignore.
+    /// events that belong to another surface or that views ignore, and for a line that does not decode.
     static func decodeAttachEvent(name: String, line: Data, surface: SurfaceID,
                                   decoder: WireDecoder = WireCoding.decoder()) -> TerminalChannelEvent? {
-        decodeAttachLine(name: name, line: line, surface: surface, decoder: decoder)?.event
+        (try? decodeAttachLine(name: name, line: line, surface: surface, decoder: decoder))?.event
+    }
+
+    /// One line of `transport`'s attach, decoded with its decoder on its reader thread. A known event that does
+    /// not decode is a bad message: it is reported and `transport` closes as lost, so its owner reattaches.
+    static func decodeAttachLine(name: String, line: Data, surface: SurfaceID, on transport: LineTransport) -> DecodedAttachLine? {
+        do throws(UndecodableLine) {
+            return try decodeAttachLine(name: name, line: line, surface: surface, decoder: transport.decoder)
+        } catch {
+            transport.reportBadMessage(reason: UndecodableLine.reason, detail: error.event)
+            return nil
+        }
     }
 
     /// ``decodeAttachEvent(name:line:surface:)`` plus the generation an
     /// `output` carries, for ``TerminalSnapshotSequencer``. `decoder` is the connection's: it counts
     /// each decode, and its recorder each `output` payload decoded out of its line.
-    static func decodeAttachLine(name: String, line: Data, surface: SurfaceID, decoder: WireDecoder) -> DecodedAttachLine? {
+    /// - Throws: ``UndecodableLine`` for a known event that does not decode.
+    static func decodeAttachLine(name: String, line: Data, surface: SurfaceID,
+                                 decoder: WireDecoder) throws(UndecodableLine) -> DecodedAttachLine? {
         func scoped(_ id: SurfaceID?) -> Bool { id == nil || id == surface }
         do {
             switch name {
@@ -191,11 +213,11 @@ extension TerminalAttachment {
                 return nil
             }
         } catch {
-            // Never silent: a known event the view cannot decode is a contract
-            // drift with the host. Kind and count only, no payload.
+            // Never silent: a known event the view cannot decode broke the attach
+            // contract with the host. Kind and count only, no payload.
             let count = undecodableLines.add(1, ordering: .relaxed).newValue
             decodeLogger.error("attach line \(name, privacy: .public) failed to decode (\(count) so far)")
-            return nil
+            throw UndecodableLine(event: name)
         }
     }
 }

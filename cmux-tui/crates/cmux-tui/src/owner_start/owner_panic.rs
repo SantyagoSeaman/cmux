@@ -13,8 +13,10 @@
 //! which the acpmux daemon uses too.
 //!
 //! Its bad-message lines (`"kind": "bad_message"`, cmux-panic-log
-//! `bad_message`) go to the same log: one per reason per launch, for a
-//! client the daemon closed for breaking the wire.
+//! `bad_message`) go to their own log beside it,
+//! `owner-bad-messages-<session>.jsonl`: one per reason per launch, for a
+//! client the daemon closed for breaking the wire. A peer's fault is not an
+//! owner panic, so the app's panic forwarder never sees it.
 //!
 //! The owner's hang log (cmux-panic-log `hang`) is beside it,
 //! `owner-hangs-<session>.jsonl` with the same fields: the request watchdog
@@ -38,12 +40,9 @@ pub(super) use cmux_tui_core::diagnostics::owner_panic_log_path as log_path;
 /// in a process with a hang log).
 pub(super) fn install(session: &str) {
     if let Some(path) = log_path(session) {
-        // A client that broke the wire gets one `bad_message` line per
-        // reason per launch beside the panics (cmux-panic-log bad_message).
-        use cmux_panic_log::bad_message;
-        let _ = bad_message::install(bad_message::file_sink(path.clone(), fields(session)));
         cmux_panic_log::install(path, fields(session), is_test_thread);
     }
+    install_bad_message_log(session);
     install_hang_log(session);
     #[cfg(debug_assertions)]
     panic_for_test();
@@ -61,6 +60,18 @@ fn fields(session: &str) -> cmux_panic_log::Fields {
     fields.insert("os".into(), std::env::consts::OS.into());
     fields.insert("arch".into(), std::env::consts::ARCH.into());
     fields
+}
+
+/// Make the owner's bad-message log the process's: a client that broke the
+/// wire gets one `bad_message` line per reason per launch there, never in
+/// the panic log (cmux-panic-log bad_message).
+fn install_bad_message_log(session: &str) {
+    use cmux_panic_log::bad_message;
+    let Some(path) = cmux_tui_core::diagnostics::owner_bad_message_log_path(session) else {
+        return;
+    };
+    // A second install keeps the first log (one per process).
+    let _ = bad_message::install(bad_message::file_sink(path, fields(session)));
 }
 
 /// Make the owner's hang log the process's: the request watchdog writes

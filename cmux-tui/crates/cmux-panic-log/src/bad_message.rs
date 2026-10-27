@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const MAX_REASONS: usize = 64;
 /// Where reasons past [`MAX_REASONS`] count.
 pub const OVERFLOW_REASON: &str = "other";
-/// The `kind` of a bad-message record in the panic log.
+/// The `kind` of a bad-message record.
 pub const RECORD_KIND: &str = "bad_message";
 
 /// Where records go: called once per reason per ledger.
@@ -149,8 +149,8 @@ impl BadMessages {
 }
 
 /// The record of one first report: `kind`, `peer`, `reason` and a `message`
-/// of both, with the panic log's `thread`, `at_ms` and `test` keys so the
-/// app reads it like any other line.
+/// of both, with the panic log's `thread`, `at_ms` and `test` keys. It goes
+/// to its own log, never the panic log: a peer's fault is not a crash.
 pub fn record(peer: &str, reason: &str, detail: &str) -> serde_json::Value {
     let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
     let message = format!("bad_message {reason} from {peer}: {detail}");
@@ -166,7 +166,8 @@ pub fn record(peer: &str, reason: &str, detail: &str) -> serde_json::Value {
 }
 
 /// A sink that appends each record, with `fields`, to the JSONL at `path`
-/// (the panic log: owner-only, never through a link, size-capped).
+/// (a bad-message log beside the panic log, written the same way:
+/// owner-only, never through a link, size-capped).
 pub fn file_sink(path: PathBuf, fields: crate::Fields) -> BadMessageSink {
     Box::new(move |record| {
         let serde_json::Value::Object(record) = record else { return };

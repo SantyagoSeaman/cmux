@@ -2,7 +2,8 @@
 //! hook appends to it (cmux-tui `owner_start/owner_panic.rs`) and
 //! `oracle-state` reports it, so both read the one path rule here. The
 //! owner's hang log lives beside it; the request watchdog writes it
-//! (server/request_watchdog.rs).
+//! (server/request_watchdog.rs). So does its bad-message log, apart from the
+//! panics so the app never sends a peer's fault as an owner crash.
 
 use std::path::PathBuf;
 
@@ -18,6 +19,14 @@ pub fn owner_panic_log_path(session: &str) -> Option<PathBuf> {
 /// line per scope busy past its hang tier.
 pub fn owner_hang_log_path(session: &str) -> Option<PathBuf> {
     owner_log_path("owner-hangs", session)
+}
+
+/// The bad-message log for `session`: `owner-bad-messages-<session>.jsonl`
+/// beside the panic log. One line per reason per launch for a client the
+/// owner closed for breaking the wire (cmux-panic-log `bad_message`). It is
+/// not a panic: the app's panic forwarder never reads it.
+pub fn owner_bad_message_log_path(session: &str) -> Option<PathBuf> {
+    owner_log_path("owner-bad-messages", session)
 }
 
 fn owner_log_path(prefix: &str, session: &str) -> Option<PathBuf> {
@@ -46,3 +55,7 @@ fn owner_log_path(prefix: &str, session: &str) -> Option<PathBuf> {
 pub fn spawn_owner_hang_test() {
     crate::server::spawn_owner_hang_test();
 }
+
+#[cfg(test)]
+#[path = "owner_panic_log_tests.rs"]
+mod tests;
