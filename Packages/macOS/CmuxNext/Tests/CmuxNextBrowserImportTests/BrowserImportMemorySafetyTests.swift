@@ -1,4 +1,6 @@
 @testable import CmuxNextBrowserImport
+@testable import CmuxNextBrowserImportParsers
+import CmuxNextSQLiteSnapshot
 import Foundation
 import Testing
 

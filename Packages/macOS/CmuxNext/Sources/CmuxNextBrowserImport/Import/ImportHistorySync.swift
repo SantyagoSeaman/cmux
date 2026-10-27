@@ -29,10 +29,9 @@ public actor ImportHistorySync {
     private var lastRead: [String: [Int64]] = [:]
 
     /// `grants`: the folder grants reads need (nil: folders are read directly). `reader` parses the
-    /// databases: in this process, or in the sandboxed import service.
-    public init(store: ImportedDataStore, grants: BrowserFolderGrants?, delay: Duration = .seconds(20),
-                limit: Int = ImportPlan.defaultHistoryLimit, reader: any ProfileDataReading = InProcessProfileReader(),
-                deliver: @escaping Deliver) {
+    /// databases: the App's is the sandboxed import service (plans/cmux-next/rule-of-2.md).
+    public init(store: ImportedDataStore, grants: BrowserFolderGrants?, reader: any ProfileDataReading, delay: Duration = .seconds(20),
+                limit: Int = ImportPlan.defaultHistoryLimit, deliver: @escaping Deliver) {
         self.reader = reader
         self.store = store
         self.grants = grants

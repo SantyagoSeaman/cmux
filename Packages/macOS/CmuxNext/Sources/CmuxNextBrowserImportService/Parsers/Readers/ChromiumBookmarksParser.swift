@@ -1,3 +1,4 @@
+public import CmuxNextBrowserImport
 public import Foundation
 
 /// Parses a Chromium `Bookmarks` file (JSON: `roots.bookmark_bar`,

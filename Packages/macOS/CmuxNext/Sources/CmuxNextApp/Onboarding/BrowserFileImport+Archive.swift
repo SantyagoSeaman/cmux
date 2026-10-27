@@ -2,21 +2,23 @@ import AppKit
 import CmuxNextActions
 import CmuxNextBrowser
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportService
 import Foundation
 
 /// The zip and history parts of Import from Another Browser… (cx-d0d.65):
 /// Safari's Export Browsing Data zip and Google Takeout's Chrome export
 /// (its zip holds Chrome/History.json and Chrome/Bookmarks.html).
-/// An archive is read in memory (`ExportArchive`): only its
-/// Bookmarks.html, History.json and Passwords.csv, never its credit cards;
-/// no part is written to disk. History goes where the browser import puts
-/// it: the import store and the profile's omnibar history.
+/// An archive is inflated in the sandboxed import service
+/// (plans/cmux-next/rule-of-2.md): only its Bookmarks.html, History.json and
+/// Passwords.csv, never its credit cards; no part is written to disk. History
+/// goes where the browser import puts it: the import store and the profile's
+/// omnibar history.
 extension BrowserFileImport {
     /// The failures, if any.
     func importArchive(_ url: URL, profile: String) async -> [String] {
-        let archive: ExportArchive
+        var archive: ExportArchiveParts
         do {
-            archive = try await Task.detached { try ExportArchive(contentsOf: url) }.value
+            archive = try await BrowserImportServiceReader().exportArchive(url)
         } catch {
             return [BrowserFileImportStrings.unreadable(url.lastPathComponent)]
         }
@@ -30,8 +32,11 @@ extension BrowserFileImport {
             failures += await importHistory(json, from: url, profile: profile)
         }
         // The archive holds the passwords in plain text: it goes to the Trash as a CSV would.
-        for csv in archive.passwordCSVs {
-            if let failure = await PasswordCSVFiles(services: services).importBytes(csv, profile: profile, trashing: url) {
+        for index in archive.passwordCSVs.indices {
+            // Into a locked buffer; the reply's bytes are zeroed in place (the archive holds the only copy).
+            let secret = SecretBytes(copying: archive.passwordCSVs[index])
+            archive.passwordCSVs[index].resetBytes(in: 0..<archive.passwordCSVs[index].count)
+            if let failure = await PasswordCSVFiles(services: services).importBytes(secret, profile: profile, trashing: url) {
                 failures.append(failure.message)
             }
         }

@@ -1,3 +1,5 @@
+public import CmuxNextBrowserImport
+import CmuxNextSQLiteSnapshot
 public import Foundation
 
 /// Reads Firefox's `cookies.sqlite` (`moz_cookies`, values in plain text)
@@ -7,13 +9,13 @@ public struct FirefoxCookieReader {
     /// Creates a reader for this browser format.
     public init() {}
 
-    public func read(_ database: URL, now: Date = Date()) throws -> CookieReadResult {
+    public func read(_ database: URL) throws -> SealedCookies {
         let db = try SQLiteSnapshot(copying: database)
         let columns = ChromiumCookieReader().columnNames(db, table: "moz_cookies")
         guard columns.contains("host"), columns.contains("value") else { throw CookieImportError.malformed("moz_cookies") }
         let attributes = columns.contains("originAttributes") ? "originAttributes" : "''"
         let sameSite = columns.contains("sameSite") ? "sameSite" : "0"
-        var result = CookieReadResult(cookies: [])
+        var result = SealedCookies()
         let sql = "SELECT host, name, value, path, expiry, isSecure, isHttpOnly, \(sameSite), \(attributes), creationTime, lastAccessed FROM moz_cookies"
         try db.query(sql) { row in
             guard (row.string(8) ?? "").isEmpty else {
@@ -25,7 +27,7 @@ public struct FirefoxCookieReader {
                 secure: row.int64(5) != 0, httpOnly: row.int64(6) != 0, sameSite: self.sameSite(row.int64(7)),
                 expires: self.expiry(row.int64(4)), created: BrowserTime().mozilla(row.int64(9)), lastAccess: BrowserTime().mozilla(row.int64(10))
             )
-            if cookie.isExpired(at: now) { result.expired += 1 } else { result.cookies.append(cookie) }
+            result.cookies.append(SealedCookie(cookie: cookie))
             return true
         }
         return result

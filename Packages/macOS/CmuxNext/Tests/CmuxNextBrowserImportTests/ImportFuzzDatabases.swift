@@ -1,5 +1,7 @@
 import CmuxFuzzSupport
 @testable import CmuxNextBrowserImport
+@testable import CmuxNextBrowserImportParsers
+import CmuxNextSQLiteSnapshot
 import CommonCrypto
 import Foundation
 import SQLite3
@@ -135,7 +137,7 @@ struct ImportFuzzDatabases {
                                               droppedColumn: dropped, &rng)
         let result: CookieReadResult
         do {
-            result = try ChromiumCookieReader().read(database.file, crypto: ImportFuzzKeys.cookies, now: now)
+            result = try ChromiumCookieReader().read(database.file).opened(crypto: ImportFuzzKeys.cookies, now: now)
         } catch let error as CookieImportError {
             try FuzzRun.check(!database.intact || error == .undecryptable, "an intact Cookies database failed: \(error)")
             return
@@ -182,7 +184,7 @@ struct ImportFuzzDatabases {
                                               inserts: inserts, table: "moz_cookies", droppedColumn: dropped, &rng)
         let result: CookieReadResult
         do {
-            result = try FirefoxCookieReader().read(database.file, now: now)
+            result = try FirefoxCookieReader().read(database.file).opened(crypto: nil, now: now)
         } catch is CookieImportError {
             try FuzzRun.check(!database.intact, "an intact cookies.sqlite failed")
             return
@@ -390,7 +392,9 @@ struct ImportFuzzDatabases {
         }
         let read: (logins: [ImportedLogin], skipped: LoginSkipCounts)
         do {
-            read = try ChromiumLoginDataReader().read(profile: directory, crypto: ImportFuzzKeys.passwords)
+            // The service reads each database sealed; the App opens the values with the key.
+            let databases = try ChromiumLoginDataReader().databases(profile: directory).map { try ChromiumLoginRows().read($0) }
+            read = ChromiumLoginDataReader().open(databases, crypto: ImportFuzzKeys.passwords)
         } catch is SQLiteSnapshot.Failure {
             try FuzzRun.check(!intact, "intact Login Data failed")
             return
@@ -457,7 +461,10 @@ struct ImportFuzzDatabases {
         }
         let read: (logins: [ImportedLogin], skipped: LoginSkipCounts)
         do {
-            read = try FirefoxLoginReader().read(profile: directory, primaryPassword: nil)
+            // The service reads both files sealed; the App opens the key store and the entries.
+            let keyStore = try FirefoxKeyStoreReader().read(directory.appending(path: "key4.db"))
+            let crypto = try FirefoxPasswordCrypto(keyStore: keyStore, primaryPassword: nil)
+            read = try FirefoxLoginReader().open(FirefoxLoginsFile().parse(Data(contentsOf: logins)), crypto: crypto)
         } catch {
             try FuzzRun.check(!(keyIntact && decodable), "an intact key store and logins.json failed: \(error)")
             return

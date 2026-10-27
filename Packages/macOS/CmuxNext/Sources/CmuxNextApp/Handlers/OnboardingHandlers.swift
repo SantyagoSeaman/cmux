@@ -1,6 +1,7 @@
 import AppKit
 import CmuxNextActions
 import CmuxNextBrowser
+import CmuxNextBrowserImportService
 import CmuxNextCookieImport
 import CmuxNextDesign
 import CmuxNextImportCards
@@ -58,7 +59,8 @@ enum OnboardingHandlers {
             window: { services.windows.active?.window ?? NSApp.mainWindow ?? NSApp.windows.first(where: \.isVisible) },
             reveal: { tab in _ = registry.perform("tab.focus", invocation: ActionInvocation(target: ActionTargetRef(kind: .tab, id: tab), origin: .user)) },
             track: { registry.track($0) },
-            destination: ChromiumCookieDestination { writes, profile in try await cef.importCookies(writes, into: profile) }))
+            destination: ChromiumCookieDestination { writes, profile in try await cef.importCookies(writes, into: profile) },
+            reader: BrowserImportServiceReader()))
         registry.bind("browser.importCookies", run: { invocation in try cookieImports.run(invocation) })
         // Import suggestion cards (Settings › Import only): the same import run as the window's.
         ImportSuggestionsCenter.shared.bind(into: registry, host: importCardsHost(services))

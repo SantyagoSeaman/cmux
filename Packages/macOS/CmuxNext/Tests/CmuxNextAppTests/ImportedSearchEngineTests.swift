@@ -1,4 +1,5 @@
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportParsers
 import Foundation
 import Testing
 
@@ -15,38 +16,38 @@ import Testing
         return folder
     }
 
-    @Test func aBuiltInEngineMapsToItsID() throws {
+    @Test func aBuiltInEngineMapsToItsID() async throws {
         let folder = try Self.profile(#"""
         {"default_search_provider_data":{"template_url_data":{"short_name":"DuckDuckGo","keyword":"duckduckgo.com",
           "url":"https://duckduckgo.com/?q={searchTerms}&t={google:originalQueryForSuggestion}"}}}
         """#)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let engine = try #require(ChromiumSearchEngineReader().read(profile: folder))
+        let engine = try #require(await ProfileSearchEngine(reader: InProcessProfileReader()).chromium(profile: folder))
         #expect(engine.search == "https://duckduckgo.com/?q={searchTerms}")
         #expect(engine.setting(builtIn: Self.builtIn).engine == "duckduckgo")
     }
 
-    @Test func anOtherEngineIsCustomWithItsAddresses() throws {
+    @Test func anOtherEngineIsCustomWithItsAddresses() async throws {
         let folder = try Self.profile(#"""
         {"default_search_provider_data":{"template_url_data":{"short_name":"Kagi","keyword":"kagi",
           "url":"https://kagi.com/search?q={searchTerms}","suggestions_url":"https://kagi.com/api/autosuggest?q={searchTerms}"}}}
         """#)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let engine = try #require(ChromiumSearchEngineReader().read(profile: folder))
+        let engine = try #require(await ProfileSearchEngine(reader: InProcessProfileReader()).chromium(profile: folder))
         let setting = engine.setting(builtIn: Self.builtIn)
         #expect(setting.engine == "custom")
         #expect(setting.search == "https://kagi.com/search?q={searchTerms}")
         #expect(setting.suggest == "https://kagi.com/api/autosuggest?q={searchTerms}")
     }
 
-    @Test func theBrowsersOwnDefaultOrAnInsecureEngineIsNothing() throws {
+    @Test func theBrowsersOwnDefaultOrAnInsecureEngineIsNothing() async throws {
         let plain = try Self.profile(#"{"profile":{"name":"Work"}}"#)
         let insecure = try Self.profile(#"{"default_search_provider_data":{"template_url_data":{"url":"http://example.com/?q={searchTerms}"}}}"#)
         defer {
             try? FileManager.default.removeItem(at: plain)
             try? FileManager.default.removeItem(at: insecure)
         }
-        #expect(ChromiumSearchEngineReader().read(profile: plain) == nil)
-        #expect(ChromiumSearchEngineReader().read(profile: insecure) == nil)
+        #expect(await ProfileSearchEngine(reader: InProcessProfileReader()).chromium(profile: plain) == nil)
+        #expect(await ProfileSearchEngine(reader: InProcessProfileReader()).chromium(profile: insecure) == nil)
     }
 }

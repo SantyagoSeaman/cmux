@@ -5,7 +5,6 @@ import CmuxNextBrowserImport
 import CmuxNextBrowserImportService
 import CmuxNextCookieImport
 import CmuxNextDesign
-import CmuxNextFeatures
 import CmuxNextOnboarding
 import CmuxNextSettings
 import LocalAuthentication
@@ -56,8 +55,10 @@ final class AppOnboardingServices: OnboardingServices {
                    progress: @escaping @MainActor (ImportProgress) -> Void) async throws -> ImportSummary {
         let destination = SavingImportDestination.app(services, bookmarks: services.importedBookmarkSink)
         let cef = services.cache.cef
+        // Other browsers' files are parsed only in the sandboxed import service (plans/cmux-next/rule-of-2.md).
+        let reader = BrowserImportServiceReader()
         let cookies = CookieImporter(destination: ChromiumCookieDestination { writes, profile in try await cef.importCookies(writes, into: profile) },
-                                     keys: keys)
+                                     keys: keys, reader: reader)
         // Passwords only from profiles the user agreed to on the consent screen (the plan carries no others).
         var passwords: PasswordImporter?
         // Sign-ins saved with another password are held for the toast's Replace when this fork can replace them (API 20).
@@ -66,9 +67,8 @@ final class AppOnboardingServices: OnboardingServices {
             hold = cef.canReplacePasswords ? PasswordConflictHold { rows, profile in try await cef.replacePasswords(rows, in: profile) } : nil
             passwords = PasswordImporter(keys: keys, destination: AppPasswordDestination(available: true, hold: hold) { rows, profile in
                 try await cef.importPasswords(rows, into: profile)
-            }, primaryPassword: { profile in await FirefoxPrimaryPassword.prompt(profile) })
+            }, reader: reader, primaryPassword: { profile in await FirefoxPrimaryPassword.prompt(profile) })
         }
-        let reader = BrowserImportServiceReader.preferred(sandboxed: services.features.isEnabled(.browserImportSandboxedService))
         let importer = BrowserImporter(provisioning: AppBrowserProfileProvisioning(profiles: services.browserProfiles), store: owner.importStore,
                                        cookies: cookies, passwords: passwords, reader: reader)
         let summary: ImportSummary

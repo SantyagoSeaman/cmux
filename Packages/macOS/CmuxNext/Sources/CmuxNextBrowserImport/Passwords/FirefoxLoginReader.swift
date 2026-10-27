@@ -4,11 +4,13 @@ public import Foundation
 // nightly.yml input notary_test_without_password_import) compiles out the
 // browser password readers. Default builds include them.
 #if !CMUX_NO_PASSWORD_IMPORT
-/// Reads a Firefox-family profile's saved passwords: `logins.json` (the
-/// encrypted entries) and `key4.db` (the NSS key store, read from a private
-/// copy). Only the encrypted values the source keeps on disk are read from
-/// files; each password is decrypted in memory into `SecretBytes`, the
-/// username into an ordinary string. Nothing here writes a password anywhere.
+/// A Firefox-family profile's saved passwords: `logins.json` (the encrypted
+/// entries) and `key4.db` (the NSS key store). The sandboxed import service
+/// reads both files with every value still sealed
+/// (CmuxNextBrowserImportParsers); here the key store is opened with the
+/// primary password, which never leaves the app, and each password is
+/// decrypted in memory into `SecretBytes`, the username into an ordinary
+/// string. Nothing here writes a password anywhere.
 public struct FirefoxLoginReader {
     public init() {}
 
@@ -17,32 +19,13 @@ public struct FirefoxLoginReader {
         ["logins.json", "key4.db"].allSatisfy { FileManager.default.fileExists(atPath: profile.appending(path: $0).path) }
     }
 
-    struct LoginsFile: Decodable {
-        struct Entry: Decodable {
-            var hostname: String
-            var httpRealm: String?
-            var encryptedUsername: String
-            var encryptedPassword: String
-            /// Milliseconds since 1970.
-            var timeCreated: Double?
-        }
-
-        var logins: [Entry]
-    }
-
-    /// Throws `FirefoxPasswordCrypto.Failure.primaryPasswordNeeded` or
-    /// `.wrongPrimaryPassword` when the profile's primary password is set and
-    /// `primaryPassword` does not open it; other failures mean the store would not read.
-    public func read(profile: URL, primaryPassword: SecretBytes?) throws -> (logins: [ImportedLogin], skipped: LoginSkipCounts) {
-        let key4 = try SQLiteSnapshot(copying: profile.appending(path: "key4.db"))
-        guard key4.hasTable("metaData"), key4.hasTable("nssPrivate") else { throw FirefoxPasswordCrypto.Failure.malformed }
-        let crypto = try FirefoxPasswordCrypto(key4: key4, primaryPassword: primaryPassword)
-        let file = try JSONDecoder().decode(LoginsFile.self, from: Data(contentsOf: profile.appending(path: "logins.json")))
-
+    /// Opens `entries` with the key store `crypto` opened (``FirefoxPasswordCrypto/init(keyStore:primaryPassword:)``
+    /// asks for the primary password); throws only when the task is cancelled.
+    public func open(_ entries: [FirefoxLoginEntry], crypto: FirefoxPasswordCrypto) throws -> (logins: [ImportedLogin], skipped: LoginSkipCounts) {
         var skipped = LoginSkipCounts()
         var byKey: [String: ImportedLogin] = [:]
         var order: [String] = []
-        for (index, entry) in file.logins.enumerated() {
+        for (index, entry) in entries.enumerated() {
             if index % 256 == 255 { try Task.checkCancellation() }
             // HTTP authentication rows carry a realm; extension and about: origins are not web forms.
             guard entry.httpRealm == nil, let (url, realm) = PasswordCSVReader.webForm(entry.hostname) else {

@@ -21,17 +21,25 @@ public struct ImportSkipCounts: Sendable, Codable, Equatable {
 
     public init() {}
 
-    public var total: Int { notImportable + badTime + repeatedFolder + tooDeep + overLimit + unsupported }
+    /// Every counter added up; a sum past `Int.max` stays at `Int.max` (counts are reports, never indices).
+    public var total: Int {
+        [badTime, repeatedFolder, tooDeep, overLimit, unsupported].reduce(notImportable, Self.saturating)
+    }
 
     public static func + (lhs: ImportSkipCounts, rhs: ImportSkipCounts) -> ImportSkipCounts {
         var sum = lhs
-        sum.notImportable += rhs.notImportable
-        sum.badTime += rhs.badTime
-        sum.repeatedFolder += rhs.repeatedFolder
-        sum.tooDeep += rhs.tooDeep
-        sum.overLimit += rhs.overLimit
-        sum.unsupported += rhs.unsupported
+        sum.notImportable = saturating(lhs.notImportable, rhs.notImportable)
+        sum.badTime = saturating(lhs.badTime, rhs.badTime)
+        sum.repeatedFolder = saturating(lhs.repeatedFolder, rhs.repeatedFolder)
+        sum.tooDeep = saturating(lhs.tooDeep, rhs.tooDeep)
+        sum.overLimit = saturating(lhs.overLimit, rhs.overLimit)
+        sum.unsupported = saturating(lhs.unsupported, rhs.unsupported)
         return sum
+    }
+
+    private static func saturating(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? (rhs > 0 ? .max : .min) : sum
     }
 }
 

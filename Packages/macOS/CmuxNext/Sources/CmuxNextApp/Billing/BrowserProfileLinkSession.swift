@@ -1,5 +1,5 @@
 import CmuxNextBrowser
-import CmuxNextBrowserImport
+import CmuxNextSQLiteSnapshot
 import Foundation
 import CmuxNextAccounts
 

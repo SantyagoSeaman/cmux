@@ -3,7 +3,10 @@ import SQLite3
 
 /// A read-only SQLite database opened from a private copy of the file (and
 /// its `-wal`), so a browser that is running and holds the database locked
-/// does not block or fail the read, and the source is never written.
+/// does not block or fail the read, and the source is never written. The
+/// sandboxed browser import service reads other browsers' databases with it
+/// (CmuxNextBrowserImportParsers, plans/cmux-next/rule-of-2.md); the App reads
+/// only cmux's own (the billing check's CEF `Cookies`).
 ///
 /// Memory safety, as Chromium's sql::Database and sql::Statement
 /// (sql/database.cc, sql/statement.cc): `handle` is the connection `init`
@@ -104,24 +107,6 @@ public final class SQLiteSnapshot {
         }
     }
 
-    /// The pages a history query leaves out in SQL, before its `ORDER BY … LIMIT`: the address is not
-    /// importable (``ImportableURL/sqlFilter(_:)``), or else the time is not `kept`. `source` is the
-    /// query's `FROM … WHERE` naming every page it would read.
-    func skippedPages(url: String, kept: String, source: String) throws -> ImportSkipCounts {
-        let importable = ImportableURL.sqlFilter(url)
-        var skipped = ImportSkipCounts()
-        let sql = """
-            SELECT SUM(CASE WHEN \(importable) THEN 0 ELSE 1 END),
-                   SUM(CASE WHEN \(importable) THEN (CASE WHEN \(kept) THEN 0 ELSE 1 END) ELSE 0 END) \(source)
-            """
-        try query(sql) { row in
-            skipped.notImportable = row.int(0)
-            skipped.badTime = row.int(1)
-            return false
-        }
-        return skipped
-    }
-
     /// Whether `table` exists.
     public func hasTable(_ table: String) -> Bool {
         var found = false
@@ -192,6 +177,6 @@ public struct SQLiteRow: ~Copyable {
         // asked for before its size, SQLite's documented order, so `bytes` holds the size reported;
         // Data copies them before the next call on the statement.
         guard let bytes = unsafe sqlite3_column_blob(statement, column) else { return nil }
-        return unsafe Data(bytes: bytes, count: sqlite3_column_bytes(statement, column).widened)
+        return unsafe Data(bytes: bytes, count: Int(truncatingIfNeeded: sqlite3_column_bytes(statement, column)))
     }
 }

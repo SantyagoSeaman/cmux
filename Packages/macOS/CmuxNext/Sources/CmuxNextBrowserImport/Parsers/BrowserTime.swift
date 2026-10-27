@@ -11,10 +11,21 @@ public struct BrowserTime {
     /// Seconds since 1970 of 0001-01-01 and 9999-12-31 23:59:59 UTC: the dates an import keeps. A
     /// corrupt profile can hold any number; outside this range a time means nothing, and in it every
     /// date fits the Int64 microseconds Chromium's stores and exports convert it to (base::Time).
-    static let keptSeconds: ClosedRange<Double> = -62_135_596_800...253_402_300_799
+    package static let keptSeconds: ClosedRange<Double> = -62_135_596_800...253_402_300_799
 
     /// The last kept second, for an expiry past it.
-    static let lastKept = Date(timeIntervalSince1970: keptSeconds.upperBound)
+    package static let lastKept = Date(timeIntervalSince1970: keptSeconds.upperBound)
+
+    /// `date` itself when it is inside ``keptSeconds``, else nil (a value from outside the app is
+    /// checked with this before it is used).
+    package static func kept(_ date: Date) -> Date? {
+        keptSeconds.contains(date.timeIntervalSince1970) ? date : nil
+    }
+
+    /// An expiry as ``unixExpiry(_:)`` keeps it: `date` inside ``keptSeconds``, the last kept second past it.
+    package static func keptExpiry(_ date: Date) -> Date? {
+        date.timeIntervalSince1970 > keptSeconds.upperBound ? lastKept : kept(date)
+    }
 
     /// Seconds since 1970 as a date; nil outside ``keptSeconds`` (and for NaN).
     public func unix(_ seconds: Double) -> Date? {
@@ -60,27 +71,36 @@ public struct BrowserTime {
     }
 
     /// The last kept second in each history store's own unit, for ``sqlKept(_:last:)``.
-    static let lastChromium: Int64 = 265_046_774_399_000_000 // (253_402_300_799 + 11_644_473_600) µs since 1601
-    static let lastMozilla: Int64 = 253_402_300_799_000_000 // µs since 1970
-    static let lastCocoa: Int64 = 252_423_993_599 // s since 2001
+    package static let lastChromium: Int64 = 265_046_774_399_000_000 // (253_402_300_799 + 11_644_473_600) µs since 1601
+    package static let lastMozilla: Int64 = 253_402_300_799_000_000 // µs since 1970
+    package static let lastCocoa: Int64 = 252_423_993_599 // s since 2001
 
     /// SQL that is true when `column` holds a time the import keeps: above zero, not past `last`. Text,
     /// blobs and NULL fail it (SQLite orders them after every number). A history query filters on it
     /// before `ORDER BY … LIMIT`, so corrupt times are counted and never take the limit's places.
-    static func sqlKept(_ column: String, last: Int64) -> String {
+    package static func sqlKept(_ column: String, last: Int64) -> String {
         "(\(column) > 0 AND \(column) <= \(last))"
     }
 }
 
 /// URLs worth importing: web pages and files, never browser-internal pages.
-enum ImportableURL {
+package struct ImportableURL: Sendable {
+    package let url: URL
+
+    /// Nil for no address or a scheme that is not imported (`chrome:`, `about:`, `javascript:`).
+    package init?(_ text: String) {
+        guard let url = URL(string: text), let scheme = url.scheme?.lowercased(), ["http", "https", "file", "ftp"].contains(scheme) else {
+            return nil
+        }
+        self.url = url
+    }
+
     /// SQL filter for the same schemes, so `LIMIT` counts only importable rows.
-    static func sqlFilter(_ column: String) -> String {
+    package static func sqlFilter(_ column: String) -> String {
         "(\(column) LIKE 'http:%' OR \(column) LIKE 'https:%' OR \(column) LIKE 'file:%' OR \(column) LIKE 'ftp:%')"
     }
 
-    static func parse(_ text: String) -> URL? {
-        guard let url = URL(string: text), let scheme = url.scheme?.lowercased() else { return nil }
-        return ["http", "https", "file", "ftp"].contains(scheme) ? url : nil
+    package static func parse(_ text: String) -> URL? {
+        ImportableURL(text)?.url
     }
 }

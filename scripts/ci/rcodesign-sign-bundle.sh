@@ -24,6 +24,7 @@
 #   4. Contents/Frameworks/*: Sparkle's sandbox XPC services removed first,
 #      then each framework recursively. A bundle with the Chromium engine is
 #      refused: scripts/cmux-next/sign-cef.sh has no rcodesign port yet.
+#   4b. Contents/XPCServices/cmux-browser-import.xpc with its sandbox entitlements.
 #   5. The main bundle, shallow, with the entitlements reconciled against the
 #      embedded provisioning profile (scripts/reconcile-entitlements-with-profile.py).
 # Not ported (they run before signing and use no Apple tool):
@@ -92,6 +93,13 @@ if [[ -d "$APP/Contents/Frameworks" ]]; then
   "$ROOT/scripts/remove-sparkle-sandbox-xpc-services.sh" "$APP"
   while IFS= read -r -d '' framework; do sign "$framework"; done \
     < <(find "$APP/Contents/Frameworks" -mindepth 1 -maxdepth 1 -print0)
+fi
+
+# 4b. The sandboxed browser import service, with its own entitlements (scripts/cmux-next/sign-browser-import-service.sh).
+import_service="$APP/Contents/XPCServices/cmux-browser-import.xpc"
+if [[ -d "$import_service" ]]; then
+  sign --entitlements-xml-file \
+    "$ROOT/Packages/macOS/CmuxNext/Sources/CmuxNextBrowserImportService/Bundle/BrowserImportService.entitlements" "$import_service"
 fi
 
 # 5. Main bundle, shallow, with the effective entitlements.

@@ -91,7 +91,7 @@ public final class CookieImportService {
             case .timedOut: return ActionWorkFailure(refusal: .unavailable, reason: CookieImportStrings.timedOut)
             }
         }
-        let importer = CookieImporter(destination: host.destination, keys: OneReadSafeStorage(SafeStorageKeys().live()))
+        let importer = CookieImporter(destination: host.destination, keys: OneReadSafeStorage(SafeStorageKeys().live()), reader: host.reader)
         let report: CookieImportReport
         do {
             report = try await importer.run(profile, into: target.id, filter: filter)

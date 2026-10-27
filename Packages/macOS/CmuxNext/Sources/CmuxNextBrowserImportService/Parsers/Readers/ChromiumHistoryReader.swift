@@ -1,3 +1,5 @@
+public import CmuxNextBrowserImport
+import CmuxNextSQLiteSnapshot
 public import Foundation
 
 /// Reads a Chromium `History` database (`urls` table: url, title,

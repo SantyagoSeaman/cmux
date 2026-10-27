@@ -2,6 +2,7 @@ import AppKit
 import CmuxNextActions
 import CmuxNextBookmarks
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportService
 import CmuxNextDesign
 import Foundation
 import CmuxNextCompat
@@ -15,9 +16,10 @@ import CmuxNextWakeups
 /// same URL twice in one folder is kept once, a toast shows the counts, and
 /// its Undo (or Cmd-Z) puts the bar back as it was: one undo step.
 ///
-/// Security: reads run in this process, off the main thread, read-only
-/// (SQLite from a private copy); no Keychain access; the detector reads only
-/// browser data folders under ~/Library, never Documents, Desktop or Downloads.
+/// Security: the files are parsed in the sandboxed import service
+/// (plans/cmux-next/rule-of-2.md), which gets them open read-only and no path;
+/// no Keychain access; the detector reads only browser data folders under
+/// ~/Library, never Documents, Desktop or Downloads.
 @MainActor
 struct BookmarkBrowserImport {
     let services: AppServices
@@ -103,12 +105,15 @@ struct BookmarkBrowserImport {
             case "import":
                 let picked = readable.filter { answer.isOn($0.id) }
                 guard !picked.isEmpty else { return }
-                // The reads run on the files lane; the apply and its toast are the rest of the person's import.
-                services.work.run(.userBlocking, mayBlock: .files) { Self.read(picked) }
-                    .reply(on: services.mainWork, class: .userBlocking, owner: "BookmarkBrowserImport.import") { reads in
-                        let work = Self(services: services)
-                        work.announce(work.apply(reads, target: target), in: window)
-                    }
+                // The reads run in the sandboxed import service; the apply and its toast are the rest of the person's import.
+                services.registry.trackWork(owner: "BookmarkBrowserImport.import", on: services.mainWork) {
+                    await Self.read(picked, reader: BrowserImportServiceReader())
+                } then: { result in
+                    guard case .success(let reads) = result else { return nil }
+                    let work = Self(services: services)
+                    work.announce(work.apply(reads, target: target), in: window)
+                    return nil
+                }
             case "file":
                 BookmarkFiles(services: services).chooseImport(profile: target)
             case "privacy":
@@ -143,10 +148,10 @@ struct BookmarkBrowserImport {
 
     // MARK: Import
 
-    /// Reads each profile off the main thread, then applies all of them as
+    /// Reads each profile in the sandboxed import service, then applies all of them as
     /// one undo step on `target`'s bookmarks.
     func run(_ profiles: [BrowserSourceProfile], target: String) async -> Outcome {
-        apply(await Task.detached { Self.read(profiles) }.value, target: target)
+        apply(await Self.read(profiles, reader: BrowserImportServiceReader()), target: target)
     }
 
     /// One profile's bookmarks as read; nil when they could not be read.
@@ -155,9 +160,13 @@ struct BookmarkBrowserImport {
         var bookmarks: [ImportedBookmark]?
     }
 
-    /// Reads each profile's bookmarks: blocking file and SQLite reads, never on the main thread.
-    nonisolated static func read(_ profiles: [BrowserSourceProfile]) -> [Read] {
-        profiles.map { Read(profile: $0, bookmarks: try? BrowserImporter.readBookmarks($0).items) }
+    /// Reads each profile's bookmarks through `reader` (the sandboxed import service), never on the main thread.
+    @concurrent nonisolated static func read(_ profiles: [BrowserSourceProfile], reader: any ProfileDataReading) async -> [Read] {
+        var reads: [Read] = []
+        for profile in profiles {
+            reads.append(Read(profile: profile, bookmarks: try? await reader.bookmarks(profile).items))
+        }
+        return reads
     }
 
     /// Applies the reads as one undo step on `target`'s bookmarks.

@@ -1,5 +1,6 @@
-public import Foundation
+public import CmuxNextBrowserImport
 import Compression
+public import Foundation
 
 /// The parts cmux imports from a browser's export archive (Safari: File >
 /// Export Browsing Data to File…, a zip of Bookmarks.html, History.json,
@@ -7,6 +8,8 @@ import Compression
 /// in the archive is inflated: its credit cards and extensions are never
 /// read. The archive is read into `SecretBytes` (its passwords are only
 /// deflated there), and each Passwords.csv inflates straight into its own.
+/// Runs in the sandboxed import service (plans/cmux-next/rule-of-2.md); the App
+/// gets ``parts``.
 public struct ExportArchive: Sendable {
     public var bookmarksHTML: [String] = []
     public var historyJSON: [Data] = []
@@ -29,9 +32,21 @@ public struct ExportArchive: Sendable {
     }
 
     /// Larger than any browser's export.
-    static let maximumSize = 512 << 20
+    static let maximumSize = ExportArchiveParts.maximumSize
     /// One part, inflated.
-    static let maximumPart = 64 << 20
+    static let maximumPart = ExportArchiveParts.maximumPart
+
+    /// The parts as they cross to the App: each password file's bytes copied out of its locked
+    /// buffer for the reply (the App moves them into `SecretBytes`).
+    public var parts: ExportArchiveParts {
+        let passwords = passwordCSVs.map { secret in
+            secret.withUnsafeBytes { bytes in
+                // SAFETY: Data copies the view's count bytes while the closure runs and keeps no pointer.
+                unsafe Data(bytes)
+            }
+        }
+        return ExportArchiveParts(bookmarksHTML: bookmarksHTML, historyJSON: historyJSON, passwordCSVs: passwords)
+    }
 
     private enum Part {
         case bookmarks, history, passwords
@@ -47,11 +62,6 @@ public struct ExportArchive: Sendable {
             default: return nil
             }
         }
-    }
-
-    /// Whether `head` (a file's first bytes) starts a zip archive.
-    public static func isArchive(_ head: Data) -> Bool {
-        head.starts(with: [0x50, 0x4B, 0x03, 0x04])
     }
 
     /// The parts of the zip held in `file`, read in place.

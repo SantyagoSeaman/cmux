@@ -1,4 +1,5 @@
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportParsers
 import Foundation
 import SQLite3
 import Testing
@@ -54,7 +55,7 @@ import Testing
         try await store.save(ImportBatch(source: record, kinds: [.history]))
 
         let delivered = Delivered()
-        let sync = ImportHistorySync(store: store, grants: nil, delay: .milliseconds(50)) { id, pages, gone in await delivered.add(id, pages, gone) }
+        let sync = ImportHistorySync(store: store, grants: nil, reader: InProcessProfileReader(), delay: .milliseconds(50)) { id, pages, gone in await delivered.add(id, pages, gone) }
         await sync.reconcile()
         #expect(await sync.watched == [record.sourceKey])
         // The catch-up read after the watch starts.
@@ -255,7 +256,7 @@ import Testing
         try await store.save(batch)
 
         let sink = Sink(), forgotten = Forgotten()
-        let sync = ImportHistorySync(store: store, grants: nil) { _, _, gone in await forgotten.add(gone) }
+        let sync = ImportHistorySync(store: store, grants: nil, reader: InProcessProfileReader()) { _, _, gone in await forgotten.add(gone) }
         let counts = try await sync.removeImported(profile: "p1", bookmarks: sink)
         #expect(counts == ImportCounts(bookmarks: 1, history: 1))
         #expect(await forgotten.urls == [page])
@@ -284,7 +285,7 @@ import Testing
         let root = FileManager.default.temporaryDirectory.appending(path: "import-move-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }
         let log = Log()
-        let sync = ImportHistorySync(store: ImportedDataStore(directory: root), grants: nil) { id, _, gone in await log.forgot(id, gone) }
+        let sync = ImportHistorySync(store: ImportedDataStore(directory: root), grants: nil, reader: InProcessProfileReader()) { id, _, gone in await log.forgot(id, gone) }
         let destination = SavingImportDestination(sync: sync, bookmarks: Sink(log: log))
         let page = URL(fileURLWithPath: "/page")
         var batch = ImportBatch(source: ImportSourceRecord(browser: .chrome, profileDirectory: "Default", displayName: "Google Chrome",

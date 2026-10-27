@@ -48,6 +48,9 @@
 #      Contents/Helpers (rbh_sign), then every other nested framework under
 #      Contents/Frameworks/* with --deep (covers Sparkle's XPCServices and
 #      Updater.app, and Iroh).
+#   4b. The sandboxed browser import service, Contents/XPCServices/cmux-browser-import.xpc,
+#      with its own entitlements (scripts/cmux-next/sign-browser-import-service.sh), checked
+#      after the app is signed.
 #   5. The main app bundle with the effective app-level entitlements,
 #      WITHOUT --deep. --deep here would overwrite helper/plugin
 #      signatures and re-introduce the app-id mismatch that amfi on
@@ -193,6 +196,12 @@ if [[ "$SIGN_MODE" == "all" || "$SIGN_MODE" == "all-except-computer-use" ]]; the
       /usr/bin/codesign "${COMMON[@]}" --deep "$framework"
     done < <(find "$APP_PATH/Contents/Frameworks" -mindepth 1 -maxdepth 1 -print0)
   fi
+  # 4b. The sandboxed browser import service (cmux-next, plans/cmux-next/rule-of-2.md), with its
+  # own entitlements: the App Sandbox and read-only selected files only.
+  if [[ -d "$APP_PATH/Contents/XPCServices/cmux-browser-import.xpc" ]]; then
+    echo "==> signing the browser import service"
+    "$SCRIPT_DIR/cmux-next/sign-browser-import-service.sh" --sign "$APP_PATH" "$IDENTITY"
+  fi
 fi
 
 # 5. Main app bundle (no --deep), with the effective entitlements.
@@ -302,6 +311,11 @@ if [[ -d "$COMPUTER_USE_HELPER" ]] \
         | grep -q "application-identifier"; then
   echo "error: nested Computer Use helper unexpectedly carries application-identifier" >&2
   exit 1
+fi
+
+# The browser import service runs sandboxed with no other entitlement.
+if [[ -d "$APP_PATH/Contents/XPCServices/cmux-browser-import.xpc" ]]; then
+  "$SCRIPT_DIR/cmux-next/sign-browser-import-service.sh" --check "$APP_PATH"
 fi
 
 echo "==> signing OK: $APP_PATH"

@@ -4,8 +4,8 @@ public import Foundation
 /// logged: `description`, `debugDescription` and reflection (`dump`,
 /// string interpolation, Mirror) hide the value. Cookies pass from the
 /// reader to a ``CookieDestination`` in memory; only counts leave the import.
-public struct ImportedCookie: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
-    public enum SameSite: String, Sendable {
+public struct ImportedCookie: Sendable, Equatable, Codable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public enum SameSite: String, Sendable, Codable {
         case unspecified, none, lax, strict
     }
 

@@ -48,10 +48,14 @@ public struct PasswordImporter: Sendable {
     let keys: any SafeStorageKeyProviding
     let destination: any PasswordDestination
     let primaryPassword: PrimaryPasswordPrompt?
+    /// Parses the login files (the sandboxed import service); the keys and the primary password stay here.
+    let reader: any ProfileDataReading
 
-    public init(keys: any SafeStorageKeyProviding, destination: any PasswordDestination, primaryPassword: PrimaryPasswordPrompt? = nil) {
+    public init(keys: any SafeStorageKeyProviding, destination: any PasswordDestination, reader: any ProfileDataReading,
+                primaryPassword: PrimaryPasswordPrompt? = nil) {
         self.keys = keys
         self.destination = destination
+        self.reader = reader
         self.primaryPassword = primaryPassword
     }
 
@@ -76,35 +80,42 @@ public struct PasswordImporter: Sendable {
         } catch let error as CookieImportError {
             throw Failure.key(error)
         }
-        let read: (logins: [ImportedLogin], skipped: LoginSkipCounts)
+        let databases: [SealedLogins]
         do {
-            read = try ChromiumLoginDataReader().read(profile: profile.path, crypto: crypto)
+            var rows: [SealedLogins] = []
+            for file in ChromiumLoginDataReader().databases(profile: profile.path) {
+                rows.append(try await reader.chromiumLogins(file))
+            }
+            databases = rows
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             throw Failure.unreadable
         }
-        return try await store(read, intoProfile: profileID)
+        return try await store(ChromiumLoginDataReader().open(databases, crypto: crypto), intoProfile: profileID)
         #endif
     }
 
     #if !CMUX_NO_PASSWORD_IMPORT
-    /// Reads with no primary password first; asks the person once when the profile has one.
+    /// Opens the key store with no primary password first; asks the person once when the profile
+    /// has one. The service reads `key4.db` and `logins.json` with every value still sealed.
     private func readFirefox(_ profile: BrowserSourceProfile) async throws -> (logins: [ImportedLogin], skipped: LoginSkipCounts) {
         do {
-            return try FirefoxLoginReader().read(profile: profile.path, primaryPassword: nil)
-        } catch FirefoxPasswordCrypto.Failure.primaryPasswordNeeded {
-            guard let primaryPassword, let given = await primaryPassword(profile), !given.isEmpty else { throw Failure.primaryPasswordNeeded }
-            do {
-                return try FirefoxLoginReader().read(profile: profile.path, primaryPassword: given)
-            } catch FirefoxPasswordCrypto.Failure.wrongPrimaryPassword {
-                throw Failure.wrongPrimaryPassword
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                throw Failure.unreadable
+            let keyStore = try await reader.firefoxKeyStore(profile.path.appending(path: "key4.db"))
+            let crypto: FirefoxPasswordCrypto
+            do throws(FirefoxPasswordCrypto.Failure) {
+                crypto = try FirefoxPasswordCrypto(keyStore: keyStore, primaryPassword: nil)
+            } catch .primaryPasswordNeeded {
+                guard let primaryPassword, let given = await primaryPassword(profile), !given.isEmpty else { throw Failure.primaryPasswordNeeded }
+                do throws(FirefoxPasswordCrypto.Failure) {
+                    crypto = try FirefoxPasswordCrypto(keyStore: keyStore, primaryPassword: given)
+                } catch .wrongPrimaryPassword {
+                    throw Failure.wrongPrimaryPassword
+                }
+                // `given` goes out of scope here and is zeroed.
             }
-            // `given` goes out of scope here and is zeroed.
+            let entries = try await reader.firefoxLogins(profile.path.appending(path: "logins.json"))
+            return try FirefoxLoginReader().open(entries, crypto: crypto)
         } catch is CancellationError {
             throw CancellationError()
         } catch let failure as Failure {

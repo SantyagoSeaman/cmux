@@ -2,35 +2,23 @@ public import CmuxNextBrowserImport
 import CmuxNextCompat
 import CmuxSafeConcurrency
 public import Foundation
-import os
 
-/// Parses in the sandboxed import service: opens the job's file (and a database's side files)
-/// read-only here, where the folder grant is held, and sends the open files and the spec; the
-/// service sends back values, which are decoded as the wire's types only. One connection per
+/// The App's only way to parse another browser's files: in the sandboxed import service. It opens
+/// the job's file (and a database's side files) read-only here, where the folder grant is held,
+/// and sends the open files and the spec; the service sends back values, which are decoded as the
+/// wire's types only and then checked against the readers' invariants
+/// (`ProfileParseResult.checked(for:)`), as Chrome's browser process checks what its utility
+/// importer sends (chrome/browser/importer/external_process_importer_client.cc). One connection per
 /// parse, so a parse that crashed the service leaves nothing behind for the next.
-///
-/// Feature `browserImportSandboxedService` picks it (``preferred(sandboxed:connector:)``). A build
-/// without the service parses in process, and says so in the log.
 public struct BrowserImportServiceReader: ProfileDataReading {
-    private static let log = Logger(subsystem: "com.cmuxterm.app", category: "BrowserImportService")
-
     private let connector: any BrowserImportServiceConnecting
 
     public init(connector: any BrowserImportServiceConnecting = BundledBrowserImportService()) {
         self.connector = connector
     }
 
-    /// The reader an import uses: the sandboxed service when `sandboxed`, else the in-process parse.
-    public static func preferred(sandboxed: Bool,
-                                 connector: any BrowserImportServiceConnecting = BundledBrowserImportService()) -> any ProfileDataReading {
-        sandboxed ? BrowserImportServiceReader(connector: connector) : InProcessProfileReader()
-    }
-
-    public func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
-        guard connector.isAvailable() else {
-            Self.log.notice("browser import service is not in this build; parsing \(job.spec.format.rawValue, privacy: .public) in process")
-            return try await InProcessProfileReader().parse(job)
-        }
+    @concurrent public func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
+        guard connector.isAvailable() else { throw BrowserImportServiceError.notBundled }
         let wire = BrowserImportServiceWire()
         let request = try wire.encode(job.spec)
         let files = try ServiceFiles(job)
@@ -38,8 +26,10 @@ public struct BrowserImportServiceReader: ProfileDataReading {
         let bytes = try await send(request, files)
         switch try wire.reply(from: bytes) {
         case .parsed(let result):
-            guard result.matches(job.spec.format) else { throw ProfileParseMismatch(format: job.spec.format) }
-            return result
+            guard let checked = result.checked(for: job.spec) else { throw BrowserImportServiceError.badReply }
+            return checked
+        case .failed(.cookie(let error)):
+            throw error
         case .failed(let failure):
             throw BrowserImportServiceError.service(failure)
         }

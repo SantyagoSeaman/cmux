@@ -12,7 +12,7 @@ public import Foundation
 
 extension NSXPCInterface {
     /// The interface both ends set: the app as the remote object's, the service as its exported one.
-    static func browserImportParsing() -> NSXPCInterface {
+    package static func browserImportParsing() -> NSXPCInterface {
         NSXPCInterface(with: (any BrowserImportParsing).self)
     }
 }

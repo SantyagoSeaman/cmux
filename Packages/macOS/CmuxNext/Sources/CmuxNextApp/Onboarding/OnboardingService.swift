@@ -3,6 +3,7 @@ import CmuxNextActions
 import CmuxNextAgentPane
 import CmuxNextBrowser
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportService
 import CmuxNextDesign
 import CmuxNextOnboarding
 import CmuxNextWakeups
@@ -58,7 +59,8 @@ final class OnboardingService {
     var classicMigrationRun: Task<ClassicMigrationOutcome, any Error>?
 
     /// Keep in Sync's watches; `start` also seeds each profile's omnibar with its imported pages.
-    private(set) lazy var historySync = BrowserFolderAccess().historySync(store: importStore, deliver: SavingImportDestination.omnibar(services.cache, on: services.mainWork))
+    private(set) lazy var historySync = BrowserFolderAccess().historySync(store: importStore, reader: BrowserImportServiceReader(),
+                                                                          deliver: SavingImportDestination.omnibar(services.cache, on: services.mainWork))
 
     /// Computer Use Setup: the helper's grants for the palette action, Settings and the tool window.
     private(set) lazy var computerUseSetup = ComputerUseSetup.app(services: services)

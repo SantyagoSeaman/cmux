@@ -1,3 +1,4 @@
+public import CmuxNextBrowserImport
 public import Foundation
 
 /// Reads Arc's `StorableSidebar.json`. Arc keeps its bookmarks in the

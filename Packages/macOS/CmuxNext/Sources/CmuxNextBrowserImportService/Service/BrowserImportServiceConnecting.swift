@@ -10,11 +10,15 @@ public protocol BrowserImportServiceConnecting: Sendable {
     func makeConnection() -> NSXPCConnection
 }
 
-/// The service bundled in the app at `Contents/XPCServices/<serviceName>.xpc`.
+/// The service bundled in the app at `Contents/XPCServices/cmux-browser-import.xpc`: the Xcode
+/// target `cmux-browser-import`, embedded and signed with its sandbox entitlements by the app's
+/// phase "Embed browser import service" (scripts/cmux-next/sign-browser-import-service.sh).
 public struct BundledBrowserImportService: BrowserImportServiceConnecting {
-    /// The service bundle's identifier. An app's XPC services are looked up in its own bundle, so
-    /// every build variant (DEV tags, NIGHTLY, Release) uses the same name.
+    /// The service bundle's identifier (its Info.plist). An app's XPC services are looked up in its
+    /// own bundle, so every build variant (DEV tags, NIGHTLY, Release) uses the same name.
     public static let serviceName = "com.cmuxterm.browser-import"
+    /// The bundle's folder name in `Contents/XPCServices`.
+    public static let bundleName = "cmux-browser-import.xpc"
 
     private let app: URL
 
@@ -23,7 +27,7 @@ public struct BundledBrowserImportService: BrowserImportServiceConnecting {
     }
 
     public func isAvailable() -> Bool {
-        FileManager.checked.fileExists(atPath: app.appending(path: "Contents/XPCServices/\(Self.serviceName).xpc").path)
+        FileManager.checked.fileExists(atPath: app.appending(path: "Contents/XPCServices/\(Self.bundleName)").path)
     }
 
     public func makeConnection() -> NSXPCConnection {

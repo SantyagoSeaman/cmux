@@ -1,3 +1,5 @@
+public import CmuxNextBrowserImport
+import CmuxNextSQLiteSnapshot
 public import Foundation
 
 /// Parses Safari's `Bookmarks.plist`: nested `WebBookmarkTypeList` folders

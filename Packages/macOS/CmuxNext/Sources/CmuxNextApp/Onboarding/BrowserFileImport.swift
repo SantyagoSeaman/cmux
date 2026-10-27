@@ -71,7 +71,7 @@ struct BrowserFileImport {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let bytes = (try? handle.read(upToCount: 4096)) ?? Data()
-        if ExportArchive.isArchive(bytes) { return .archive }
+        if ExportArchiveParts.isArchive(bytes) { return .archive }
         let head = String(decoding: bytes, as: UTF8.self)
         let text = head.drop(while: { $0.isWhitespace || $0 == "\u{FEFF}" })
         if ExportedHistory.looksLikeHistory(String(text)) { return .history }

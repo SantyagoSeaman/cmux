@@ -1,3 +1,4 @@
+public import CmuxNextBrowserImport
 public import Foundation
 
 /// Reads a Firefox profile's default search engine from `search.json.mozlz4`
@@ -6,13 +7,14 @@ public import Foundation
 /// the person added keeps its own addresses (`_urls`, the query `params`
 /// joined on); one Firefox ships names only its id, so it maps to the
 /// well-known engine's address. Nil when the file names no engine; only https
-/// engines whose search address takes the typed text are returned.
+/// engines whose search address takes the typed text are returned. Runs in the
+/// sandboxed import service (plans/cmux-next/rule-of-2.md).
 public struct FirefoxSearchEngineReader {
     public init() {}
 
-    public func read(profile: URL) -> ImportedSearchEngine? {
-        guard let data = FileManager.default.contents(atPath: profile.appending(path: "search.json.mozlz4").path),
-              let json = FirefoxSessionReader().decompress(data) else { return nil }
+    /// A `search.json.mozlz4` file's bytes.
+    public func read(_ data: Data) -> ImportedSearchEngine? {
+        guard let json = FirefoxSessionReader().decompress(data) else { return nil }
         return parse(json)
     }
 

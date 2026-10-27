@@ -7,12 +7,15 @@ public import Foundation
 public struct CookieImporter: Sendable {
     public var destination: any CookieDestination
     public var keys: any SafeStorageKeyProviding
+    /// Parses the cookie files (the sandboxed import service); the Safe Storage key stays here.
+    public var reader: any ProfileDataReading
     /// Cookies per `setCookies` call (bounds one shim message).
     public var batchSize = 500
 
-    public init(destination: any CookieDestination, keys: any SafeStorageKeyProviding) {
+    public init(destination: any CookieDestination, keys: any SafeStorageKeyProviding, reader: any ProfileDataReading) {
         self.destination = destination
         self.keys = keys
+        self.reader = reader
     }
 
     /// - Parameter filter: the sites to keep (`--domain`); the default keeps every cookie.
@@ -23,7 +26,7 @@ public struct CookieImporter: Sendable {
     /// main actor, so the whole app hung until the prompt was answered.
     @concurrent public func run(_ profile: BrowserSourceProfile, into target: String, filter: CookieDomainFilter = CookieDomainFilter([String]()),
                     now: Date = Date()) async throws -> CookieImportReport {
-        let read = try Self.read(profile, keys: keys, now: now)
+        let read = try await Self.read(profile, keys: keys, reader: reader, now: now)
         var report = CookieImportReport(undecryptable: read.undecryptable, partitioned: read.partitioned, expired: read.expired)
         let cookies = filter.keepsAll ? read.cookies : read.cookies.filter(filter.keeps)
         var start = 0
@@ -38,9 +41,10 @@ public struct CookieImporter: Sendable {
         return report
     }
 
-    /// Reads (and decrypts) the cookies of one profile. Blocks on the
-    /// Keychain prompt for Chromium browsers.
-    static func read(_ profile: BrowserSourceProfile, keys: any SafeStorageKeyProviding, now: Date) throws -> CookieReadResult {
+    /// Reads the cookies of one profile: the sandboxed service parses the file, and Chromium values
+    /// are opened here with the Safe Storage key. Blocks on the Keychain prompt for Chromium browsers.
+    static func read(_ profile: BrowserSourceProfile, keys: any SafeStorageKeyProviding, reader: any ProfileDataReading,
+                     now: Date) async throws -> CookieReadResult {
         #if CMUX_NO_BROWSER_DATA_IMPORT || CMUX_NO_COOKIE_IMPORT
         // The cx-f58x notary test builds read no other browser's cookie files
         // (CMUX_NO_COOKIE_IMPORT is the cookies-only notary bisect build).
@@ -58,9 +62,10 @@ public struct CookieImporter: Sendable {
                 // SAFETY: Data copies the view's count bytes while the closure runs and keeps no pointer.
                 unsafe Data(bytes)
             }
-            return try ChromiumCookieReader().read(file, crypto: ChromiumCookieCrypto(safeStoragePassword: password), now: now)
+            let rows = try await reader.cookies(.chromiumCookies, file: file)
+            return try rows.opened(crypto: ChromiumCookieCrypto(safeStoragePassword: password), now: now)
         case .firefox:
-            return try FirefoxCookieReader().read(profile.path.appending(path: "cookies.sqlite"), now: now)
+            return try await reader.cookies(.firefoxCookies, file: profile.path.appending(path: "cookies.sqlite")).opened(crypto: nil, now: now)
         case .safari:
             // `path` is ~/Library/Safari; the cookie file is in Safari's container.
             guard let relative = browser.safariCookieFile else { return CookieReadResult(cookies: []) }
@@ -69,7 +74,7 @@ public struct CookieImporter: Sendable {
             switch FileAccess.probe(file) {
             case .denied: throw CookieImportError.needsFullDiskAccess
             case .missing: return CookieReadResult(cookies: [])
-            case .readable: return try SafariBinaryCookies().parse(Data(contentsOf: file), now: now)
+            case .readable: return try await reader.cookies(.safariCookies, file: file).opened(crypto: nil, now: now)
             }
         case .webkit, .other:
             throw CookieImportError.malformed(browser.displayName)

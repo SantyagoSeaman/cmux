@@ -1,5 +1,6 @@
 import CmuxFuzzSupport
 @testable import CmuxNextBrowserImport
+@testable import CmuxNextBrowserImportParsers
 import Foundation
 
 /// Scratch folders and in-place damage of the files a profile holds.
@@ -224,11 +225,11 @@ struct ImportFuzzHome: Sendable {
         }
     }
 
-    /// Runs the importer over every profile and checks what it reported for each. `reader` parses the
-    /// bookmarks, history and open tabs: in this process, or in the sandboxed import service.
+    /// Runs the importer over every profile and checks what it reported for each. `reader` parses every
+    /// file: in this process, or in the sandboxed import service (the App's only reader).
     func check(reader: any ProfileDataReading = InProcessProfileReader()) async throws {
-        let importer = BrowserImporter(cookies: CookieImporter(destination: ImportFuzzCookieSink(), keys: ImportFuzzKeys.storage),
-                                       passwords: PasswordImporter(keys: ImportFuzzKeys.storage, destination: ImportFuzzPasswordSink()),
+        let importer = BrowserImporter(cookies: CookieImporter(destination: ImportFuzzCookieSink(), keys: ImportFuzzKeys.storage, reader: reader),
+                                       passwords: PasswordImporter(keys: ImportFuzzKeys.storage, destination: ImportFuzzPasswordSink(), reader: reader),
                                        reader: reader)
         let plan = ImportPlan(items: profiles.map { ImportPlan.Item(profile: $0.source, kinds: $0.kinds) })
         try FuzzRun.check(plan.items.count == profiles.count, "the plan dropped a profile")

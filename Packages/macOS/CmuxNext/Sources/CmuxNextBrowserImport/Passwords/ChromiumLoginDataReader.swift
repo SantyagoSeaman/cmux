@@ -46,11 +46,12 @@ public struct LoginSkipCounts: Sendable, Equatable, Codable {
 // nightly.yml input notary_test_without_password_import) compiles out the
 // browser password readers. Default builds include them.
 #if !CMUX_NO_PASSWORD_IMPORT
-/// Reads a Chromium profile's saved passwords: `Login Data` (the profile
-/// store) and `Login Data For Account` (the account store). Each database is
-/// read from a private copy (`SQLiteSnapshot`), which holds only the
-/// encrypted values the source keeps on disk anyway; each value is decrypted
-/// in memory into `SecretBytes`. Nothing here writes a password anywhere.
+/// A Chromium profile's saved passwords: `Login Data` (the profile store) and
+/// `Login Data For Account` (the account store). The sandboxed import service
+/// reads each database's rows with the passwords still sealed
+/// (CmuxNextBrowserImportParsers); here each is opened in memory into
+/// `SecretBytes` with the browser's Safe Storage key, which never leaves the
+/// app. Nothing here writes a password anywhere.
 public struct ChromiumLoginDataReader {
     public init() {}
 
@@ -61,37 +62,36 @@ public struct ChromiumLoginDataReader {
         files.contains { FileManager.default.fileExists(atPath: profile.appending(path: $0).path) }
     }
 
-    public func read(profile: URL, crypto: ChromiumPasswordCrypto) throws -> (logins: [ImportedLogin], skipped: LoginSkipCounts) {
+    /// The profile's login databases that exist, in ``files`` order.
+    public func databases(profile: URL) -> [URL] {
+        Self.files.map { profile.appending(path: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Opens each database's sealed sign-ins, in order: a value the key does not open, or that opens
+    /// empty, is counted; the same site and username twice keeps the newest.
+    public func open(_ databases: [SealedLogins], crypto: ChromiumPasswordCrypto) -> (logins: [ImportedLogin], skipped: LoginSkipCounts) {
         var skipped = LoginSkipCounts()
         var byKey: [String: ImportedLogin] = [:]
         var order: [String] = []
-        for name in Self.files {
-            let file = profile.appending(path: name)
-            guard FileManager.default.fileExists(atPath: file.path) else { continue }
-            let database = try SQLiteSnapshot(copying: file)
-            guard database.hasTable("logins") else { continue }
-            let sql = "SELECT origin_url, signon_realm, username_value, password_value, date_created, blacklisted_by_user, scheme, "
-                + "federation_url FROM logins"
-            try database.query(sql) { row in
-                let realm = row.string(1) ?? ""
-                // scheme 0 is an HTML form; 1-3 are HTTP auth. Federated and Android entries have no web password.
-                guard row.int64(5) == 0 else { skipped.neverSaved += 1; return true }
-                guard row.int64(6) == 0, (row.string(7) ?? "").isEmpty, realm.hasPrefix("http") else {
-                    skipped.notWebForm += 1
-                    return true
-                }
-                guard let sealed = row.data(3), !sealed.isEmpty else { skipped.empty += 1; return true }
+        for database in databases {
+            skipped.neverSaved += database.skipped.neverSaved
+            skipped.notWebForm += database.skipped.notWebForm
+            skipped.empty += database.skipped.empty
+            for sealed in database.logins {
                 let password: SecretBytes
                 do {
-                    password = try crypto.decrypt(sealed)
+                    password = try crypto.decrypt(sealed.sealedPassword)
                 } catch {
                     skipped.undecryptable += 1
-                    return true
+                    continue
                 }
-                guard !password.isEmpty else { skipped.empty += 1; return true }
-                let login = ImportedLogin(url: row.string(0) ?? realm, signonRealm: realm, username: row.string(2) ?? "",
-                                          password: password, created: BrowserTime().chromium(row.int64(4)))
-                let key = realm + "\u{0}" + login.username
+                guard !password.isEmpty else {
+                    skipped.empty += 1
+                    continue
+                }
+                let login = ImportedLogin(url: sealed.url, signonRealm: sealed.signonRealm, username: sealed.username, password: password,
+                                          created: sealed.created)
+                let key = sealed.signonRealm + "\u{0}" + login.username
                 if let kept = byKey[key] {
                     skipped.duplicate += 1
                     if (login.created ?? .distantPast) > (kept.created ?? .distantPast) { byKey[key] = login }
@@ -99,7 +99,6 @@ public struct ChromiumLoginDataReader {
                     byKey[key] = login
                     order.append(key)
                 }
-                return true
             }
         }
         return (order.compactMap { byKey[$0] }, skipped)

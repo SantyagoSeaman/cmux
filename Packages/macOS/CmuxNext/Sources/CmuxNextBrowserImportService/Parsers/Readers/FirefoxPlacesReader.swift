@@ -1,3 +1,5 @@
+public import CmuxNextBrowserImport
+import CmuxNextSQLiteSnapshot
 public import Foundation
 
 /// Reads Firefox's `places.sqlite`: bookmarks (`moz_bookmarks` joined to

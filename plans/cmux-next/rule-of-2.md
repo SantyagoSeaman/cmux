@@ -23,11 +23,11 @@ Mac wrote it, and the person did not check it), **peer** (a device or machine th
 | Input | Where it is parsed | Parser language | Sandbox | Trust | Rule of 2 | Next step |
 | --- | --- | --- | --- | --- | --- | --- |
 | Web pages (HTML, JS, CSS, images, media) | Chromium renderer (CEF), WebKit WebContent | C++ | yes (Chromium and WebKit renderer sandboxes) | hostile | 2 of 3 | none |
-| Another browser's bookmarks, history, open tabs (JSON, plist, SQLite, SNSS, mozLz4) | `CmuxNextBrowserImport` readers, in the app | Swift; SQLite (C) for databases; LZ4 through Compression (C) | **no**, until the service is on | foreign | **3 of 3** (SQLite, Compression) | the sandboxed import service (section 2): built, behind `browserImportSandboxedService` |
-| Another browser's cookies (Chromium `Cookies` SQLite, Firefox `cookies.sqlite`, Safari `Cookies.binarycookies`) | `CmuxNextBrowserImport/Cookies`, in the app | Swift; SQLite (C) | no | foreign | **3 of 3** | section 2, phase 3: the app reads the Safe Storage key from the Keychain and sends the key with the file |
-| Another browser's saved passwords (`Login Data` SQLite, Firefox `key4.db` + `logins.json`, NSS DER) | `CmuxNextBrowserImport/Passwords`, in the app | Swift; SQLite (C) | no | foreign | **3 of 3** | section 2, phase 3, as cookies; the decrypted values stay in `SecretBytes` on the app side only |
-| Another browser's search engine and extensions (`Preferences` JSON, `Web Data` SQLite, Firefox `search.json.mozlz4`) | `CmuxNextBrowserImport/Parsers`, in the app | Swift; SQLite and Compression (C) | no | foreign | **3 of 3** | section 2, phase 2: these read several files of a profile folder; the request sends each file |
-| Export archives and password CSV files the person picks | `ExportArchive.swift` (zip through Compression), `PasswordCSVReader.swift` | Swift; Compression (C) | no | foreign | 3 of 3 for zip, 2 of 3 for CSV | zip into the service with phase 2 |
+| Another browser's bookmarks, history, open tabs (JSON, plist, SQLite, SNSS, mozLz4) | `CmuxNextBrowserImportParsers`, in the sandboxed import service | Swift; SQLite (C) for databases; LZ4 through Compression (C) | **yes** (App Sandbox, read-only selected files, no network) | foreign | 2 of 3 | none: the App links no reader (section 2) |
+| Another browser's cookies (Chromium `Cookies` SQLite, Firefox `cookies.sqlite`, Safari `Cookies.binarycookies`) | `CmuxNextBrowserImportParsers/Cookies`, in the service; Chromium values decrypted in the app | Swift; SQLite (C) | **yes** | foreign | 2 of 3 | none: the Safe Storage key never leaves the app |
+| Another browser's saved passwords (`Login Data` SQLite, Firefox `key4.db` + `logins.json`) | `CmuxNextBrowserImportParsers/Passwords`, in the service; NSS DER and decryption in the app | Swift; SQLite (C) | **yes** | foreign | 2 of 3 | none: the key and the primary password stay in the app, the values in `SecretBytes` |
+| Another browser's search engine and extensions (`Preferences` JSON, `Web Data` SQLite, Firefox `search.json.mozlz4`, `manifest.json`, `messages.json`) | `CmuxNextBrowserImportParsers`, in the service, one file per request | Swift; SQLite and Compression (C) | **yes** | foreign | 2 of 3 | none |
+| Export archives and password CSV files the person picks | `ExportArchive.swift` (zip through Compression) in the service; `PasswordCSVReader.swift` in the app | Swift; Compression (C) | **yes** for zip, no for CSV | foreign | 2 of 3 | none |
 | VNC framebuffer updates (RFB: raw, zlib, ZRLE, cursor) | `Packages/Shared/CmuxVNC/Sources/CmuxVNC/Decode`, in the app | Swift; zlib (C) for zlib and ZRLE | no | peer (any VNC server the person connects to) | **3 of 3** (zlib) | **the next candidate**: the same service shape (a sandboxed decoder that gets the socket bytes and returns rectangles), or a Swift inflate |
 | Images in agent replies, Home attachments, backgrounds, icons, favicons | ImageIO through `CheckedImageSource` / `ImageIO+Blocking` (CmuxNextCompat), CmuxNextAgentPane, CmuxNextHomeEngine, CmuxNextDesign, CmuxNextFavicons | ImageIO (C, C++, Objective-C) | no | hostile (web, agent output) | **3 of 3** | a decode service like Chromium's data decoder; until then sizes are capped and decode runs off main |
 | SVG in agent replies and Home diagrams | `AgentPaneSVGSanitizer` (XMLParser, libxml2), `SVGRasterizer` (CoreSVG through NSImage) | C, Objective-C | no | hostile (agent output) | **3 of 3** | the image decode service; the sanitizer stays as a second gate |
@@ -55,74 +55,85 @@ in the App Sandbox with no file access of its own (Chrome's data decoder takes b
 
 ### The split
 
-- **App, `CmuxNextBrowserImport`** decides what to read: `ProfileParseJob` (the format and the file,
-  from the registry and folder listings only; nothing is opened). It keeps the merge and every write
-  (`BrowserImporter`, `ImportHistorySync`, `ImportedDataStore`).
-- **The one parse**, `ProfileParseSpec.parse(at:)`: the same call in both processes, so the
-  in-process result and the service's result are the same value.
-- **`ProfileDataReading`**, the seam: `InProcessProfileReader` parses here;
-  `BrowserImportServiceReader` (target `CmuxNextBrowserImportService`) opens the job's file and a
-  database's `-wal` and `-journal` read-only, where the folder grant is held, and sends the
-  descriptors and the spec over XPC. One connection per parse.
-- **The service** (`CmuxNextBrowserImportServiceMain`, `Contents/XPCServices/com.cmuxterm.browser-import.xpc`):
-  `BrowserImportServiceGate` exports `BrowserImportService`; `BrowserImportParseHandler` copies the
-  descriptors into a private folder in its container, runs the parse, and replies.
+- **App, `CmuxNextBrowserImport`** decides what to read and keeps the merge, every key and every
+  write: `ProfileParseJob` (the format and the file, from the registry and folder listings only;
+  nothing is opened), the values that cross (`ProfileParseResult`, `SealedCookies`, `SealedLogins`,
+  `FirefoxKeyStore`, `ChromiumPreferences`, `ExportArchiveParts`), and the flows over them
+  (`BrowserImporter`, `ImportHistorySync`, `CookieImporter`, `PasswordImporter`,
+  `ProfileSearchEngine`, `ProfileExtensions`). It links no SQLite and no Compression.
+- **`ProfileDataReading`**, the seam. The App's one implementation is `BrowserImportServiceReader`
+  (target `CmuxNextBrowserImportService`): it opens the job's file and a database's `-wal` and
+  `-journal` read-only, where the folder grant is held, and sends the descriptors and the spec over
+  XPC, one connection per parse. Every App caller takes it: Import from Browser, the import cards,
+  Keep in Sync, the bookmarks page's import, `browser.importCookies` and Import from Another
+  Browser's export archives. There is no in-process fallback: a build without the service reports
+  `notBundled` for the profile.
+- **The service, `CmuxNextBrowserImportParsers`**: every reader (`ProfileParseSpec.parse(at:)`),
+  `BrowserImportParseHandler`, which copies the descriptors into a private folder in its container
+  and replies, and `BrowserImportServiceGate`. Only the Xcode target `cmux-browser-import` links it
+  (`Contents/XPCServices/cmux-browser-import.xpc`, main at
+  `Sources/CmuxNextBrowserImportService/Main/main.swift`). `InProcessProfileReader` runs the same
+  parse in a test process.
+- **Secrets stay in the app.** Chromium cookie and password values cross sealed and are decrypted
+  with the Safe Storage key the app reads from the Keychain; Firefox's `key4.db` crosses sealed and
+  is opened with the primary password in the app. Chrome splits the same way: its utility importer
+  sends items, the browser process keeps the profile keys.
 
 ### The wire
 
 - Request: a binary property list of `ProfileParseSpec` (format, Arc profile directory, history
-  limit). No path, no profile name.
+  limit, a key: the `Web Data` GUID or an extension message name). No path, no profile name.
 - Files: `main`, and `wal` and `journal` for a database, as `FileHandle`s (XPC sends a duplicate of
   each descriptor).
 - Reply: a binary property list of `BrowserImportServiceReply`: `.parsed(ProfileParseResult)` or
-  `.failed(BrowserImportServiceFailure)`. The app decodes it as these types only; bytes that do not
-  decode, or a value of another kind than the format reads, are refused (`badReply`,
-  `ProfileParseMismatch`), as Mojo's `ReportBadMessage` refuses a bad child message.
+  `.failed(BrowserImportServiceFailure)` (a cookie reader's `CookieImportError` crosses as itself).
+- The App trusts no reply. It decodes the wire's types only (bytes that do not decode are
+  `badReply`), then `ProfileParseResult.checked(for:)` applies the readers' invariants, as a Mojo
+  typemap's `StructTraits::Read` checks a child's message (mojo/public/cpp/bindings/struct_traits.h,
+  chrome/common/importer/profile_import_process_param_traits): another kind than the format reads,
+  a negative counter or one past `Int32.max`, or more entries than a reader gives is refused
+  (`badReply`); an address no reader gives (`javascript:`, `chrome:`) is dropped and counted, visit
+  counts are clamped, history is cut to the job's limit, times out of years 1-9999 are dropped or
+  cleared, search engines keep https templates that take the typed text. Sums of skip counters
+  saturate. A reply from an honest reader comes back unchanged.
 - A service that crashes or is ended fails only the profile it was parsing
   (`BrowserImportServiceError.connection`); `BrowserImporter` reports it and imports the others.
 
-### Entitlements
+### Entitlements and bundling
 
 `Sources/CmuxNextBrowserImportService/Bundle/BrowserImportService.entitlements`:
 `com.apple.security.app-sandbox` and `com.apple.security.files.user-selected.read-only`. No
 network client or server entitlement, no other file entitlement: the service reads only the
 descriptors it is sent. `Bundle/Info.plist` declares the XPC service (`XPC!`, `ServiceType`
-`Application`).
+`Application`, `com.cmuxterm.browser-import`).
+
+- The app target `cmux-next` depends on the XPC target `cmux-browser-import`, embeds it with the copy
+  phase "Embed XPC Services" and signs it in the phase "Sign browser import service"
+  (`scripts/cmux-next/sign-browser-import-service.sh`): the build's identity, or ad hoc, always with
+  the entitlements above, so a DEV tag runs it sandboxed too.
+- `scripts/sign-cmux-bundle.sh` (and `scripts/ci/rcodesign-sign-bundle.sh`) sign it again for
+  Developer ID with the hardened runtime, inside out before the app, and
+  `sign-browser-import-service.sh --check` fails the signing unless the service carries exactly
+  those two entitlements.
 
 ### Phases
 
-1. **Done (task 208):** the service skeleton (interface, wire, handler, gate, reader, main, bundle
-   files), and the parsers of bookmarks (Chromium, Safari, Arc, Firefox), history (Chromium,
-   Firefox, Safari) and open tabs (Chromium, Firefox) behind it. `BrowserImporter` and
-   `ImportHistorySync` take a reader; Import from Browser (`AppOnboardingServices.runImport`) picks
-   the service when the feature `browserImportSandboxedService` (default off everywhere) is on. A
-   build without the service bundle parses in process and logs it.
-2. **The other callers, then search engines, extensions and export archives:** Keep in Sync
-   (`BrowserFolderAccess` makes `ImportHistorySync` with the default reader) and the bookmarks
-   page's import (`BookmarkBrowserImport`, `BrowserImporter.readBookmarks`) still parse in process;
-   they take the same reader. Search engines, extensions and export archives each read several
-   files of a profile, so the request carries a list of named files; `BrowserImporter.read`'s
-   remaining in-process cases go.
-3. **Cookies and passwords:** the app reads the Safe Storage key (Keychain prompt stays in the app)
-   and sends it with the database; the service decrypts and returns `ImportedCookie` values, and
-   passwords as sealed rows the app opens into `SecretBytes`. `CookieImporter` and
-   `PasswordImporter` take the reader.
-4. **Bundling:** an Xcode phase compiles `CmuxNextBrowserImportServiceMain` with its package
-   dependencies into `Contents/XPCServices/com.cmuxterm.browser-import.xpc` (the server helper's
-   `scripts/cmux-next/bundle-server-helper.sh` is the model), and `scripts/sign-cmux-bundle.sh`
-   signs it with the entitlements above, inside out, before the app.
-5. **The app stops linking the readers:** once the feature is on by default, the readers that open
-   SQLite and Compression move out of `CmuxNextBrowserImport` into a target only the service
-   links, and `InProcessProfileReader` is deleted. Only then does the app no longer link SQLite for
-   import (it still links SQLite for its own databases).
+1. **Done (task 208):** the inventory, the service (interface, wire, reply checks, handler, gate,
+   reader, Xcode target, signing), and every reader of another browser's profile behind it:
+   bookmarks, history, open tabs, cookies, passwords, search engines, extensions, export archives.
+   The App links none of them.
+2. **Next:** VNC decode (section 3), then the image and XML decoders of the inventory.
 
 ### Tests
 
 `Tests/CmuxNextBrowserImportTests/BrowserImportServiceTests.swift` (gated by `CMUX_IMPORT_FUZZ=1`,
 run on the fleet): an anonymous XPC listener in the test process exports the same gate, so
 descriptors and replies cross a real connection. Every format reads the same through the service as
-in process; task 025's damaged-profile fuzz runs against the service; a bad request, a reader
-error, a bad reply and a build without the service each have a case.
+in process; task 025's damaged-profile fuzz runs against the service (cookies and passwords
+included); a hostile service's well-formed replies (`Int.max` and negative counters, `javascript:`
+addresses, `Int.max` visits, pages past the limit) are refused or cleaned, never trap; a bad request,
+a reader error, a cookie reader's typed error, a bad reply and a build without the service each have
+a case. On a built app, `sign-browser-import-service.sh --check <app>` checks the bundle.
 
 ## 3. The next candidate: VNC decode
 

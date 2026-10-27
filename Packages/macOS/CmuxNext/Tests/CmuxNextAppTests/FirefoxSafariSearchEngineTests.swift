@@ -1,4 +1,5 @@
 import CmuxNextBrowserImport
+import CmuxNextBrowserImportParsers
 import Compression
 import Foundation
 import Testing
@@ -24,7 +25,7 @@ import Testing
         return folder
     }
 
-    @Test func anEngineAddedInFirefoxKeepsItsAddresses() throws {
+    @Test func anEngineAddedInFirefoxKeepsItsAddresses() async throws {
         let folder = try Self.firefoxProfile(#"""
         {"version":10,"engines":[{"id":"google","_name":"Google","_isAppProvided":true},
           {"id":"a1","_name":"Kagi","_definedAliases":["@kagi"],"_urls":[
@@ -33,7 +34,7 @@ import Testing
          "metaData":{"defaultEngineId":"a1","appDefaultEngineId":"google"}}
         """#)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let engine = try #require(FirefoxSearchEngineReader().read(profile: folder))
+        let engine = try #require(await ProfileSearchEngine(reader: InProcessProfileReader()).firefox(profile: folder))
         #expect(engine.name == "Kagi")
         #expect(engine.keyword == "@kagi")
         #expect(engine.search == "https://kagi.com/search?q={searchTerms}")
@@ -41,14 +42,14 @@ import Testing
         #expect(engine.setting(builtIn: Self.builtIn).engine == "custom")
     }
 
-    @Test func anEngineFirefoxShipsMapsToTheBuiltIn() throws {
+    @Test func anEngineFirefoxShipsMapsToTheBuiltIn() async throws {
         let current = try Self.firefoxProfile(#"{"engines":[{"id":"ddg","_name":"DuckDuckGo","_isAppProvided":true}],"metaData":{"defaultEngineId":"ddg"}}"#)
         let older = try Self.firefoxProfile(#"{"engines":[{"_name":"Google","_isAppProvided":true}],"metaData":{"current":"Google"}}"#)
         let unset = try Self.firefoxProfile(#"{"engines":[{"id":"google","_name":"Google"}],"metaData":{}}"#)
         defer { for folder in [current, older, unset] { try? FileManager.default.removeItem(at: folder) } }
-        #expect(FirefoxSearchEngineReader().read(profile: current)?.setting(builtIn: Self.builtIn).engine == "duckduckgo")
-        #expect(FirefoxSearchEngineReader().read(profile: older)?.setting(builtIn: Self.builtIn).engine == "google")
-        #expect(FirefoxSearchEngineReader().read(profile: unset) == nil)
+        #expect(await ProfileSearchEngine(reader: InProcessProfileReader()).firefox(profile: current)?.setting(builtIn: Self.builtIn).engine == "duckduckgo")
+        #expect(await ProfileSearchEngine(reader: InProcessProfileReader()).firefox(profile: older)?.setting(builtIn: Self.builtIn).engine == "google")
+        #expect(await ProfileSearchEngine(reader: InProcessProfileReader()).firefox(profile: unset) == nil)
     }
 
     @Test func safarisSearchSettingMapsToTheBuiltIn() {

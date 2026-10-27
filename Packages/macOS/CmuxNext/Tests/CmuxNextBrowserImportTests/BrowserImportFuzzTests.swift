@@ -1,5 +1,7 @@
 import CmuxFuzzSupport
 @testable import CmuxNextBrowserImport
+@testable import CmuxNextBrowserImportParsers
+import CmuxNextSQLiteSnapshot
 import CmuxNextCompat
 import Foundation
 import Testing

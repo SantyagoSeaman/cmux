@@ -1,3 +1,4 @@
+public import CmuxNextBrowserImport
 public import Foundation
 
 /// Parses Safari's `Cookies.binarycookies`: a big-endian file header
@@ -9,22 +10,22 @@ public struct SafariBinaryCookies {
     /// Creates a parser for Safari binary cookies.
     public init() {}
 
-    public func parse(_ data: Data, now: Date = Date()) throws -> CookieReadResult {
+    public func parse(_ data: Data) throws -> SealedCookies {
         let bytes = [UInt8](data)
         guard bytes.count >= 8, bytes.starts(with: "cook".utf8) else { throw CookieImportError.malformed("binarycookies magic") }
         let pageCount = try be32(bytes, 4).widened
         var offset = 8 + pageCount * 4
-        var result = CookieReadResult(cookies: [])
+        var result = SealedCookies()
         for page in 0..<pageCount {
             let size = try be32(bytes, 8 + page * 4).widened
             guard size >= 8, offset + size <= bytes.count else { throw CookieImportError.malformed("page \(page)") }
-            try parsePage(Array(bytes.dropFirst(offset).prefix(size)), now: now, into: &result)
+            try parsePage(Array(bytes.dropFirst(offset).prefix(size)), into: &result)
             offset += size
         }
         return result
     }
 
-    private func parsePage(_ page: [UInt8], now: Date, into result: inout CookieReadResult) throws {
+    private func parsePage(_ page: [UInt8], into result: inout SealedCookies) throws {
         guard try be32(page, 0) == 0x0000_0100 else { throw CookieImportError.malformed("page header") }
         let count = try le32(page, 4).widened
         for index in 0..<count {
@@ -42,7 +43,7 @@ public struct SafariBinaryCookies {
                 secure: flags & 1 != 0, httpOnly: flags & 4 != 0,
                 expires: BrowserTime().cocoaExpiry(double(record, 40)), created: BrowserTime().cocoa(double(record, 48))
             )
-            if cookie.isExpired(at: now) { result.expired += 1 } else { result.cookies.append(cookie) }
+            result.cookies.append(SealedCookie(cookie: cookie))
         }
     }
 

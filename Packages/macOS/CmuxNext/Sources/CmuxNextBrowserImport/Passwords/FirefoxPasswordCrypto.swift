@@ -39,21 +39,11 @@ public struct FirefoxPasswordCrypto: Sendable {
     /// Master keys by their CKA_ID (`nssPrivate.a102`), which each login blob names.
     private let keys: [[UInt8]: SecretBytes]
 
-    /// Opens `key4.db` (a private copy) with `primaryPassword` (nil: none).
-    init(key4: SQLiteSnapshot, primaryPassword: SecretBytes?) throws(Failure) {
+    /// Opens `key4.db`'s sealed keys (read by the sandboxed import service) with `primaryPassword` (nil: none).
+    init(keyStore: FirefoxKeyStore, primaryPassword: SecretBytes?) throws(Failure) {
         let primary = primaryPassword ?? SecretBytes(capacity: 0) { _ in 0 }
-        var salt: [UInt8]?
-        var checkBlob: [UInt8]?
-        do {
-            try key4.query("SELECT item1, item2 FROM metaData WHERE id = 'password'") { row in
-                salt = row.data(0).map { Array($0) }
-                checkBlob = row.data(1).map { Array($0) }
-                return false
-            }
-        } catch {
-            throw .malformed
-        }
-        guard let salt, let checkBlob else { throw .malformed }
+        let salt = Array(keyStore.globalSalt)
+        let checkBlob = Array(keyStore.passwordCheck)
         // No primary password (or an empty one) that fails means the profile has one; a given one that fails is wrong.
         let refusal: Failure = (primaryPassword?.isEmpty ?? true) ? .primaryPasswordNeeded : .wrongPrimaryPassword
         let opened: SecretBytes
@@ -64,19 +54,10 @@ public struct FirefoxPasswordCrypto: Sendable {
         }
         guard opened.starts(with: Self.check) else { throw refusal }
 
-        var sealed: [([UInt8], [UInt8])] = []
-        do {
-            try key4.query("SELECT a11, a102 FROM nssPrivate") { row in
-                if let a11 = row.data(0), let a102 = row.data(1) { sealed.append((Array(a11), Array(a102))) }
-                return true
-            }
-        } catch {
-            throw .malformed
-        }
         var keys: [[UInt8]: SecretBytes] = [:]
-        for (a11, id) in sealed {
-            guard let key = try? Self.openPBE(a11, globalSalt: salt, password: primary), !key.isEmpty else { continue }
-            keys[id] = key
+        for sealed in keyStore.keys {
+            guard let key = try? Self.openPBE(Array(sealed.sealed), globalSalt: salt, password: primary), !key.isEmpty else { continue }
+            keys[Array(sealed.id)] = key
         }
         guard !keys.isEmpty else { throw .malformed }
         self.keys = keys

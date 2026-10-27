@@ -13,10 +13,9 @@ public actor BrowserImporter {
     private let reader: any ProfileDataReading
 
     /// `cookies` or `passwords` nil: that kind is skipped (no store to write to). `reader` parses the
-    /// bookmarks, history and open tabs: in this process, or in the sandboxed import service.
+    /// other kinds' files: the App's is the sandboxed import service (plans/cmux-next/rule-of-2.md).
     public init(provisioning: any BrowserProfileProvisioning = DefaultProfileOnly(), store: ImportedDataStore? = nil,
-                cookies: CookieImporter? = nil, passwords: PasswordImporter? = nil,
-                reader: any ProfileDataReading = InProcessProfileReader()) {
+                cookies: CookieImporter? = nil, passwords: PasswordImporter? = nil, reader: any ProfileDataReading) {
         self.provisioning = provisioning
         self.store = store
         self.cookies = cookies
@@ -121,64 +120,42 @@ public actor BrowserImporter {
         return record
     }
 
+    /// Reads one kind through `reader` (the sandboxed import service), except Safari's search engine,
+    /// a Mac setting rather than a file.
     private func read(_ kind: ImportDataKind, from profile: BrowserSourceProfile, historyLimit: Int, into batch: inout ImportBatch) async throws {
-        switch kind {
-        case .bookmarks:
-            let read = try await reader.bookmarks(profile)
-            batch.bookmarks = read.items
-            batch.skippedBookmarks = read.skipped
-            return
-        case .history:
-            guard let file = profile.historyFile else { return }
-            let read = try await reader.history(profile.browser.family, file: file, limit: historyLimit)
-            batch.history = read.items
-            batch.skippedHistory = read.skipped
-            return
-        case .openTabs:
-            let read = try await reader.openTabs(profile)
-            batch.openTabs = read.items
-            batch.skippedOpenTabs = read.skipped
-            return
-        default:
-            break
-        }
         #if CMUX_NO_BROWSER_DATA_IMPORT || CMUX_NO_HISTORY_IMPORT
-        // The cx-f58x notary test builds read no other browser's history,
-        // tabs, extensions or bookmarks (CMUX_NO_HISTORY_IMPORT is the
-        // history-only notary bisect build); ProfileParseSpec.parse(at:)
-        // reads nothing there either.
+        // The cx-f58x notary test builds read no other browser's history, tabs, extensions or
+        // bookmarks, and list none of their folders (CMUX_NO_HISTORY_IMPORT is the history-only
+        // notary bisect build); the ProfileParseJob factories are compiled out the same way.
         return
         #else
         let path = profile.path
         switch (profile.browser.family, kind) {
+        case (_, .bookmarks):
+            let read = try await reader.bookmarks(profile)
+            batch.bookmarks = read.items
+            batch.skippedBookmarks = read.skipped
+        case (_, .history):
+            guard let file = profile.historyFile else { return }
+            let read = try await reader.history(profile.browser.family, file: file, limit: historyLimit)
+            batch.history = read.items
+            batch.skippedHistory = read.skipped
+        case (_, .openTabs):
+            let read = try await reader.openTabs(profile)
+            batch.openTabs = read.items
+            batch.skippedOpenTabs = read.skipped
         case (.chromium, .searchEngines):
-            batch.searchEngine = ChromiumSearchEngineReader().read(profile: path)
+            batch.searchEngine = await ProfileSearchEngine(reader: reader).chromium(profile: path)
         case (.chromium, .extensions):
-            batch.extensions = ChromiumExtensionsReader().read(profile: path)
+            batch.extensions = await ProfileExtensions(reader: reader).read(profile: path)
         case (.firefox, .searchEngines):
-            batch.searchEngine = FirefoxSearchEngineReader().read(profile: path)
+            batch.searchEngine = await ProfileSearchEngine(reader: reader).firefox(profile: path)
         case (.safari, .searchEngines):
             batch.searchEngine = SafariSearchEngineReader().read()
         default:
             return
         }
         #endif
-    }
-
-    /// One history database, newest pages first, with its family's reader, and the pages it left out.
-    public static func readHistory(_ family: BrowserFamily, file: URL, limit: Int) throws -> ImportRead<ImportedHistoryEntry> {
-        guard let job = ProfileParseJob.history(family, file: file, limit: limit) else { return ImportRead() }
-        guard case .history(let read) = try job.spec.parse(at: job.file) else { throw ProfileParseMismatch(format: job.spec.format) }
-        return read
-    }
-
-    /// One profile's bookmarks, read with the reader its registry row names
-    /// (engine family, not browser). Sources the reader cannot open throw;
-    /// private stores return nothing (their HTML export is the path).
-    public static func readBookmarks(_ profile: BrowserSourceProfile) throws -> ImportRead<ImportedBookmark> {
-        guard let job = ProfileParseJob.bookmarks(profile) else { return ImportRead() }
-        guard case .bookmarks(let read) = try job.spec.parse(at: job.file) else { throw ProfileParseMismatch(format: job.spec.format) }
-        return read
     }
 
     private static let placeholder = BrowserSourceProfile(browser: .chrome, directoryName: "", displayName: "",

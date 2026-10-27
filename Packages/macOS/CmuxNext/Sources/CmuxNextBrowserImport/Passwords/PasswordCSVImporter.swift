@@ -48,7 +48,7 @@ public struct PasswordCSVImporter: Sendable {
     }
 
     /// The whole file when it is at most `limit` bytes (an export archive's limit is larger).
-    static func read(_ file: URL, limit: Int) throws(Failure) -> SecretBytes {
+    package static func read(_ file: URL, limit: Int) throws(Failure) -> SecretBytes {
         // SAFETY: the path is a NUL-terminated copy Swift keeps alive for the call; open only reads it.
         let descriptor = unsafe open(file.path, O_RDONLY | O_CLOEXEC)
         guard descriptor >= 0 else { throw .unreadable }

@@ -1,5 +1,6 @@
 import CmuxFuzzSupport
 @testable import CmuxNextBrowserImport
+@testable import CmuxNextBrowserImportParsers
 import Foundation
 
 /// What every import reader promises for any input: it returns or throws its own error, and what it
@@ -80,7 +81,7 @@ struct ImportFuzzCases {
     static func safariCookies(_ data: Data) throws {
         let result: CookieReadResult
         do {
-            result = try SafariBinaryCookies().parse(data, now: now)
+            result = try SafariBinaryCookies().parse(data).opened(crypto: nil, now: now)
         } catch is CookieImportError {
             return
         }

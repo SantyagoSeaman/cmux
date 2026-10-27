@@ -1,4 +1,5 @@
 @testable import CmuxNextBrowserImport
+@testable import CmuxNextBrowserImportParsers
 import Foundation
 import Testing
 

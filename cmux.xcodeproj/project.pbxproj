@@ -8,9 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		CE7A00000000000000000015 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5001101 /* Assets.xcassets */; };
+		B1A902080000000000000005 /* cmux-browser-import.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = B1A902080000000000000004 /* cmux-browser-import.xpc */; };
 		CE7A00000000000000000012 /* CmuxNextApp in Frameworks */ = {isa = PBXBuildFile; productRef = CE7A00000000000000000014 /* CmuxNextApp */; };
+		B1A902080000000000000003 /* CmuxNextBrowserImportParsers in Frameworks */ = {isa = PBXBuildFile; productRef = B1A90208000000000000000C /* CmuxNextBrowserImportParsers */; };
 		CE7A00000000000000000019 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DA7A10CA710E000000000002 /* InfoPlist.xcstrings */; };
 		CE7A0000000000000000001D /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = A11CE0050000000000000001 /* LICENSE */; };
+		B1A902080000000000000002 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A902080000000000000001 /* main.swift */; };
 		CE7A00000000000000000002 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7A00000000000000000001 /* main.swift */; };
         C12681010000000000000001 /* TerminalPortalGeometryFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C12681010000000000000002 /* TerminalPortalGeometryFixture.swift */; };
 		CE7A0000000000000000001E /* THIRD_PARTY_LICENSES.md in Resources */ = {isa = PBXBuildFile; fileRef = A5002001 /* THIRD_PARTY_LICENSES.md */; };
@@ -22,20 +25,40 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		B1A90208000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A5001070 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B1A902080000000000000008;
+			remoteInfo = "cmux-browser-import";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		B1A90208000000000000000F /* Embed XPC Services */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (
+				B1A902080000000000000005 /* cmux-browser-import.xpc in Embed XPC Services */,
+			);
+			name = "Embed XPC Services";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		IC000002 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder; path = AppIcon.icon; sourceTree = "<group>"; };
 		A5001101 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B1A902080000000000000004 /* cmux-browser-import.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = "cmux-browser-import.xpc"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0DEC0DE0000000000000012 /* cmux-cua */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "cmux-cua"; path = "skills/cmux-cua"; sourceTree = SOURCE_ROOT; };
 		CE7A00000000000000000004 /* cmux-next.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "cmux-next.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		FEED0A00000000000000F006 /* feed-tui */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder; path = "feed-tui"; sourceTree = "<group>"; };
 		A5001017 /* ghostty.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ghostty.h; sourceTree = "<group>"; };
 		DA7A10CA710E000000000002 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		A11CE0050000000000000001 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = SOURCE_ROOT; };
+		B1A902080000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Packages/macOS/CmuxNext/Sources/CmuxNextBrowserImportService/Main/main.swift"; sourceTree = SOURCE_ROOT; };
 		CE7A00000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/main.swift"; sourceTree = SOURCE_ROOT; };
 		A9D9000000000000000F0016 /* markdown-viewer */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder; path = "markdown-viewer"; sourceTree = "<group>"; };
 		FEED0000000000000000F006 /* opencode-plugin.js */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.javascript; path = "opencode-plugin.js"; sourceTree = "<group>"; };
@@ -122,6 +145,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B1A902080000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1A902080000000000000003 /* CmuxNextBrowserImportParsers in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -134,6 +165,7 @@
 				A5001017 /* ghostty.h */,
 				A5001042 /* Products */,
 				CE7A00000000000000000021 /* App */,
+				B1A902080000000000000011 /* BrowserImportService */,
 			);
 			sourceTree = "<group>";
 		};
@@ -141,8 +173,17 @@
 			isa = PBXGroup;
 			children = (
 				CE7A00000000000000000004 /* cmux-next.app */,
+				B1A902080000000000000004 /* cmux-browser-import.xpc */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B1A902080000000000000011 /* BrowserImportService */ = {
+			isa = PBXGroup;
+			children = (
+				B1A902080000000000000001 /* main.swift */,
+			);
+			name = BrowserImportService;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -169,10 +210,13 @@
 				CE7A00000000000000000018 /* Bundle Ghostty resources */,
 				CE7A00000000000000000031 /* Bundle server helper */,
 				CE7A00000000000000000043 /* Bundle MediaRemote adapter */,
+				B1A90208000000000000000F /* Embed XPC Services */,
+				B1A902080000000000000010 /* Sign browser import service */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				B1A90208000000000000000E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				CE7A00000000000000000021 /* App */,
@@ -185,6 +229,25 @@
 			productName = "cmux-next";
 			productReference = CE7A00000000000000000004 /* cmux-next.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B1A902080000000000000008 /* cmux-browser-import */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B1A90208000000000000000B /* Build configuration list for PBXNativeTarget "cmux-browser-import" */;
+			buildPhases = (
+				B1A902080000000000000006 /* Sources */,
+				B1A902080000000000000007 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "cmux-browser-import";
+			packageProductDependencies = (
+				B1A90208000000000000000C /* CmuxNextBrowserImportParsers */,
+			);
+			productName = "cmux-browser-import";
+			productReference = B1A902080000000000000004 /* cmux-browser-import.xpc */;
+			productType = "com.apple.product-type.xpc-service";
 		};
 /* End PBXNativeTarget section */
 
@@ -234,6 +297,7 @@
 			projectRoot = "";
 			targets = (
 				CE7A00000000000000000005 /* cmux-next */,
+				B1A902080000000000000008 /* cmux-browser-import */,
 			);
 		};
 /* End PBXProject section */
@@ -829,6 +893,30 @@
 			shellPath = /bin/sh;
 			shellScript = "# The web bundles are build output (cx-vn5): scripts/reload.sh, CI and the nightly run\n# scripts/cmux-next/build-web-bundles.sh before xcodebuild. Refuse an app built without them.\n# Compile-only jobs that ship no app set CMUX_WEB_BUNDLES_OPTIONAL=1.\nstamp=\"${TARGET_TEMP_DIR}/verify-web-bundles.stamp\"\nrm -f \"$stamp\"\non_exit() { status=$?; if [ \"$status\" -eq 0 ]; then mkdir -p \"$(dirname \"$stamp\")\"; printf \"completed\\n\" > \"$stamp\"; fi; exit \"$status\"; }\ntrap on_exit EXIT\nif [ \"${CMUX_WEB_BUNDLES_OPTIONAL:-0}\" = 1 ]; then\n  echo \"note: CMUX_WEB_BUNDLES_OPTIONAL=1 (compile-only build): the web bundles are not verified\"\n  exit 0\nfi\nexec \"${SRCROOT}/scripts/cmux-next/build-web-bundles.sh\" --verify\n";
 		};
+		B1A902080000000000000010 /* Sign browser import service */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/scripts/cmux-next/sign-browser-import-service.sh",
+				"$(SRCROOT)/Packages/macOS/CmuxNext/Sources/CmuxNextBrowserImportService/Bundle/BrowserImportService.entitlements",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/XPCServices/cmux-browser-import.xpc/Contents/MacOS/cmux-browser-import",
+				"$(EXPANDED_CODE_SIGN_IDENTITY)",
+				"$(CODE_SIGNING_ALLOWED)",
+			);
+			name = "Sign browser import service";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_TEMP_DIR)/sign-browser-import-service.stamp",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/cmux-next/sign-browser-import-service.sh\" && touch \"${TARGET_TEMP_DIR}/sign-browser-import-service.stamp\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -840,9 +928,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B1A902080000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1A902080000000000000002 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		B1A90208000000000000000E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B1A902080000000000000008 /* cmux-browser-import */;
+			targetProxy = B1A90208000000000000000D /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
@@ -1018,6 +1119,47 @@
 			};
 			name = Release;
 		};
+		B1A902080000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Packages/macOS/CmuxNext/Sources/CmuxNextBrowserImportService/Bundle/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.cmuxterm.browser-import";
+				PRODUCT_NAME = "cmux-browser-import";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		B1A90208000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Packages/macOS/CmuxNext/Sources/CmuxNextBrowserImportService/Bundle/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.cmuxterm.browser-import";
+				PRODUCT_NAME = "cmux-browser-import";
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1039,6 +1181,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		B1A90208000000000000000B /* Build configuration list for PBXNativeTarget "cmux-browser-import" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1A902080000000000000009 /* Debug */,
+				B1A90208000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -1056,6 +1207,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CE7A00000000000000000013 /* XCLocalSwiftPackageReference "Packages/macOS/CmuxNext" */;
 			productName = CmuxNextApp;
+		};
+		B1A90208000000000000000C /* CmuxNextBrowserImportParsers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CE7A00000000000000000013 /* XCLocalSwiftPackageReference "Packages/macOS/CmuxNext" */;
+			productName = CmuxNextBrowserImportParsers;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

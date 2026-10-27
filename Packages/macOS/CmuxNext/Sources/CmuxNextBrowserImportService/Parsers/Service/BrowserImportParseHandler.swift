@@ -1,11 +1,11 @@
 public import CmuxNextBrowserImport
+public import CmuxNextBrowserImportService
 import CmuxNextCompat
 public import Foundation
 
-/// The service side of one parse: copies the files the app sent into a private folder, runs the
-/// same `ProfileParseSpec.parse(at:)` the in-process import runs, and answers with the values or a
-/// typed failure. It never throws and never traps on what it was sent; the folder goes when the
-/// reply is made.
+/// The service side of one parse: copies the files the app sent into a private folder, runs
+/// `ProfileParseSpec.parse(at:)`, and answers with the values or a typed failure. It never throws
+/// and never traps on what it was sent; the folder goes when the reply is made.
 public struct BrowserImportParseHandler: Sendable {
     /// Where each request's private folder is made: the service's own temporary folder (in its
     /// sandbox container).
@@ -38,6 +38,8 @@ public struct BrowserImportParseHandler: Sendable {
         }
         do {
             return .parsed(try spec.parse(at: file))
+        } catch let error as CookieImportError {
+            return .failed(.cookie(error))
         } catch {
             return .failed(.reader(String(String(describing: error).prefix(BrowserImportServiceFailure.maximumMessage))))
         }
