@@ -555,7 +555,8 @@ pub(super) fn subscribe_then_announce(
     span: &mut RequestSpan<'_>,
     writer: &MessageWriter,
 ) -> bool {
-    let result = handle_command_with_cancellation(mux, client, cmd, writer, CommandContext::default());
+    let result =
+        handle_command_with_cancellation(mux, client, cmd, writer, CommandContext::default());
     let subscribed = result.is_ok();
     let sent = span.reply(|| send(writer, id, result));
     if subscribed && let Some(service) = mux.cloud_conversations() {

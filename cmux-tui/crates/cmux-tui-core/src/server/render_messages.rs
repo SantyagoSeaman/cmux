@@ -573,7 +573,9 @@ pub(super) fn encode_browser_attach_update(
 ) -> EncodedBrowserAttachUpdate {
     [
         update.frame.map(|frame| writer.encode(&browser_frame_json(surface, &frame), stream)),
-        update.state.map(|state| writer.encode(&browser_state_message(surface, &state, false), stream)),
+        update
+            .state
+            .map(|state| writer.encode(&browser_state_message(surface, &state, false), stream)),
     ]
 }
 

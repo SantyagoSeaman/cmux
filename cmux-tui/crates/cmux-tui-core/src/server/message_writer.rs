@@ -91,7 +91,13 @@ pub(super) struct OutboundStream {
 impl OutboundStream {
     #[cfg(test)]
     pub(super) fn new(id: u64, overflow_text: Arc<BudgetedText>) -> Self {
-        Self::with_sequence(id, overflow_text.into(), false, StreamLane::Bulk, StreamFraming::LEGACY)
+        Self::with_sequence(
+            id,
+            overflow_text.into(),
+            false,
+            StreamLane::Bulk,
+            StreamFraming::LEGACY,
+        )
     }
 
     pub(super) fn with_sequence(

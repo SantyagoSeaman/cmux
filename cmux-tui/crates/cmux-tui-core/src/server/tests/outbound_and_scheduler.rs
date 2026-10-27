@@ -1181,7 +1181,14 @@ fn clear_history_waits_for_its_surfaces_earlier_stream_input_and_nothing_else() 
             order,
         });
     };
-    queue(&mut state, 1, Command::ClearHistory(terminal_io_wire::ClearHistoryParams { surface: 1, fallback_key: None }));
+    queue(
+        &mut state,
+        1,
+        Command::ClearHistory(terminal_io_wire::ClearHistoryParams {
+            surface: 1,
+            fallback_key: None,
+        }),
+    );
     queue(&mut state, 2, Command::ReadScreen(terminal_io_wire::ReadScreenParams { surface: 1 }));
     queue(&mut state, 3, Command::ReadScreen(terminal_io_wire::ReadScreenParams { surface: 2 }));
     assert_eq!(
@@ -1232,10 +1239,18 @@ fn a_blocked_send_on_one_surface_delays_no_other_surfaces_close_or_keys() {
             order,
         });
     };
-    queue(&mut state, 1, serde_json::from_value(json!({"cmd": "close-surface", "surface": 1})).unwrap());
+    queue(
+        &mut state,
+        1,
+        serde_json::from_value(json!({"cmd": "close-surface", "surface": 1})).unwrap(),
+    );
     queue(&mut state, 2, Command::ListWorkspaces);
     queue(&mut state, 3, Command::ReadScreen(terminal_io_wire::ReadScreenParams { surface: 1 }));
-    queue(&mut state, 4, serde_json::from_value(json!({"cmd": "close-surface", "surface": 2})).unwrap());
+    queue(
+        &mut state,
+        4,
+        serde_json::from_value(json!({"cmd": "close-surface", "surface": 2})).unwrap(),
+    );
     // A key to surface 2, on its own stream, after all of them.
     let key = scheduler
         .take_order_ticket(&mut state, RequestOrder::Surface(2), OrderLane::Stream)

@@ -68,11 +68,11 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::render_messages::snapshot_frames::SnapshotEvent;
-use super::terminal_io_wire::{AttachSurfaceParams, SnapshotRequestParams, wire_usize};
 use super::attach_frames::{
     ClientStreamId, FrameKind, StreamFraming, TERMINAL_OUTPUT_RING_CAPABILITY,
 };
+use super::render_messages::snapshot_frames::SnapshotEvent;
+use super::terminal_io_wire::{AttachSurfaceParams, SnapshotRequestParams, wire_usize};
 use super::{
     AttachWorkerCommit, MarkedClientAttach, MessageWriter, OutboundStream,
     commit_client_attach_and_start_worker, detach_committed_attach, get_surface,
@@ -654,7 +654,14 @@ impl SnapshotWorker {
         let (surface, generation, end) = (self.surface_id, self.generation, self.offset);
         if self.outbound_stream.framing.frame_stream().is_none() {
             let flow = frame.flow();
-            return self.send(&output_json(surface, output, generation, end, flow, colors.as_ref()));
+            return self.send(&output_json(
+                surface,
+                output,
+                generation,
+                end,
+                flow,
+                colors.as_ref(),
+            ));
         }
         // Frames: the bytes, then the colors that apply after them.
         self.sent(self.writer.send_output_frames(output, start, &self.outbound_stream))

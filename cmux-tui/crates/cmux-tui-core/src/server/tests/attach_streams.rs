@@ -108,9 +108,14 @@ fn current_api_revision() -> u32 {
 /// byte bridge (origin_gate.rs `classify_peer_process`), and a bridge is
 /// granted streams only. Call after the connection answered its first request.
 fn as_local_peers(mux: &Arc<Mux>) {
-    let clients: Vec<u64> = mux.control_clients.state.lock().unwrap().clients.keys().copied().collect();
+    let clients: Vec<u64> =
+        mux.control_clients.state.lock().unwrap().clients.keys().copied().collect();
     for client in clients {
-        origin_gate::set_peer_process_for_test(mux, client, crate::request_origin::PeerProcess::SameUser);
+        origin_gate::set_peer_process_for_test(
+            mux,
+            client,
+            crate::request_origin::PeerProcess::SameUser,
+        );
     }
 }
 

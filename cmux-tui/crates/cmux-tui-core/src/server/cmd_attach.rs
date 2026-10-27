@@ -401,17 +401,15 @@ pub(super) fn attach_surface(
                     RenderAttachFrame::Frame(frame) => {
                         writer.encode(&state.delta_message(surface_id, &frame), &outbound_stream)
                     }
-                    RenderAttachFrame::ScrollChanged { offset, at_bottom } => {
-                        writer.encode(
-                            &json!({
-                                "event": "scroll-changed",
-                                "surface": surface_id,
-                                "offset": offset,
-                                "at_bottom": at_bottom,
-                            }),
-                            &outbound_stream,
-                        )
-                    }
+                    RenderAttachFrame::ScrollChanged { offset, at_bottom } => writer.encode(
+                        &json!({
+                            "event": "scroll-changed",
+                            "surface": surface_id,
+                            "offset": offset,
+                            "at_bottom": at_bottom,
+                        }),
+                        &outbound_stream,
+                    ),
                 };
                 drop(item);
                 let send_result = writer.send_encoded_backpressured(encoded, &outbound_stream);

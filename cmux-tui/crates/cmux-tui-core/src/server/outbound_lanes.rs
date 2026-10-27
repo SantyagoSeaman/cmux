@@ -374,9 +374,7 @@ fn next_chunk(
     let last = end >= len;
     let chunk = chunk_header(header, rule, start, end, last);
     message.sent = end;
-    Some(chunk.map(|chunk| {
-        (OutboundItem::Chunk { header: chunk, text, range: start..end }, last)
-    }))
+    Some(chunk.map(|chunk| (OutboundItem::Chunk { header: chunk, text, range: start..end }, last)))
 }
 
 /// The header of the chunk carrying payload bytes `start..end`.

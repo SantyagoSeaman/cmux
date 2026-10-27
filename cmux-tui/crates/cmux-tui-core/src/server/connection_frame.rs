@@ -291,7 +291,15 @@ pub(super) fn handle_request(
     request: Request,
     writer: &MessageWriter,
 ) -> bool {
-    handle_request_with_cancellation(mux, client, request, RequestArrival::now(), writer, None, None)
+    handle_request_with_cancellation(
+        mux,
+        client,
+        request,
+        RequestArrival::now(),
+        writer,
+        None,
+        None,
+    )
 }
 
 pub(super) fn handle_request_with_cancellation(
