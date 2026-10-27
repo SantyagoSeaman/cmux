@@ -213,10 +213,13 @@ impl Mux {
                 }),
                 true,
             )?;
-            // The commit rides the journal writer batch: state stays held
-            // across the receipt (as across a local commit's fsync), the
-            // connection pin is released for the writer. If the receipt is
-            // indeterminate, the next state holder applies the rename.
+            // Admitted with its decided receipt (admitThenReply): the reply
+            // does not wait for the journal writer, and a writer failure
+            // keeps the rename in memory (journal-degraded). With the feature
+            // off the commit rides the writer batch, state held across the
+            // receipt and the pin released for the writer; `settle` is that
+            // path's writer failure: if the receipt is indeterminate, the
+            // next state holder applies the rename.
             let settle: crate::workspace_registry::SettleState = {
                 let (key, name) = (key, name.clone());
                 Box::new(move |state: &mut State, receipt| {
@@ -235,13 +238,8 @@ impl Mux {
                     }
                 })
             };
-            let receipt = registry
-                .commit_registry_intent_with(
-                    crate::workspace_registry::RegistryIntent::Workspace(intent),
-                    || state.unpin(),
-                    Some(settle),
-                )?
-                .into_workspace()?;
+            let receipt =
+                registry.admit_workspace_commit_settled(intent, || state.unpin(), settle)?;
             let commit = receipt.commit;
             state.workspaces[index].name = name;
             state.workspaces[index].name_source = name_source;

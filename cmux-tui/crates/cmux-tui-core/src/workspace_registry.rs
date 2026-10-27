@@ -64,6 +64,7 @@ mod registry_intent;
 pub(crate) use registry_intent::{
     OwnedTransactionWrite, RegistryIntent, RegistryIntentSink, RegistryReceipt, SettleState,
 };
+mod decided_admit;
 mod terminal_commit_intent;
 pub(crate) use terminal_commit_intent::TerminalCommitIntent;
 mod workspace_admit;
@@ -3130,7 +3131,10 @@ impl WorkspaceRegistry {
     /// Commits one terminal state transition and its event in a single SQLite
     /// transaction. Callers reserve a stable id in `launching` before spawning
     /// a host, then advance it through `adopting`/`running` only after the host
-    /// record is durable. A tombstoned id can never be resurrected.
+    /// record is durable. A tombstoned id can never be resurrected. With
+    /// `admitThenReply` on, the transition replies at admit and the journal
+    /// writer commits it in admit order, so a later transition or tombstone
+    /// of the same id always lands after it (`decided_admit`).
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub fn commit_terminal(
@@ -3143,7 +3147,8 @@ impl WorkspaceRegistry {
         terminal: &RegistryTerminal,
         result: &Value,
     ) -> anyhow::Result<TerminalRegistryCommit> {
-        // Through the journal writer batch when it runs (terminal_commit_intent).
+        // Admitted with its decided receipt (decided_admit), or through the
+        // journal writer batch with the feature off (terminal_commit_intent).
         let intent = self.prepare_terminal_commit(
             mutation,
             fingerprint,
@@ -3153,7 +3158,7 @@ impl WorkspaceRegistry {
             terminal,
             result,
         )?;
-        self.commit_registry_intent(RegistryIntent::Terminal(intent))?.into_terminal()
+        self.admit_terminal_commit(intent)
     }
 
     /// Durably tombstones a terminal before the caller signals its host. This
