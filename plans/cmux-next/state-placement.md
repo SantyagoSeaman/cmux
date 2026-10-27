@@ -320,3 +320,245 @@ per wave.
   uses `cmux-`).
 - D3: who runs the classic wave export and with which read-only credential.
 - D4: search on MySQL FULLTEXT ngram now, accepting the unsharded-keyspace limit.
+
+## 9. App-side state: UserDefaults audit (Q11, chrome-parity p01-process-151, 2026-10-27)
+
+The rule of section 1 applies inside one Mac too: a fact lives where its single writer is. The
+cmux-tui daemon is the authority for the session (chrome-parity p01-process.md section 3); the app
+keeps only what draws its own windows. This is Chrome's split: per-window and per-install UI memory
+is browser-process local state (`chrome/browser/prefs/browser_prefs.cc` registers it in Local State),
+while what a profile decides (site permissions, protocol handlers) lives in the profile's
+Preferences, which every window of that profile reads.
+
+Query Q11: `rg -n 'UserDefaults' Packages/macOS/CmuxNext/Sources --glob '!**/*Tests*'` at
+perf/chrome-parity 78715dfbd1f gives **181 hits in 92 files** (the plan counted 172 in 88 at an
+older tip; the 9 new hits are the same kinds). Each hit has one class:
+
+- **view** (stays in the app): layout of this Mac's windows, one-time hints and dismissals,
+  recents, caches, a per-client "seen" cursor (the OSC 7501 contract makes "until seen" client
+  view state), the identity, update and consent state of this install, reads of macOS or other
+  apps' defaults, one-time imports into cmux-next.json.
+- **shared** (moves out of the app's defaults): a fact about a daemon object (tab, chat,
+  workspace), the ledger of a job whose work is daemon-side or must survive an app quit, a
+  marker that guards a daemon-side write, a configuration value that decides what an agent's
+  request does, or browser-profile data. "Moves to" says where: a daemon op or job, the
+  browser profile (with Q11b, task 238), or a `cmux-next.json` setting.
+
+Kinds: layout, hint, recents, cache, cursor, install, os, import, plumbing (a parameter or
+injection; it follows its store) for view; session, job, setting, account, profile, moved, plumbing
+for shared. A store whose file keeps both kinds of keys has the class of its shared key; its view
+key stays when the store is split (the row says which).
+
+Result: **141 view, 40 shared** (24 files). The app-side owner of a shared row is the
+OWNERS.md row of its file; only the sidebar has one (a590). The daemon side of every move is
+PL-daemon. Follow-ups, one per store (each a separate task, not done here):
+
+1. Agent chat marks: `AgentPriorityMarks` (pinned, read, snoozed, archived) and the pinned chats
+   of `SidebarChatHistory` (a590) become chat facts in the daemon, so the phone, the TUI and a
+   relaunched app show the same marks.
+2. Tab facts: `AgentTabs` outside adoptions and `ProxiedBrowserTabs` become tab fields in the
+   daemon.
+3. Home pins: `HomePinStore` keeps only rows the owner's `home-inbox` does not list; drop it when
+   the inbox lists Cloud rows.
+4. Daemon-side markers: `HomeDock` (dock takes tabs, placeholder check) and `UpdateFeedPosting`
+   (posted version) move to the data they guard; the Feed post gets an idempotency key.
+5. Jobs that must survive an app quit: the Cloud move ledger (`CloudMovedChats`,
+   `CloudMoveRetries`, `CloudMoveSetup.ledger`, `DebugCloudMove`), Hosted Chief copy and create
+   ledgers (`HostedChiefLedger`, `HomeCloudChiefs` created-here), and `CloudHostReplicaFollower`
+   (published user, purge asked) become daemon jobs (the p01-process 239 pattern).
+6. Settings outside cmux-next.json: `cloud.askBeforeAgentCreate`, Cloud move "Always" folders,
+   `home.chief.choice`, the Chief views fleet URL, and the selected Cloud team
+   (`cmux.auth.selectedTeamID`) become settings or daemon account state that the daemon reads.
+7. Browser profile: `BrowserExternalApps` per-site schemes move with the profile (Q11b, task
+   238), as Chrome keeps `protocol_handler.allowed_origin_protocol_pairs` in the profile
+   (`chrome/browser/external_protocol/external_protocol_handler.cc`).
+8. Done already: palette usage is a daemon store (`DaemonPaletteUsageStore`); the four
+   `FrecencyPersistence` rows, `PaletteController` and `PaletteUsageLegacyHistory` are its fallback
+   and legacy import. Delete them when every supported daemon has the store.
+
+Line numbers are at 78715dfbd1f; re-run the query to find a row after the code moves.
+
+<!-- q11: 181 hits, 92 files, 40 shared -->
+| # | Hit (APP/...:line) | Class | Kind | What it keeps | Moves to | Follow-up owner |
+|---|---|---|---|---|---|---|
+| 1 | `CmuxNextAgentLanes/AgentPriorityMarks.swift:40` | shared | session | `cmux.next.sidebar.priorityMarks`: pinned, read, snoozed, archived marks on agent chats; acpmux already hides archived chats, the phone and the TUI should show the same marks | daemon op | Performance Lead (no OWNERS row) |
+| 2 | `CmuxNextAgentLanes/AgentPriorityMarks.swift:44` | shared | session | `cmux.next.sidebar.priorityMarks`: pinned, read, snoozed, archived marks on agent chats; acpmux already hides archived chats, the phone and the TUI should show the same marks | daemon op | Performance Lead (no OWNERS row) |
+| 3 | `CmuxNextAgentLanes/ChiefSidebar.swift:62` | view | layout | `sidebar.chief.showsIdleSubagents` toggle | stays | - |
+| 4 | `CmuxNextAgentLanes/ChiefSidebar.swift:63` | view | layout | `sidebar.chief.showsIdleSubagents` toggle | stays | - |
+| 5 | `CmuxNextAgentLanes/RemoteMachinesSidebar.swift:91` | view | layout | `sidebar.remoteMachines.expanded` rows | stays | - |
+| 6 | `CmuxNextAgentLanes/RemoteMachinesSidebar.swift:92` | view | layout | `sidebar.remoteMachines.expanded` rows | stays | - |
+| 7 | `CmuxNextApp/AgentTabs.swift:187` | shared | session | `cmux.agent-tabs.outside-adoptions`: outside chat to the tab that resumes it; the tab is a daemon object, so the CLI, TUI and a relaunched app must resolve the same tab | daemon op | Performance Lead (no OWNERS row) |
+| 8 | `CmuxNextApp/AgentTabs.swift:239` | shared | session | `cmux.agent-tabs.outside-adoptions`: outside chat to the tab that resumes it; the tab is a daemon object, so the CLI, TUI and a relaunched app must resolve the same tab | daemon op | Performance Lead (no OWNERS row) |
+| 9 | `CmuxNextApp/AppServices.swift:281` | view | plumbing | `rightSidebarDefaults` injected into RightSidebarModel | stays | - |
+| 10 | `CmuxNextApp/BrowserHost/AppBrowserHost.swift:210` | view | install | `cmux.next.browserHost.installID` | stays | - |
+| 11 | `CmuxNextApp/Cloud/CloudMoveAsks.swift:42` | shared | setting | `cmux.cloud.moveAlwaysFolders` (Always move this folder) decides moves an agent asks for; `cmux.cloud.moveUnfinishedDismissed` is view and stays when split | cmux-next.json | Performance Lead (no OWNERS row) |
+| 12 | `CmuxNextApp/Cloud/CloudMoveSetup.swift:18` | shared | plumbing | `ledger` defaults of CloudMovedChats, CloudMoveAsks, CloudMoveRetries | with its store | Performance Lead (no OWNERS row) |
+| 13 | `CmuxNextApp/Cloud/CloudMovedChats.swift:44` | shared | job | `cmux.cloud.movedChats`: ledger of Move to Cloud for Bring Back Local; belongs with the move job | daemon job | Performance Lead (no OWNERS row) |
+| 14 | `CmuxNextApp/Cloud/CloudService.swift:375` | shared | setting | `cloud.askBeforeAgentCreate`: gates machine creates an agent asks for; a defaults-only switch outside cmux-next.json | cmux-next.json | Performance Lead (no OWNERS row) |
+| 15 | `CmuxNextApp/CmuxApplication.swift:221` | view | os | `NSApplicationCrashOnExceptions` AppKit process flag | stays | - |
+| 16 | `CmuxNextApp/Control/DebugCloudMove.swift:136` | shared | plumbing | debug seeding of the Cloud move ledger (follows CloudMovedChats) | with its store | Performance Lead (no OWNERS row) |
+| 17 | `CmuxNextApp/Control/DebugCrashes.swift:98` | view | os | reads `NSApplicationCrashOnExceptions` | stays | - |
+| 18 | `CmuxNextApp/Crash/CrashOnExceptions.swift:22` | view | os | registers `NSApplicationCrashOnExceptions` | stays | - |
+| 19 | `CmuxNextApp/Crash/CrashReporter+Launch.swift:22` | view | install | crash-report consent read at launch | stays | - |
+| 20 | `CmuxNextApp/Feed/UpdateFeedPosting.swift:15` | shared | job | `cmux.feed.updateCard.postedVersion` guards a write to the daemon's Feed; replace with an idempotency key on the post | daemon job | Performance Lead (no OWNERS row) |
+| 21 | `CmuxNextApp/Feed/UpdateFeedPosting.swift:71` | shared | job | `cmux.feed.updateCard.postedVersion` guards a write to the daemon's Feed; replace with an idempotency key on the post | daemon job | Performance Lead (no OWNERS row) |
+| 22 | `CmuxNextApp/HangReports/HangReportsController.swift:57` | view | install | `cmux.next.hangReports.asked`, `.consentedAt` (consent of this install) | stays | - |
+| 23 | `CmuxNextApp/HangReports/HangReportsController.swift:80` | view | install | `cmux.next.hangReports.asked`, `.consentedAt` (consent of this install) | stays | - |
+| 24 | `CmuxNextApp/HangReports/HangReportsController.swift:131` | view | install | `cmux.next.hangReports.asked`, `.consentedAt` (consent of this install) | stays | - |
+| 25 | `CmuxNextApp/HangReports/HangReportsController.swift:135` | view | install | `cmux.next.hangReports.asked`, `.consentedAt` (consent of this install) | stays | - |
+| 26 | `CmuxNextApp/HangReports/HangReportsController.swift:306` | view | install | `cmux.next.hangReports.asked`, `.consentedAt` (consent of this install) | stays | - |
+| 27 | `CmuxNextApp/HangReports/HangReportsController.swift:321` | view | install | `cmux.next.hangReports.asked`, `.consentedAt` (consent of this install) | stays | - |
+| 28 | `CmuxNextApp/HangReports/WatchdogReporting.swift:83` | view | install | hang-report consent read | stays | - |
+| 29 | `CmuxNextApp/NewTab/NewTabChoiceMemory.swift:23` | view | recents | `newTab.lastAgent`, `.lastPicks`, `.harnessHintDismissed`, `.startedProject` | stays | - |
+| 30 | `CmuxNextApp/NewTab/NewTabChoiceMemory.swift:28` | view | recents | `newTab.lastAgent`, `.lastPicks`, `.harnessHintDismissed`, `.startedProject` | stays | - |
+| 31 | `CmuxNextApp/NewTabWeather.swift:7` | view | cache | `cmux.newTab.weather` last reading | stays | - |
+| 32 | `CmuxNextApp/NewTabWeather.swift:30` | view | cache | `cmux.newTab.weather` last reading | stays | - |
+| 33 | `CmuxNextApp/NewTabWeather.swift:81` | view | cache | `cmux.newTab.weather` last reading | stays | - |
+| 34 | `CmuxNextApp/Notifications/NotificationCenterService+Lookup.swift:114` | view | cursor | `feed.handoff.since.<install>` watermark of this install | stays | - |
+| 35 | `CmuxNextApp/Notifications/NotificationCenterService+Lookup.swift:115` | view | cursor | `feed.handoff.since.<install>` watermark of this install | stays | - |
+| 36 | `CmuxNextApp/Notifications/NotificationCenterService+Lookup.swift:117` | view | cursor | `feed.handoff.since.<install>` watermark of this install | stays | - |
+| 37 | `CmuxNextApp/Onboarding/BrowserImportOfferService.swift:24` | view | hint | browser import offer | stays | - |
+| 38 | `CmuxNextApp/Onboarding/BrowserImportOfferService.swift:44` | view | hint | browser import offer | stays | - |
+| 39 | `CmuxNextApp/Onboarding/BrowserImportOfferState.swift:16` | view | hint | `browserImportOffer.state` | stays | - |
+| 40 | `CmuxNextApp/Onboarding/BrowserImportOfferState.swift:21` | view | hint | `browserImportOffer.state` | stays | - |
+| 41 | `CmuxNextApp/PaletteUsage/DaemonPaletteUsageStore.swift:49` | shared | moved | palette usage is in the daemon already; the local store is the fallback for a daemon without it | daemon (done) | Performance Lead (no OWNERS row) |
+| 42 | `CmuxNextApp/PaneFullWidthTabs.swift:13` | view | layout | `panes.fullWidthTab` | stays | - |
+| 43 | `CmuxNextApp/PaneFullWidthTabs.swift:16` | view | layout | `panes.fullWidthTab` | stays | - |
+| 44 | `CmuxNextApp/PaneTabBars.swift:14` | view | layout | `panes.tabBar` | stays | - |
+| 45 | `CmuxNextApp/PaneTabBars.swift:18` | view | layout | `panes.tabBar` | stays | - |
+| 46 | `CmuxNextApp/QuickComposer/QuickComposerController.swift:46` | view | layout | `quickComposer.floatingChatSession` (the floating window's chat) | stays | - |
+| 47 | `CmuxNextApp/QuickComposer/QuickComposerController.swift:60` | view | layout | `quickComposer.floatingChatSession` (the floating window's chat) | stays | - |
+| 48 | `CmuxNextApp/RightSidebar/RightSidebarModel.swift:26` | view | layout | `rightSidebar.width`, `.visible`, `.mode` | stays | - |
+| 49 | `CmuxNextApp/RightSidebar/RightSidebarModel.swift:27` | view | layout | `rightSidebar.width`, `.visible`, `.mode` | stays | - |
+| 50 | `CmuxNextApp/RightSidebar/RightSidebarModel.swift:30` | view | layout | `rightSidebar.width`, `.visible`, `.mode` | stays | - |
+| 51 | `CmuxNextApp/ServerUpdates/ServerUpdatePresenter.swift:35` | view | hint | server notice snoozes (ServerUpdateSnoozeStore) | stays | - |
+| 52 | `CmuxNextApp/SidebarSections/SidebarLayoutService.swift:65` | view | hint | `cmux.next.sidebar.recentsOffered` (the layout itself is a daemon op already) | stays | - |
+| 53 | `CmuxNextApp/SidebarSections/SidebarLayoutService.swift:80` | view | hint | `cmux.next.sidebar.recentsOffered` (the layout itself is a daemon op already) | stays | - |
+| 54 | `CmuxNextApp/UpdaterService+App.swift:44` | view | install | What's New record | stays | - |
+| 55 | `CmuxNextApp/Viewers/CmuxPicker.swift:77` | view | hint | picker privacy explainer | stays | - |
+| 56 | `CmuxNextApp/Viewers/ViewerRecents.swift:42` | view | recents | `viewer.recents.v1` | stays | - |
+| 57 | `CmuxNextApp/Viewers/ViewerRecents.swift:47` | view | recents | `viewer.recents.v1` | stays | - |
+| 58 | `CmuxNextBridge/ProgramStatusSeen.swift:104` | view | cursor | `cmux.next.programStatusSeen.v1` (OSC 7501 contract: until seen is client view state) | stays | - |
+| 59 | `CmuxNextBridge/ProgramStatusSeen.swift:109` | view | cursor | `cmux.next.programStatusSeen.v1` (OSC 7501 contract: until seen is client view state) | stays | - |
+| 60 | `CmuxNextBrowser/CEF/CEFDevToolsLayout.swift:101` | view | layout | `CmuxNextBrowser.devToolsLayout` | stays | - |
+| 61 | `CmuxNextBrowser/CEF/CEFDevToolsLayout.swift:106` | view | layout | `CmuxNextBrowser.devToolsLayout` | stays | - |
+| 62 | `CmuxNextBrowser/Core/BrowserExternalApps.swift:27` | shared | profile | `CmuxNextBrowser.externalSchemes`: per-site external app permission; Chrome keeps it in the profile (`protocol_handler.allowed_origin_protocol_pairs`, chrome/browser/external_protocol/external_protocol_handler.cc); moves with the profile (Q11b, task 238) | daemon (browser profile) | Performance Lead (no OWNERS row) |
+| 63 | `CmuxNextBrowser/Core/BrowserExternalApps.swift:39` | shared | profile | `CmuxNextBrowser.externalSchemes`: per-site external app permission; Chrome keeps it in the profile (`protocol_handler.allowed_origin_protocol_pairs`, chrome/browser/external_protocol/external_protocol_handler.cc); moves with the profile (Q11b, task 238) | daemon (browser profile) | Performance Lead (no OWNERS row) |
+| 64 | `CmuxNextBrowser/UI/BrowserFitFrameView.swift:20` | view | hint | `cmux.next.browser.fitExplained` | stays | - |
+| 65 | `CmuxNextBrowser/UI/BrowserFitFrameView.swift:27` | view | hint | `cmux.next.browser.fitExplained` | stays | - |
+| 66 | `CmuxNextBrowser/UI/BrowserFitFrameView.swift:81` | view | hint | `cmux.next.browser.fitExplained` | stays | - |
+| 67 | `CmuxNextBrowser/UI/BrowserFitFrameView.swift:82` | view | hint | `cmux.next.browser.fitExplained` | stays | - |
+| 68 | `CmuxNextBrowserImport/Parsers/SafariSearchEngineReader.swift:11` | view | os | reads Safari's `NSPreferredWebServices` in the global domain | stays | - |
+| 69 | `CmuxNextBrowserImport/Sources/BrowserFolderGrants.swift:11` | view | install | security-scoped bookmarks of browser folders; only the app process that got the grant can resolve them | stays | - |
+| 70 | `CmuxNextBrowserImport/Sources/BrowserFolderGrants.swift:12` | view | install | security-scoped bookmarks of browser folders; only the app process that got the grant can resolve them | stays | - |
+| 71 | `CmuxNextBrowserImport/Sources/BrowserFolderGrants.swift:19` | view | install | security-scoped bookmarks of browser folders; only the app process that got the grant can resolve them | stays | - |
+| 72 | `CmuxNextChiefPetWiring/ChiefMascotPicks.swift:21` | view | layout | `home.chief.mascots` appearance | stays | - |
+| 73 | `CmuxNextChiefPetWiring/ChiefMascotPicks.swift:22` | view | layout | `home.chief.mascots` appearance | stays | - |
+| 74 | `CmuxNextChiefPetWiring/ChiefMascotPicks.swift:29` | view | layout | `home.chief.mascots` appearance | stays | - |
+| 75 | `CmuxNextChiefViews/ChiefViewsPageProvider.swift:44` | shared | setting | `cmuxNext.chiefViews.fleetURL`: a configured feed URL outside cmux-next.json | cmux-next.json | Performance Lead (no OWNERS row) |
+| 76 | `CmuxNextCloud/Auth/CloudAuth.swift:66` | shared | account | `cmux.auth.selectedTeamID` decides the team the daemon's Cloud ops act for; `cmux.auth.hasTokens` and `.cachedUser` are caches and stay | daemon op | Performance Lead (no OWNERS row) |
+| 77 | `CmuxNextCloud/Move/CloudMoveRetries.swift:62` | shared | job | `cmux.cloud.moveRetries`, `.bringBackRetries`: retries of Cloud moves | daemon job | Performance Lead (no OWNERS row) |
+| 78 | `CmuxNextCrashReporting/CrashReportingPolicy.swift:39` | view | install | `sendAnonymousTelemetry` consent | stays | - |
+| 79 | `CmuxNextCrashReporting/CrashReportingPolicy.swift:88` | view | install | `sendAnonymousTelemetry` consent | stays | - |
+| 80 | `CmuxNextDaemon/Connection/PaletteUsageLegacyHistory.swift:4` | shared | moved | reads the legacy `cmuxNext.palette.frecency.v1` plists to import them into the daemon | daemon (done) | Performance Lead (no OWNERS row) |
+| 81 | `CmuxNextDaemon/Launch/DaemonSocketMemory.swift:11` | view | cache | `cmuxNext.daemonSocket.<session>` launch cache | stays | - |
+| 82 | `CmuxNextDaemon/Launch/DaemonSocketMemory.swift:13` | view | cache | `cmuxNext.daemonSocket.<session>` launch cache | stays | - |
+| 83 | `CmuxNextDaemon/Launch/LaunchSnapshot.swift:127` | view | cache | `cmuxNext.launchSnapshotPath.<session>` launch cache | stays | - |
+| 84 | `CmuxNextDaemon/Launch/LaunchSnapshot.swift:129` | view | cache | `cmuxNext.launchSnapshotPath.<session>` launch cache | stays | - |
+| 85 | `CmuxNextDesign/WindowTitlebar.swift:19` | view | os | `AppleActionOnDoubleClick` | stays | - |
+| 86 | `CmuxNextFiles/FolderViewMemory.swift:28` | view | layout | `files.folderViews` | stays | - |
+| 87 | `CmuxNextFiles/FolderViewMemory.swift:33` | view | layout | `files.folderViews` | stays | - |
+| 88 | `CmuxNextFiles/SidebarModel.swift:16` | view | layout | `files.sidebar.favorites`, `.visible` | stays | - |
+| 89 | `CmuxNextFiles/SidebarModel.swift:26` | view | layout | `files.sidebar.favorites`, `.visible` | stays | - |
+| 90 | `CmuxNextFloating/ChiefPet/ChiefPetPanel.swift:46` | view | layout | pet panel origin (ChiefPetPlacement) | stays | - |
+| 91 | `CmuxNextFloating/ChiefPet/ChiefPetPlacement.swift:13` | view | layout | `chiefPet.origins` | stays | - |
+| 92 | `CmuxNextFloating/FloatingChatFrames.swift:14` | view | layout | `quickComposer.floatingChatFrames` | stays | - |
+| 93 | `CmuxNextFloating/FloatingChatFrames.swift:16` | view | layout | `quickComposer.floatingChatFrames` | stays | - |
+| 94 | `CmuxNextHangReports/BlockingReportSink.swift:118` | view | install | `cmux.next.blockingReports.lastSent`, `.daemonLastSent` rate limits | stays | - |
+| 95 | `CmuxNextHangReports/BlockingReportSink.swift:119` | view | install | `cmux.next.blockingReports.lastSent`, `.daemonLastSent` rate limits | stays | - |
+| 96 | `CmuxNextHangReports/BlockingReportSink.swift:127` | view | install | `cmux.next.blockingReports.lastSent`, `.daemonLastSent` rate limits | stays | - |
+| 97 | `CmuxNextHangReports/BlockingReportSink.swift:157` | view | install | `cmux.next.blockingReports.lastSent`, `.daemonLastSent` rate limits | stays | - |
+| 98 | `CmuxNextHangReports/DaemonSiteLedger.swift:69` | view | install | `cmux.next.blockingReports.daemonSites` report dedupe | stays | - |
+| 99 | `CmuxNextHangReports/DaemonSiteLedger.swift:74` | view | install | `cmux.next.blockingReports.daemonSites` report dedupe | stays | - |
+| 100 | `CmuxNextHangReports/InstallIdentity.swift:11` | view | install | `cmux.next.hangReports.installId` | stays | - |
+| 101 | `CmuxNextHangReports/InstallIdentity.swift:34` | view | install | `cmux.next.hangReports.installId` | stays | - |
+| 102 | `CmuxNextHome/Sidebar/HomeSidebarWidth.swift:31` | view | layout | Home list width per window | stays | - |
+| 103 | `CmuxNextHome/Sidebar/HomeSidebarWidth.swift:33` | view | layout | Home list width per window | stays | - |
+| 104 | `CmuxNextHomeEngine/Home/HomeSwitchKeysSource.swift:16` | view | hint | `home.firstRun.switchKeysHidden` | stays | - |
+| 105 | `CmuxNextHomeEngine/Home/HomeSwitchKeysSource.swift:22` | view | hint | `home.firstRun.switchKeysHidden` | stays | - |
+| 106 | `CmuxNextHomeEngine/HomeChiefModelRecents.swift:4` | view | recents | `home.chief.recentModels` | stays | - |
+| 107 | `CmuxNextHomeEngine/HomeChiefModelRecents.swift:10` | view | recents | `home.chief.recentModels` | stays | - |
+| 108 | `CmuxNextHomeEngine/HomeChiefModelRecents.swift:11` | view | recents | `home.chief.recentModels` | stays | - |
+| 109 | `CmuxNextHomeEngine/HomeChiefModelRecents.swift:15` | view | recents | `home.chief.recentModels` | stays | - |
+| 110 | `CmuxNextHomeEngine/HomeDock.swift:67` | shared | job | `cmuxNext.home.dockTakesTabs`, `.placeholderShellChecked`: one-time markers of the daemon's pinned dock; the marker belongs with the dock | daemon job | Performance Lead (no OWNERS row) |
+| 111 | `CmuxNextHomeEngine/HomeDock.swift:74` | shared | job | `cmuxNext.home.dockTakesTabs`, `.placeholderShellChecked`: one-time markers of the daemon's pinned dock; the marker belongs with the dock | daemon job | Performance Lead (no OWNERS row) |
+| 112 | `CmuxNextHomeEngine/HomeSidebarSource.swift:15` | shared | session | `cmux.home.pins.<account>` and marks for rows the owner's `home-inbox` does not list yet; the owner keeps the rest | daemon op | Performance Lead (no OWNERS row) |
+| 113 | `CmuxNextHomeEngine/HomeSidebarSource.swift:17` | shared | session | `cmux.home.pins.<account>` and marks for rows the owner's `home-inbox` does not list yet; the owner keeps the rest | daemon op | Performance Lead (no OWNERS row) |
+| 114 | `CmuxNextHostedChief/HomeCloudChiefs+Tab.swift:124` | shared | job | Hosted Chiefs created here whose brain is not on yet, and creates sent without a reply; an app quit must not lose them | daemon job | Performance Lead (no OWNERS row) |
+| 115 | `CmuxNextHostedChief/HomeCloudChiefs+Tab.swift:128` | shared | job | Hosted Chiefs created here whose brain is not on yet, and creates sent without a reply; an app quit must not lose them | daemon job | Performance Lead (no OWNERS row) |
+| 116 | `CmuxNextHostedChief/HomeCloudChiefs+Tab.swift:130` | shared | job | Hosted Chiefs created here whose brain is not on yet, and creates sent without a reply; an app quit must not lose them | daemon job | Performance Lead (no OWNERS row) |
+| 117 | `CmuxNextHostedChief/HostedChiefLedger.swift:11` | shared | job | `home.chief.hosted.*` copy steps into a Hosted Chief | daemon job | Performance Lead (no OWNERS row) |
+| 118 | `CmuxNextHostedChief/HostedChiefModels.swift:107` | shared | setting | `home.chief.choice`: which Chief answers (hosted or this Mac) | cmux-next.json | Performance Lead (no OWNERS row) |
+| 119 | `CmuxNextHostedChief/HostedChiefModels.swift:111` | shared | setting | `home.chief.choice`: which Chief answers (hosted or this Mac) | cmux-next.json | Performance Lead (no OWNERS row) |
+| 120 | `CmuxNextImportCards/ImportSuggestionsCenter.swift:39` | view | hint | import suggestion cards | stays | - |
+| 121 | `CmuxNextImportCards/ImportSuggestionsCenter.swift:49` | view | hint | import suggestion cards | stays | - |
+| 122 | `CmuxNextImportSuggestions/ImportSuggestionState.swift:126` | view | hint | `importSuggestions.state` | stays | - |
+| 123 | `CmuxNextImportSuggestions/ImportSuggestionState.swift:132` | view | hint | `importSuggestions.state` | stays | - |
+| 124 | `CmuxNextOnboarding/System/BrowserFolderAccess.swift:16` | view | plumbing | BrowserFolderGrants store | stays | - |
+| 125 | `CmuxNextPalette/FolderPicker/PickerPrivacy.swift:71` | view | hint | `picker.privacyExplainerShown` | stays | - |
+| 126 | `CmuxNextPalette/FolderPicker/PickerPrivacy.swift:72` | view | hint | `picker.privacyExplainerShown` | stays | - |
+| 127 | `CmuxNextPalette/FolderPicker/PickerPrivacy.swift:75` | view | hint | `picker.privacyExplainerShown` | stays | - |
+| 128 | `CmuxNextPalette/FrecencyPersistence.swift:10` | shared | moved | `cmuxNext.palette.frecency.v1`: fallback of the daemon palette usage store | daemon (done) | Performance Lead (no OWNERS row) |
+| 129 | `CmuxNextPalette/FrecencyPersistence.swift:11` | shared | moved | `cmuxNext.palette.frecency.v1`: fallback of the daemon palette usage store | daemon (done) | Performance Lead (no OWNERS row) |
+| 130 | `CmuxNextPalette/FrecencyPersistence.swift:12` | shared | moved | `cmuxNext.palette.frecency.v1`: fallback of the daemon palette usage store | daemon (done) | Performance Lead (no OWNERS row) |
+| 131 | `CmuxNextPalette/FrecencyPersistence.swift:15` | shared | moved | `cmuxNext.palette.frecency.v1`: fallback of the daemon palette usage store | daemon (done) | Performance Lead (no OWNERS row) |
+| 132 | `CmuxNextPalette/PaletteController.swift:71` | shared | moved | frecency fallback (FrecencyPersistence) | daemon (done) | Performance Lead (no OWNERS row) |
+| 133 | `CmuxNextPhoneAccess/CloudHostReplicaFollower.swift:52` | shared | job | `cmux.cloudReplica.publishedUser.v1`, `.purgeAskedDaemon.v1`: what the daemon published and was asked to purge | daemon job | Performance Lead (no OWNERS row) |
+| 134 | `CmuxNextPhoneAccess/CloudHostReplicaFollower.swift:60` | shared | job | `cmux.cloudReplica.publishedUser.v1`, `.purgeAskedDaemon.v1`: what the daemon published and was asked to purge | daemon job | Performance Lead (no OWNERS row) |
+| 135 | `CmuxNextPhoneAccess/PhoneAccessFollower.swift:69` | view | import | `cmux.phoneAccess.migrated.v1` one-time settings migration | stays | - |
+| 136 | `CmuxNextRemoteLocalhostService/RemoteLocalhost/ProxiedBrowserTabs.swift:12` | shared | session | `cmux.next.browser.proxiedTabs`: tabs routed through the remote proxy; a tab fact | daemon op | Performance Lead (no OWNERS row) |
+| 137 | `CmuxNextRemoteLocalhostService/RemoteLocalhost/ProxiedBrowserTabs.swift:29` | shared | session | `cmux.next.browser.proxiedTabs`: tabs routed through the remote proxy; a tab fact | daemon op | Performance Lead (no OWNERS row) |
+| 138 | `CmuxNextRemoteLocalhostService/RemoteLocalhost/ProxiedBrowserTabs.swift:35` | shared | session | `cmux.next.browser.proxiedTabs`: tabs routed through the remote proxy; a tab fact | daemon op | Performance Lead (no OWNERS row) |
+| 139 | `CmuxNextSettings/ClassicPreferenceImport.swift:4` | view | import | reads classic domains; `classicPreferencesImported` | stays | - |
+| 140 | `CmuxNextSettings/ClassicPreferenceImport.swift:13` | view | import | reads classic domains; `classicPreferencesImported` | stays | - |
+| 141 | `CmuxNextSettings/ClassicPreferenceImport.swift:35` | view | import | reads classic domains; `classicPreferencesImported` | stays | - |
+| 142 | `CmuxNextSettings/ClassicPreferenceImport.swift:50` | view | import | reads classic domains; `classicPreferencesImported` | stays | - |
+| 143 | `CmuxNextSettings/ClassicPreferenceImport.swift:52` | view | import | reads classic domains; `classicPreferencesImported` | stays | - |
+| 144 | `CmuxNextSettings/ClassicPreferenceImport.swift:61` | view | import | reads classic domains; `classicPreferencesImported` | stays | - |
+| 145 | `CmuxNextSettings/ClassicShortcutImport.swift:21` | view | import | reads classic domains; `classicShortcutsImported` | stays | - |
+| 146 | `CmuxNextSettings/ClassicShortcutImport.swift:91` | view | import | reads classic domains; `classicShortcutsImported` | stays | - |
+| 147 | `CmuxNextSettings/ClassicShortcutImport.swift:93` | view | import | reads classic domains; `classicShortcutsImported` | stays | - |
+| 148 | `CmuxNextSettings/ClassicShortcutImport.swift:103` | view | import | reads classic domains; `classicShortcutsImported` | stays | - |
+| 149 | `CmuxNextSettings/Managed/ManagedPreferences.swift:30` | view | os | MDM domain `com.manaflow.cmux` | stays | - |
+| 150 | `CmuxNextSettings/RecentFonts.swift:11` | view | recents | `cmuxNext.recentFonts` | stays | - |
+| 151 | `CmuxNextSettings/RecentFonts.swift:13` | view | recents | `cmuxNext.recentFonts` | stays | - |
+| 152 | `CmuxNextSettings/SettingsDiagnosticToasts.swift:29` | view | hint | `settings.diagnosticNotices.announced` | stays | - |
+| 153 | `CmuxNextSettings/SettingsDiagnosticToasts.swift:38` | view | hint | `settings.diagnosticNotices.announced` | stays | - |
+| 154 | `CmuxNextSidebar/Model/SidebarChatHistory.swift:100` | shared | session | `cmux.next.sidebar.sessionTree.pinnedChats` (a pin is a chat fact); `.earlierFolded` is view and stays when split | daemon op | a590 |
+| 155 | `CmuxNextSidebar/Model/SidebarChatHistory.swift:106` | shared | session | `cmux.next.sidebar.sessionTree.pinnedChats` (a pin is a chat fact); `.earlierFolded` is view and stays when split | daemon op | a590 |
+| 156 | `CmuxNextSidebar/Model/SidebarCollapsedSections.swift:9` | view | layout | `cmux.next.sidebar.collapsedSections` | stays | - |
+| 157 | `CmuxNextSidebar/Model/SidebarCollapsedSections.swift:11` | view | layout | `cmux.next.sidebar.collapsedSections` | stays | - |
+| 158 | `CmuxNextSidebar/Model/SidebarLookedStore.swift:16` | view | cursor | `cmux.next.sidebar.lastLooked` (since-looked cursor of this Mac) | stays | - |
+| 159 | `CmuxNextSidebar/Model/SidebarLookedStore.swift:28` | view | cursor | `cmux.next.sidebar.lastLooked` (since-looked cursor of this Mac) | stays | - |
+| 160 | `CmuxNextSidebar/Model/SidebarSessionTree.swift:160` | view | layout | `sidebar.sessionTree.collapsed` | stays | - |
+| 161 | `CmuxNextSidebar/Model/SidebarSessionTree.swift:162` | view | layout | `sidebar.sessionTree.collapsed` | stays | - |
+| 162 | `CmuxNextTerminal/TerminalSurfaceView+Mouse.swift:144` | view | os | `com.apple.trackpad.forceClick` | stays | - |
+| 163 | `CmuxNextUpdater/ManagedUpdatePolicy.swift:20` | view | os | managed `DisableAutoUpdate` | stays | - |
+| 164 | `CmuxNextUpdater/ManagedUpdatePolicy.swift:27` | view | os | managed `DisableAutoUpdate` | stays | - |
+| 165 | `CmuxNextUpdater/PulledBuildWatch.swift:76` | view | install | `cmux.next.updates.pulledBuildWaiting` | stays | - |
+| 166 | `CmuxNextUpdater/PulledBuildWatch.swift:85` | view | install | `cmux.next.updates.pulledBuildWaiting` | stays | - |
+| 167 | `CmuxNextUpdater/ServerUpdates/ServerUpdateSnoozeStore.swift:3` | view | hint | `cmux.serverUpdates.snoozedUntil` | stays | - |
+| 168 | `CmuxNextUpdater/ServerUpdates/ServerUpdateSnoozeStore.swift:7` | view | hint | `cmux.serverUpdates.snoozedUntil` | stays | - |
+| 169 | `CmuxNextUpdater/ServerUpdates/ServerUpdateSnoozeStore.swift:10` | view | hint | `cmux.serverUpdates.snoozedUntil` | stays | - |
+| 170 | `CmuxNextUpdater/Tips/TipState.swift:3` | view | hint | `cmux.next.tips.*` | stays | - |
+| 171 | `CmuxNextUpdater/Tips/TipState.swift:37` | view | hint | `cmux.next.tips.*` | stays | - |
+| 172 | `CmuxNextUpdater/Tips/TipState.swift:52` | view | hint | `cmux.next.tips.*` | stays | - |
+| 173 | `CmuxNextUpdater/UpdateHarness.swift:79` | view | install | update test harness | stays | - |
+| 174 | `CmuxNextUpdater/UpdateSnooze.swift:5` | view | install | `cmux.next.updates.closedVersion`, `.remindAfter` | stays | - |
+| 175 | `CmuxNextUpdater/UpdateSnooze.swift:31` | view | install | `cmux.next.updates.closedVersion`, `.remindAfter` | stays | - |
+| 176 | `CmuxNextUpdater/UpdateSnooze.swift:36` | view | install | `cmux.next.updates.closedVersion`, `.remindAfter` | stays | - |
+| 177 | `CmuxNextUpdater/UpdaterService.swift:185` | view | install | updater state of this install | stays | - |
+| 178 | `CmuxNextUpdater/UpdaterService.swift:203` | view | install | updater state of this install | stays | - |
+| 179 | `CmuxNextUpdater/WhatsNew/WhatsNewCenter.swift:56` | view | install | `cmux.next.whatsNew.lastSeenVersion` | stays | - |
+| 180 | `CmuxNextUpdater/WhatsNew/WhatsNewTracker.swift:51` | view | install | `cmux.next.whatsNew.lastSeenVersion` | stays | - |
+| 181 | `CmuxNextUpdater/WhatsNew/WhatsNewTracker.swift:56` | view | install | `cmux.next.whatsNew.lastSeenVersion` | stays | - |
