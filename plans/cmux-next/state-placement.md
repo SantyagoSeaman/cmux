@@ -320,3 +320,170 @@ per wave.
   uses `cmux-`).
 - D3: who runs the classic wave export and with which read-only credential.
 - D4: search on MySQL FULLTEXT ngram now, accepting the unsharded-keyspace limit.
+
+## 10. App-side state: file store audit (Q11b, chrome-parity p01-process-238, 2026-10-27)
+
+This follows the UserDefaults audit (Q11, task 151, section 9) with the same rule: a fact lives
+where its single writer is. The cmux-tui daemon is the authority for the session; the app keeps
+only what draws its own windows and what belongs to this install. Chrome splits files the same
+way: per-install state is browser-process Local State (`chrome/browser/prefs/browser_prefs.cc`,
+the variations seed in `components/variations/variations_seed_store.cc`), while what a profile
+keeps (history, downloads, site settings, zoom, cookies) lives in that profile's folder, which
+every window of the profile reads (`chrome/browser/profiles/profile_impl.cc`).
+
+Query Q11b: `rg -l 'applicationSupportDirectory|\.applicationSupport|Application Support'
+Packages/macOS/CmuxNext/Sources --glob '!**/*Tests*'` at perf/chrome-parity 22726d00344 gives
+**89 files with 249 hits** (the plan counted 85 files at an older tip; 83 of the hits are
+`browser-sources.json`). One row per file, at its first hit. Each file has one class:
+
+- **view** (stays in the app): a cache the app can rebuild or that only speeds its own first frame,
+  a client outbox (prompts or drafts this app holds until their owner has them), this install's
+  identity, update, feature and diagnostic files, reads of macOS or other apps' files, one-time
+  imports, and path plumbing.
+- **shared** (not the app's to keep): a fact about a daemon object (workspace, chat), browser
+  profile data, a job ledger that guards a write another process owns, or a file another process
+  already owns that the app only locates. "Moves to" names where it goes; "done" means another
+  process is already the writer and the row stays as path code.
+
+Kinds: cache, layout, outbox, install, diagnostics, os, external, import, job, plumbing for view;
+profile, session, job, done, plumbing (a seam of a shared store; it follows that store) for shared.
+
+Result: **55 view, 34 shared** (17 move, 13 done, 4 plumbing). The owner column is the OWNERS.md
+row of the file ("Performance Lead (no OWNERS row)" otherwise); it owns the app side of a move.
+"Moves to" names the receiving owner. Follow-ups, one per store (each a separate task, not done
+here):
+
+1. Browser profile store in the daemon: profile records (`BrowserProfileService`, a browser
+   profile table in the home daemon's `profiles-v1`), page history (`BrowserVisitLog`, through
+   `HistoryService`), ended downloads (`BrowserDownloadHistory`), site settings
+   (`SiteSettingsRegistry`), zoom levels (`SiteZoomLevels`, both made by `BrowserSharedStores`),
+   cookie backups (`CookieBackups`, one implementation with the headless host's
+   `cmux-tui/crates/cmux-browser-host/src/cookie_backups.rs`) and imported browser data
+   (`ImportedDataStore` in `OnboardingService`). Chrome keeps each of these in the profile:
+   `components/history/core/browser/history_backend.cc` (history and downloads),
+   `components/content_settings/core/browser/host_content_settings_map.cc`,
+   `components/zoom/zoom_controller.cc` (HostZoomMap, `partition.per_host_zoom_levels`). Section 9
+   follow-up 7 (`BrowserExternalApps`) moves with it. Then the CLI, the TUI's browser and the phone
+   read the same profile as the app.
+2. Bookmarks: `BookmarkService` already uses the home daemon's `bookmarks-v1`; delete its
+   `bookmarks.json` fallback when every supported daemon serves the table.
+3. Chromium data root: `CEFProfileStorage` (`<bundle id>/Chromium`) becomes the Chromium host
+   process's own root, as `ChromiumHost` already is (p01-process host model, PL-cefhost).
+4. Agent folders and uploads: acpmux makes the agent-home folder of a folderless workspace
+   (`AgentHome`, read by `AgentTabs+AgentFolder`) and keeps local chat uploads (`AgentChatUploads`)
+   through `chat.upload`, as Cloud chats do, so a chat started from the CLI, TUI or phone gets the
+   same folder and files (PL-acpmux).
+5. Workspace facts: each workspace's background and tint (`WorkspaceBackgroundStore`) become
+   personal workspace rows in `profiles-v1`, where room and workspace themes already are; the
+   daemon marks every incognito workspace ephemeral, torn-off tabs included, and
+   `IncognitoWorkspaceLedger` is deleted.
+6. Login environment: the daemon captures and keeps the allowlisted login environment
+   (`LoginEnvironmentStore`), so a daemon the CLI or TUI starts gives terminals the same `PATH`.
+7. Classic migration: the ledger of imported classic workspaces (`ClassicMigrationRepository`,
+   written through `AppOnboardingServices+ClassicMigration`, read by `ImportSourceHelpers`) becomes
+   an idempotency key on the daemon's workspace import.
+8. Server fixes: `ServerFixLedger` merges into the privileged helper's `ServerFixPriorStore`, the
+   writer of the fixes, so there is one ledger.
+9. Done already: 13 rows locate files that the daemon, the link, `cmux server`, the Tasks owner, the
+   Chromium host, the cmux-cua helper or the privileged helper write.
+
+Not moved, on purpose: `TerminalThemeStore` (its own rule: per-terminal themes are per-client view
+state, `profiles-v1` has no per-terminal column), `ImportSuggestionsCenter`'s job ledger (an import
+reads other browsers' folders with the access the person gave this app, so the job runs here; its
+output is profile data, follow-up 1), and the two outboxes (`AgentPanePromptJournal`,
+`RecoveryDraftStore`), which hold what no other owner has yet.
+
+Line numbers are at 22726d00344; re-run the query to find a row after the code moves.
+
+<!-- q11b: 89 files, 249 hits, 34 shared -->
+| # | File (APP/...:first hit) | Hits | Class | Kind | What it keeps | Moves to | Owner |
+|---|---|---|---|---|---|---|---|
+| 1 | `CmuxNextAgentPane/AgentHome.swift:6` | 4 | shared | session | `cmux/agent-home/<workspace id>`: cwd and only root of agent chats in a folderless workspace, made 0700 and marked so acpmux trusts it | acpmux makes it when it starts the chat (PL-acpmux) | Performance Lead (no OWNERS row) |
+| 2 | `CmuxNextAgentPane/AgentPanePromptJournal.swift:38` | 2 | view | outbox | `<bundle id>/agent-pane-unsent-prompts.json`: prompts this app's pane sent that acpmux has not acknowledged | stays | Performance Lead (no OWNERS row) |
+| 3 | `CmuxNextApp/AgentChatUploads.swift:10` | 2 | shared | session | `cmux/Chat Uploads/sessions/<session>/...`: files attached to a local chat, deleted with the chat | acpmux `chat.upload` (PL-acpmux) | Performance Lead (no OWNERS row) |
+| 4 | `CmuxNextApp/AgentTabs+AgentFolder.swift:74` | 1 | shared | plumbing | reads `AgentHome.standard` once | with `AgentHome` | Performance Lead (no OWNERS row) |
+| 5 | `CmuxNextApp/Bookmarks/BookmarkService.swift:16` | 1 | shared | profile | `<bundle id>/BrowserProfiles/bookmarks.json`: fallback when the home daemon does not serve `bookmarks-v1` | delete the fallback; `bookmarks-v1` is the store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 6 | `CmuxNextApp/BrowserDownloadHistory.swift:25` | 2 | shared | profile | `<bundle id>/downloads.json`: ended downloads of the Downloads list | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 7 | `CmuxNextApp/BrowserProfiles/BrowserProfileService.swift:17` | 3 | shared | profile | `<bundle id>/BrowserProfiles/profiles.json`: profile records and the new-tab profile | browser profile table in `profiles-v1` (PL-daemon) | Performance Lead (no OWNERS row) |
+| 8 | `CmuxNextApp/ChromiumRuntimeService.swift:86` | 1 | view | plumbing | passes Application Support to `ChromiumRuntimeStore` | stays | Performance Lead (no OWNERS row) |
+| 9 | `CmuxNextApp/Crash/AppRunMarker.swift:123` | 2 | view | diagnostics | `cmux-next/<bundle id>/`: run marker of this app process (unclean exit) | stays | Performance Lead (no OWNERS row) |
+| 10 | `CmuxNextApp/Crash/CrashReporter+Launch.swift:224` | 1 | shared | done | locates the daemon's `cmux-tui/sessions` folder for owner crash reports | done (daemon) | Performance Lead (no OWNERS row) |
+| 11 | `CmuxNextApp/ErrorJournal/ErrorJournalService.swift:14` | 3 | view | diagnostics | `<bundle id>/errors`: this build's error journal | stays | Performance Lead (no OWNERS row) |
+| 12 | `CmuxNextApp/Handlers/SettingsHandlers.swift:77` | 1 | view | external | doc comment: Ghostty's config in Application Support | stays | Performance Lead (no OWNERS row) |
+| 13 | `CmuxNextApp/History/HistoryService.swift:15` | 1 | shared | plumbing | passes `<bundle id>` to each profile's `BrowserVisitLog` | with `BrowserVisitLog` | Performance Lead (no OWNERS row) |
+| 14 | `CmuxNextApp/Home/HomeService+ChiefMigration.swift:36` | 2 | view | import | one-time read of old Chiefs' folders | stays | Performance Lead (no OWNERS row) |
+| 15 | `CmuxNextApp/Onboarding/AppOnboardingServices+ClassicMigration.swift:32` | 3 | shared | job | `cmux-next/<bundle id>/classic-migration`: ledger of classic workspaces imported into the daemon session, and backups | idempotency key on the daemon's import (PL-daemon) | Performance Lead (no OWNERS row) |
+| 16 | `CmuxNextApp/Onboarding/OnboardingService.swift:43` | 3 | shared | profile | `<bundle id>/BrowserImport` (`ImportedDataStore`: imported history and bookmarks per source profile); classic migration folder seam | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 17 | `CmuxNextApp/Pages/Files/TableWidths/MarkdownTableWidthRepository.swift:6` | 3 | view | cache | `<bundle id>/MarkdownTableWidths`: copy of a file's `com.cmux.markdown.tables` attribute for volumes without attributes | stays | PL-webui |
+| 18 | `CmuxNextApp/Permissions/SystemPermissionProbe.swift:98` | 1 | view | os | opens `com.apple.TCC/TCC.db` to probe Full Disk Access | stays | Performance Lead (no OWNERS row) |
+| 19 | `CmuxNextApp/Server/LocalServerSource.swift:105` | 1 | shared | done | watches `cmux/server/roles/status.json`, written by `cmux server` | done (`cmux server`) | Performance Lead (no OWNERS row) |
+| 20 | `CmuxNextApp/Server/ServerFixLedger.swift:38` | 3 | shared | job | `cmux/server-fix-ledger/<helper label>.json`: system fixes the privileged helper applied, kept for revert | the helper's `ServerFixPriorStore` (Performance Lead) | Performance Lead (no OWNERS row) |
+| 21 | `CmuxNextApp/Server/ServerReachPlan.swift:115` | 2 | shared | done | locates the link's `link/config.json` (`cmux link init` writes it) | done (link) | Performance Lead (no OWNERS row) |
+| 22 | `CmuxNextApp/Settings/DebugSettingsService.swift:136` | 2 | view | install | `cmux/<tag or builds/key>/debug-tunables.json` | stays | Performance Lead (no OWNERS row) |
+| 23 | `CmuxNextApp/SidebarSnapshot/SidebarSnapshotFile.swift:39` | 1 | view | cache | sidebar snapshot for the first frame before the daemon answers; folder of small per-build files | stays | Performance Lead (no OWNERS row) |
+| 24 | `CmuxNextApp/Tasks/TasksPageService.swift:14` | 1 | shared | done | doc comment: the Tasks owner's socket | done (Tasks owner) | Performance Lead (no OWNERS row) |
+| 25 | `CmuxNextApp/Themes/TerminalThemeStore.swift:8` | 2 | view | layout | `<bundle id>/terminal-themes.json`: per-terminal themes, per-client by the file's own rule | stays | Performance Lead (no OWNERS row) |
+| 26 | `CmuxNextApp/Themes/WorkspaceBackgroundStore.swift:9` | 2 | shared | session | `<bundle id>/workspace-backgrounds.json` and `workspace-background-opacity.json`: each workspace's background and tint | personal workspace rows in `profiles-v1` (PL-daemon) | Performance Lead (no OWNERS row) |
+| 27 | `CmuxNextApp/Windows/IncognitoWorkspaceLedger.swift:49` | 2 | shared | session | `<bundle id>/incognito-workspaces.json`: incognito workspaces the daemon does not know as ephemeral (torn-off tabs) | daemon ephemeral flag, then delete (PL-daemon) | Performance Lead (no OWNERS row) |
+| 28 | `CmuxNextBrowser/CEF/CEFNativeMessaging.swift:7` | 4 | view | external | native messaging host folders (cmux's Chromium root, Chromium's and Chrome's) | stays | PL-cefhost |
+| 29 | `CmuxNextBrowser/CEF/CEFProfileStorage.swift:6` | 2 | shared | profile | `<bundle id>/Chromium`: Chromium's `root_cache_path` and each `Profile-<uuid>` | the Chromium host process's own root (PL-cefhost) | PL-cefhost |
+| 30 | `CmuxNextBrowser/CEF/ChromiumHost/ChromiumHostLaneSpawner.swift:20` | 1 | shared | done | `<bundle id>/ChromiumHost`: the host process's root | done (Chromium host) | PL-cefhost |
+| 31 | `CmuxNextBrowser/CEF/ChromiumHost/ChromiumHostPrototype.swift:83` | 2 | shared | done | `<bundle id>/ChromiumHost`: the host process's root | done (Chromium host) | PL-cefhost |
+| 32 | `CmuxNextBrowser/CEF/ChromiumUseRecord.swift:5` | 1 | view | cache | when this app last opened a Chromium tab (launch warmup decision) | stays | PL-cefhost |
+| 33 | `CmuxNextBrowser/Core/BrowserSharedStores.swift:65` | 1 | shared | plumbing | makes the site settings and zoom stores | with `SiteSettingsRegistry`, `SiteZoomLevels` | Performance Lead (no OWNERS row) |
+| 34 | `CmuxNextBrowser/Core/SiteZoomLevels.swift:21` | 2 | shared | profile | `<bundle id>/SiteZoom/<profile>.json`: per-site zoom | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 35 | `CmuxNextBrowserAutomation/CookieBackups.swift:12` | 3 | shared | profile | `<bundle id>/CookieBackups/<id>.bin`: encrypted cookie backups for automation restore | daemon browser profile store, one implementation with the headless host (PL-daemon) | Performance Lead (no OWNERS row) |
+| 36 | `CmuxNextBrowserCore/Core/BrowserDownloadTempFiles.swift:19` | 2 | view | job | `<bundle id>/download-temp-files.json`: `.cmuxdownload` files this process writes, for crash cleanup | stays with the download writer | Performance Lead (no OWNERS row) |
+| 37 | `CmuxNextBrowserCore/PageInfo/Model/SiteSettingsRegistry.swift:6` | 3 | shared | profile | `<bundle id>/SiteSettings/<profile>.json`: site permissions both engines share | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 38 | `CmuxNextBrowserImport/Resources/browser-sources.json:54` | 83 | view | external | other browsers' data folders, for import | stays | Performance Lead (no OWNERS row) |
+| 39 | `CmuxNextBrowserImport/Sources/ImportBrowser.swift:67` | 1 | view | external | default data folder of another browser | stays | Performance Lead (no OWNERS row) |
+| 40 | `CmuxNextChromiumRuntime/ChromiumRuntimeStore.swift:10` | 2 | view | install | `<bundle id>/ChromiumRuntime`: downloaded Chromium runtime packs | stays | Performance Lead (no OWNERS row) |
+| 41 | `CmuxNextCloud/Config/CloudConfiguration.swift:59` | 1 | view | install | `cmux/<bundle id>`: the old app's file-fallback token folder | stays | Performance Lead (no OWNERS row) |
+| 42 | `CmuxNextCloud/Tunnel/CloudPaths.swift:16` | 1 | view | install | `cmux/<bundle id>/cloud-next`: WireGuard key, device id and link client state of this install | stays | Performance Lead (no OWNERS row) |
+| 43 | `CmuxNextCodeRouter/Detection/ProviderDetector+ClaudeConfigured.swift:13` | 1 | view | external | Claude Code's managed settings | stays | Performance Lead (no OWNERS row) |
+| 44 | `CmuxNextCompat/BuildIdentity+AppNames.swift:102` | 1 | view | plumbing | path of a build's daemon state folder | stays | Performance Lead (no OWNERS row) |
+| 45 | `CmuxNextCompat/BuildIdentity.swift:169` | 1 | view | plumbing | path of a build's support folder | stays | Performance Lead (no OWNERS row) |
+| 46 | `CmuxNextCompat/Threading/CheckedFileManager.swift:229` | 1 | view | plumbing | doc comment of the checked `FileManager.url` | stays | Performance Lead (no OWNERS row) |
+| 47 | `CmuxNextComputerUse/ComputerUseHelperDaemon.swift:294` | 1 | shared | done | `cmux/cmux-cua/runtime/<scope>/state`: the cmux-cua helper's state | done (cmux-cua helper) | Performance Lead (no OWNERS row) |
+| 48 | `CmuxNextDaemon/Launch/CloudLinkLauncher.swift:75` | 2 | shared | done | the daemon state root the link gets as `--state-dir` | done (daemon) | Performance Lead (no OWNERS row) |
+| 49 | `CmuxNextDaemon/Launch/DaemonLauncher+Build.swift:14` | 1 | shared | done | a build's daemon session and state folder | done (daemon) | Performance Lead (no OWNERS row) |
+| 50 | `CmuxNextDaemon/Launch/DaemonLauncher.swift:156` | 7 | shared | done | `cmux/tags/<tag>/tui`: daemon state folders | done (daemon) | Performance Lead (no OWNERS row) |
+| 51 | `CmuxNextDaemon/Launch/LastAppCLIPointer.swift:6` | 2 | view | install | `cmux/last-app-cli`: the CLI of the app opened last, read by the dev shim | stays | Performance Lead (no OWNERS row) |
+| 52 | `CmuxNextDaemon/Launch/LegacyChannelSession.swift:8` | 3 | shared | done | picks the daemon's legacy state root for old channel sessions | done (daemon) | Performance Lead (no OWNERS row) |
+| 53 | `CmuxNextDaemon/Launch/LoginEnvironmentStore.swift:43` | 3 | shared | session | `cmux/login-environment.json`: allowlisted login environment given to the daemon and its terminals | daemon captures and keeps it (PL-daemon) | Performance Lead (no OWNERS row) |
+| 54 | `CmuxNextDesign/AppleWallpapers.swift:19` | 1 | view | os | macOS aerials folder | stays | Performance Lead (no OWNERS row) |
+| 55 | `CmuxNextDesign/BackdropArtDownloads.swift:8` | 3 | view | cache | `<bundle id>/Backgrounds`: downloaded art, named by SHA-256 | stays | Performance Lead (no OWNERS row) |
+| 56 | `CmuxNextDesignTokens/Quit/RecoveryDraftStore.swift:120` | 2 | view | outbox | `cmux/recovery`: unsaved drafts of this app's editors | stays | Performance Lead (no OWNERS row) |
+| 57 | `CmuxNextFeatures/FeatureRemoteStore.swift:9` | 2 | view | install | `<app folder>/features`: signed flags document, latest and last good | stays | PL-perf-lab |
+| 58 | `CmuxNextFeatures/FeatureSafeMode.swift:159` | 1 | view | install | crash streak file in `features` | stays | PL-perf-lab |
+| 59 | `CmuxNextFeatures/LowEntropySource.swift:79` | 1 | view | install | low-entropy value in `features` (Chrome: `components/metrics/entropy_state.cc`) | stays | PL-perf-lab |
+| 60 | `CmuxNextHangReports/HangReportStore.swift:4` | 1 | view | diagnostics | `<build>/HangReports` | stays | PL-telemetry |
+| 61 | `CmuxNextHistory/BrowserVisitLog.swift:51` | 1 | shared | profile | `<bundle id>/BrowserProfiles/<profile>/History.sqlite`: page history | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 62 | `CmuxNextImportCards/ImportSourceHelpers.swift:15` | 1 | shared | plumbing | reads the classic migration ledger to count what is left | with the classic migration ledger | Performance Lead (no OWNERS row) |
+| 63 | `CmuxNextImportCards/ImportSuggestionsCenter.swift:56` | 2 | view | job | `cmux-next/<bundle id>/import-jobs.json`: import jobs saved after each step for Resume | stays (reads with this app's folder access) | Performance Lead (no OWNERS row) |
+| 64 | `CmuxNextImportSuggestions/ImportScanner.swift:189` | 1 | view | external | Ghostty's config, to list it as in use | stays | Performance Lead (no OWNERS row) |
+| 65 | `CmuxNextMacScreen/MacScreenStore.swift:65` | 2 | view | cache | `<bundle id>/mac-screen.json`: this Mac's name as registered with the device hub (the authority) and devices' names as last seen | stays | Performance Lead (no OWNERS row) |
+| 66 | `CmuxNextMobile/MobileHost/MobileHostDeviceIdentity.swift:4` | 1 | view | install | `device-id` of this Mac for the phone service | stays | Performance Lead (no OWNERS row) |
+| 67 | `CmuxNextMobile/MobileHost/MobileHostStateDirectory.swift:3` | 2 | view | install | `<bundle id>/cmux-mobile-host`: device id and paired phones, written by the phone host this app runs | stays | Performance Lead (no OWNERS row) |
+| 68 | `CmuxNextMobileHost/IPhoneHostService+Wiring.swift:62` | 1 | view | plumbing | passes the state folder to the phone host | stays | Performance Lead (no OWNERS row) |
+| 69 | `CmuxNextOnboarding/Model/OnboardingStrings+Access.swift:25` | 1 | view | external | comment: Chrome's folder in the access step | stays | Performance Lead (no OWNERS row) |
+| 70 | `CmuxNextOnboarding/Steps/ImportAccessView.swift:68` | 1 | view | external | display path of a browser folder | stays | Performance Lead (no OWNERS row) |
+| 71 | `CmuxNextOnboarding/System/AgentProjectScan.swift:41` | 1 | view | external | onboarding scan of agent homes (cmux's agent-home among them) | stays | Performance Lead (no OWNERS row) |
+| 72 | `CmuxNextOnboarding/System/ClassicMigrationRepository.swift:22` | 1 | shared | job | the classic migration ledger and backups | idempotency key on the daemon's import (PL-daemon) | Performance Lead (no OWNERS row) |
+| 73 | `CmuxNextOnboarding/System/ClassicMigrationSourceFinder.swift:5` | 2 | view | import | finds classic's session file | stays | Performance Lead (no OWNERS row) |
+| 74 | `CmuxNextOnboarding/System/ClassicSessionImport.swift:52` | 2 | view | import | reads classic's newest snapshot | stays | Performance Lead (no OWNERS row) |
+| 75 | `CmuxNextPages/WebDevOverride.swift:9` | 1 | view | install | doc example: the developer's web overlay folder | stays | PL-webui |
+| 76 | `CmuxNextPhoneAccess/MobileHostService.swift:190` | 1 | view | install | the phone host's device keys and cache | stays | Performance Lead (no OWNERS row) |
+| 77 | `CmuxNextRemote/SSH/SSHMachineLink.swift:17` | 1 | view | install | `cmux/<bundle id>/ssh-next`: SSH client identity, known daemons, download cache | stays | Performance Lead (no OWNERS row) |
+| 78 | `CmuxNextScreenshots/ScreenshotTool.swift:69` | 3 | view | external | screenshot apps' settings and folders | stays | Performance Lead (no OWNERS row) |
+| 79 | `CmuxNextServerHelper/ServerFixPriorStore.swift:35` | 2 | shared | done | `/Library/Application Support/cmux/server-helper/<label>.json`, written by the privileged helper | done (privileged helper) | Performance Lead (no OWNERS row) |
+| 80 | `CmuxNextSettings/EditorImport/EditorSettingsSources.swift:37` | 1 | view | external | other editors' settings files | stays | Performance Lead (no OWNERS row) |
+| 81 | `CmuxNextSettings/EditorImport/ImportableEditor.swift:4` | 4 | view | external | doc comments: other editors' settings folders | stays | Performance Lead (no OWNERS row) |
+| 82 | `CmuxNextSettings/Managed/ManagedStatusReport.swift:69` | 1 | view | install | `cmux/managed-status*.json`: the MDM status report | stays | Performance Lead (no OWNERS row) |
+| 83 | `CmuxNextTasks/SocketTasksSource.swift:54` | 2 | shared | done | `cmux/tasks/<team>/tasks.sock`: the Tasks owner's socket | done (Tasks owner) | Performance Lead (no OWNERS row) |
+| 84 | `CmuxNextTerminal/GhosttyRuntime+ConfigFiles.swift:37` | 3 | view | external | Ghostty's config files | stays | PL-ghostty |
+| 85 | `CmuxNextTerminal/GhosttyRuntime+DefaultFiles.swift:6` | 9 | view | external | classic cmux's Ghostty layer, `<bundle id>/config.ghostty` | stays | PL-ghostty |
+| 86 | `CmuxNextUpdater/UpdaterService+Rollback.swift:35` | 1 | view | install | `cmux-next/<bundle id>/versions`: kept previous versions | stays | Performance Lead (no OWNERS row) |
+| 87 | `CmuxNextUpdater/WebUpdates/WebUpdateStore.swift:6` | 2 | view | install | `<bundle id>/web-updates`: web updates to serve | stays | Performance Lead (no OWNERS row) |
+| 88 | `CmuxNextUpdater/WhatsNew/WhatsNewLastUpdate.swift:38` | 3 | view | install | `cmux-next/<bundle id>/last-update.json`: the update record for What's New | stays | Performance Lead (no OWNERS row) |
+| 89 | `CmuxNextWakeups/FolderChanges.swift:9` | 1 | view | plumbing | doc comment: stand-in watch through Application Support | stays | Performance Lead |
