@@ -1,4 +1,5 @@
 import Foundation
+import os
 import CmuxNextCompat
 import class CmuxSafeConcurrency.OnceContinuation
 import enum CmuxSafeConcurrency.OnceContinuationError
@@ -39,19 +40,14 @@ nonisolated final class AcpmuxPaneSocket: NSObject, URLSessionWebSocketDelegate,
         var challengeRead = false
         var challenge: AcpmuxPersonChallenge?
         var challengeWaiters: [OnceContinuation<AcpmuxPersonChallenge?, OnceContinuationError>] = []
-        /// The last `_acpmux/visibility` handed to the outbound queue (``visibilityChanged(session:visible:)``).
-        var visibility: Visibility?
+        /// Per session, the last `_acpmux/visibility` state handed to the outbound queue on this
+        /// connection (``visibilityChanged(session:visible:)``): one entry per chat the pane showed on it.
+        var visibility: [String: Bool] = [:]
 
         /// A full flush waits: it goes even to a pane nobody can see (``pageWaits``).
         func backlogged(_ limits: AgentPaneTransport.Limits) -> Bool {
             inbox.count >= limits.maximumFramesPerFlush || inboxBytes >= limits.maximumBytesPerFlush
         }
-    }
-
-    /// Whether the pane shows a session, as acpmux last heard it on this connection.
-    private struct Visibility: Equatable, Sendable {
-        var session: String
-        var visible: Bool
     }
 
     private let request: URLRequest
@@ -68,8 +64,8 @@ nonisolated final class AcpmuxPaneSocket: NSObject, URLSessionWebSocketDelegate,
     private let state = Mutex(State())
     /// Checks the daemon's frames in passes, in order, while the receive loop goes on.
     private let inbound = DispatchQueue(label: "com.cmuxterm.app.next.agent-pane.inbound", qos: .userInitiated)
-    /// Makes and sends the host's own notifications after the caller's turn, in order. Nobody waits for them.
-    private let outbound = DispatchQueue(label: "com.cmuxterm.app.next.agent-pane.outbound", qos: .utility)
+    /// Makes and sends the host's own notifications after the caller's turn, in order. Only tests wait for it.
+    let outbound = DispatchQueue(label: "com.cmuxterm.app.next.agent-pane.outbound", qos: .utility)
 
     init(request: URLRequest, wire: (any AcpmuxPaneWire)? = nil, limits: AgentPaneTransport.Limits,
          options: AcpmuxPermissionOptions, sessions: AcpmuxPaneSessions, decisions: AcpmuxDecisionContexts = AcpmuxDecisionContexts(),
@@ -344,37 +340,38 @@ nonisolated final class AcpmuxPaneSocket: NSObject, URLSessionWebSocketDelegate,
         }
     }
 
-    /// The pane became seen or unseen while it shows `session` (p14-energy-118): one
-    /// `_acpmux/visibility {sessionId, visible}` notification per edge, so acpmux can stop a hidden
-    /// idle harness and wake it first when it shows (p14-energy-117). Fire and forget: the caller's
-    /// turn only compares with the last edge sent; the frame is made and sent on ``outbound`` after
-    /// it, and a repeat of the same state sends nothing. Chrome's `RenderWidgetHostImpl::WasHidden`
-    /// and `WasShown` tell the renderer each edge once, by a one-way IPC
-    /// (content/browser/renderer_host/render_widget_host_impl.cc). Call it only after the page's
-    /// first frame went: its LocalApp token opens the connection.
+    /// The pane became seen or unseen while it shows `session`, or this connection's first frame went
+    /// (``AgentPaneVisibilityReporter``): one `_acpmux/visibility` notification per edge, made and sent
+    /// on ``outbound`` after the caller's turn; a repeat of the session's last state sends nothing.
     func visibilityChanged(session: String, visible: Bool) {
-        let edge = Visibility(session: session, visible: visible)
-        let sends = state.withLock { state -> Bool in
-            guard state.closed == nil, state.opened, state.visibility != edge else { return false }
-            state.visibility = edge
-            return true
-        }
-        guard sends else { return }
-        outbound.async { [self] in
-            guard let text = Self.visibilityFrame(edge) else { return }
-            _ = send(text)
-        }
+        tell(session: session, visible: visible, onlyAfterVisible: false)
     }
 
-    /// The host's own visibility notification; never a page method (``AcpmuxPaneMethods`` does not list it).
-    static let visibilityMethod = "_acpmux/visibility"
+    /// The pane moved off `session`: acpmux hears it hidden, if this connection last said it was visible.
+    func sessionLeft(_ session: String) {
+        tell(session: session, visible: false, onlyAfterVisible: true)
+    }
 
-    /// The JSON-RPC notification for `edge` (no id: acpmux sends no reply).
-    private static func visibilityFrame(_ edge: Visibility) -> String? {
-        let frame: [String: Any] = ["jsonrpc": "2.0", "method": Self.visibilityMethod,
-                                    "params": ["sessionId": edge.session, "visible": edge.visible]]
-        guard let data = try? JSONSerialization.data(withJSONObject: frame) else { return nil }
-        return String(data: data, encoding: .utf8)
+    /// Records the state, then sends it; a refused send takes the record back unless a later state replaced it.
+    private func tell(session: String, visible: Bool, onlyAfterVisible: Bool) {
+        let recorded = state.withLock { state -> (sends: Bool, previous: Bool?) in
+            let previous = state.visibility[session]
+            guard state.closed == nil, state.opened, previous != visible, !onlyAfterVisible || previous == true else {
+                return (false, previous)
+            }
+            state.visibility[session] = visible
+            return (true, previous)
+        }
+        guard recorded.sends else { return }
+        outbound.async { [self] in
+            let refusal: AgentPaneTransportError? =
+                if let text = Self.visibilityFrame(session: session, visible: visible) { send(text) } else { .invalidFrame }
+            guard let refusal else { return }
+            state.withLock { state in
+                if state.visibility[session] == visible { state.visibility[session] = recorded.previous }
+            }
+            AgentPaneTransport.logger.error("agent pane visibility not sent visible=\(visible, privacy: .public): \(refusal.rawValue, privacy: .public)")
+        }
     }
 
     /// The wire's send, under the same outstanding bounds as the WebSocket's.

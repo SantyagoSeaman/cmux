@@ -93,6 +93,8 @@ public final class AgentPaneView: NSView {
     /// through one input tap subscription per window, while the pane is in one.
     let gestureRouter: AgentPaneGestureRouter
     var transportPacer: AgentPaneFramePacer?
+    /// Tells acpmux whether this pane shows its chat (p14-energy-118).
+    var visibilityReporter: AgentPaneVisibilityReporter?
     /// The message and the selected transcript text the page reported under the pointer for the
     /// next context menu, and where the menu's copies go (tests record them instead).
     var messageMenuTarget: AgentPaneMessageTarget?
@@ -195,7 +197,6 @@ public final class AgentPaneView: NSView {
         }
         model.onDictation = { [weak self] command in self?.dictation.handle(command) }
         installTransport()
-        transportPacer?.onSeenChange = { [weak self] seen in self?.paneSeenChanged(seen) }
         installContextMenu()
         beginLoadingState()
         Self.logger.info("agent pane webview loading source=\(Self.sourceDescription(source), privacy: .public) bundled=\(Self.bundledPage != nil, privacy: .public)")
@@ -325,14 +326,6 @@ public final class AgentPaneView: NSView {
         page.close()
         page.endPageDocument()
         removeFromSuperview()
-    }
-
-    /// The pane became seen or unseen (its probe's node flipped): acpmux hears the edge for the chat it
-    /// shows, once, after this turn (``AcpmuxPaneSocket/visibilityChanged(session:visible:)``), never
-    /// before the page's first frame opened the connection. Nothing here waits.
-    func paneSeenChanged(_ seen: Bool) {
-        guard let session = model.sessionId, model.transport.sentFirst, let socket = model.transport.socket else { return }
-        socket.visibilityChanged(session: session, visible: seen)
     }
 
     /// Another tab took the pane: stop listening, keep the words.

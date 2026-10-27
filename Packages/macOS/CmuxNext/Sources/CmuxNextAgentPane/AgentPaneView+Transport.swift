@@ -28,6 +28,7 @@ extension AgentPaneView {
         let completions = model.deadlines.work.board.owner("agentPane.transport.delivered")
         transportPacer = pacer
         model.transport.pacer = pacer
+        visibilityReporter = AgentPaneVisibilityReporter(model: model, pacer: pacer)
         model.transport.onOtherInstall = { [weak self] other in self?.showOtherInstallNotice(other) }
         model.transport.onRemoteApprovalsOff = { [weak self] approvals in self?.showRemoteApprovalsOff(approvals) }
         model.transport.deliver = { [weak self, completions] event, done in

@@ -30,6 +30,8 @@ public final class AgentPaneModel {
 
     /// Called when the page switches to or creates a session, so the App can keep it with the tab.
     @ObservationIgnored public var onSessionChange: ((String) -> Void)?
+    /// The pane's own hook on the same change, with the session it left (``AgentPaneVisibilityReporter``).
+    @ObservationIgnored var onSessionAdopted: ((_ previous: String?) -> Void)?
     @ObservationIgnored public var onUnsentDraft: ((String) -> Void)? // a new chat's typed text, until it has a session
     /// Reports each settled scroll and returns the native display settings to the page.
     @ObservationIgnored public var onFramePacing: (([Double]) -> [String: Any])?
@@ -424,8 +426,10 @@ public final class AgentPaneModel {
     /// The page's chat became session `id` (it started, or the quick panel moved it); no longer a new tab page.
     func adoptSession(_ id: String) {
         guard id != sessionId else { return }
+        let previous = sessionId
         sessionId = id
         newTab = nil
+        onSessionAdopted?(previous)
         onSessionChange?(id)
     }
 

@@ -186,7 +186,10 @@ extension AgentPaneTransport {
             if wasFirst, sentFirst {
                 let relay = promptRelay
                 await provePerson(socket: socket, ids: ids)
-                if self.socket === socket { await relay?.resend(socket: socket, ids: ids) }
+                if self.socket === socket {
+                    onFirstFrameSent?()
+                    await relay?.resend(socket: socket, ids: ids)
+                }
             }
         }
         draining = false

@@ -87,9 +87,11 @@ import CmuxNextWakeups
     private var lastCall: TimeInterval = -.infinity
     /// Calls made (tests).
     private(set) var calls = 0
-    /// Hears whether the pane is seen after each flip of its probe's node, once the pacer handled it (the
-    /// pane tells acpmux the edge, ``AgentPaneView/paneSeenChanged(_:)``).
-    var onSeenChange: (@MainActor (_ seen: Bool) -> Void)?
+    /// Hears each visibility change once the pacer handled it (``visibilityChanged()``); the pane tells
+    /// acpmux the edge (``AgentPaneVisibilityReporter``).
+    var onSeenChange: (@MainActor () -> Void)?
+    /// Whether the pane is seen now (its probe's node).
+    var isSeen: Bool { !isHidden() }
 
     /// - Parameters:
     ///   - nextTurn: Runs a delivery on a later turn (the pane's: a `visible` task on the app's scheduler).
@@ -114,11 +116,7 @@ import CmuxNextWakeups
         self.init(frames: AgentPaneWindowFrames(view: view), fallback: AgentPaneMainDeadline(deadlines: mainThread.deadlines),
                   nextTurn: { work in mainWork.post(.visible, owner: owner, work) },
                   isHidden: { [weak probe] in !(probe?.isSeen ?? false) })
-        probe.onChange = { [weak self] in
-            guard let self else { return }
-            visibilityChanged()
-            onSeenChange?(!isHidden())
-        }
+        probe.onChange = { [weak self] in self?.visibilityChanged() }
         view.addSubview(probe)
         self.probe = probe
     }
@@ -222,8 +220,14 @@ import CmuxNextWakeups
         call()
     }
 
-    /// The pane may have come into sight: frames held while it was hidden go now.
+    /// The pane's probe flipped: frames held while it was hidden go now if it came into sight, then
+    /// ``onSeenChange`` hears it.
     func visibilityChanged() {
+        releaseIfShown()
+        onSeenChange?()
+    }
+
+    private func releaseIfShown() {
         // A page that shows runs: the page view thaws before it shows, whichever path showed it.
         if frozen, !isHidden() { return pageDidThaw() }
         guard held || waitingWhileHidden, !isHidden() else { return }

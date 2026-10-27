@@ -54,6 +54,8 @@ import func CmuxSafeConcurrency.withOnceContinuation
     /// Held from `open` until the first frame is sent, then dropped.
     var localAppToken: String?
     var sentFirst = false
+    /// A connection's first frame and the person proof went: the host may send its own notifications.
+    var onFirstFrameSent: (@MainActor () -> Void)?
     /// The send line (``submit(connection:frames:reply:)``), drained in order by one task at a time.
     var pending: [PendingSend] = []
     var draining = false
