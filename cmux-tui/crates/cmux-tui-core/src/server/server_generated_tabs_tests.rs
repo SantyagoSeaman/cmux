@@ -695,7 +695,9 @@ fn server_generated_tabs_keeps_command_small() {
         "Command is {} bytes; box the large variant in server-families.json `boxed`",
         size_of::<Command>()
     );
-    assert!(size_of::<Request>() <= 408, "Request is {} bytes", size_of::<Request>());
+    // The envelope adds `id` and the client stream (`attach_stream`, D3's
+    // `Option<ClientStreamId>`, padded to 8 bytes).
+    assert!(size_of::<Request>() <= 416, "Request is {} bytes", size_of::<Request>());
 }
 
 proptest! {

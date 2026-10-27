@@ -2001,6 +2001,9 @@ enum Command {
     ClientFocus {
         client_id: String,
     },
+    /// Ends the request's client stream (`Request::stream`) at once, after
+    /// the stream's earlier requests (`attach-streams-v1`). Idempotent.
+    CancelStream,
 }
 }
 

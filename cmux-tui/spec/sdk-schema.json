@@ -47,7 +47,7 @@
   "terminal-io": {
    "id": 3,
    "description": "Terminal input, output streams, screen reads and terminal requests to the frontend.",
-   "next_ordinal": 27
+   "next_ordinal": 26
   },
   "terminals": {
    "id": 4,
@@ -57,7 +57,7 @@
   "sizing": {
    "id": 5,
    "description": "Surface sizes, attached views and sizing policy.",
-   "next_ordinal": 13
+   "next_ordinal": 14
   },
   "layout": {
    "id": 6,
@@ -35911,7 +35911,7 @@
     "Ends the request envelope's attach_stream after that stream's earlier requests; its stream-end follows every item already queued for it.",
     "Idempotent: a stream that is not open answers ended."
    ],
-   "method_id": 794,
+   "method_id": 1293,
    "priority": "control",
    "durability": "memory",
    "stream_scoped": true,
