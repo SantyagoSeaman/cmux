@@ -260,3 +260,34 @@ fn connection_frame_page_routed_operations_are_not_catalog_operations() {
         );
     }
 }
+
+/// serde's tagged `Command` decoder takes an integer `cmd` as a variant
+/// index, so `{"cmd":N}` ran the N-th command while the head, which names
+/// only a string `cmd`, routed it as no command (found by the cmux-tui/fuzz
+/// `control_request` target, p15-oracle task 220). Such a line is refused.
+#[test]
+fn connection_frame_a_cmd_that_is_no_string_runs_no_command() {
+    let error = serde_json::from_value::<Command>(json!({"cmd": "no-such-command"}))
+        .err()
+        .expect("an unknown tag is refused")
+        .to_string();
+    let (_, expected) = error.split_once("expected one of ").expect("serde lists its tags");
+    let ping = expected
+        .split(", ")
+        .position(|tag| tag.trim_matches('`') == "ping")
+        .expect("serde lists ping");
+    let by_index = format!(r#"{{"id":7,"cmd":{ping}}}"#);
+    assert!(
+        serde_json::from_str::<Request>(&by_index).is_ok(),
+        "serde still decodes a variant index, so the dispatcher must refuse it"
+    );
+
+    let mux = test_mux();
+    let conn = Conn::new(&mux);
+    for line in [by_index, r#"{"id":7,"cmd":true}"#.to_owned()] {
+        let (_, replies) = conn.dispatch(&mux, &line);
+        let [reply] = replies.as_slice() else { panic!("{line}: {replies:?}") };
+        assert_eq!(reply["ok"], false, "{line} ran a command: {reply}");
+        assert_eq!(reply["id"], 7, "{reply}");
+    }
+}

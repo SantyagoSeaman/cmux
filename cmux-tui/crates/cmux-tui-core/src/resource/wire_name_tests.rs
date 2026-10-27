@@ -45,3 +45,22 @@ fn all_lists_every_operation_once() {
         "unlisted {unlisted:?}, unknown {unknown:?}"
     );
 }
+
+/// A request's `operation` and `type` are JSON strings only. serde's derived
+/// enum decoder also takes the map form `{"session.ping":null}`, which the
+/// request head does not route on (server/request_head.rs reads strings), so
+/// the head and the envelope named different operations (found by the
+/// cmux-tui/fuzz `control_request` target, p15-oracle task 220).
+#[test]
+fn request_envelope_refuses_the_map_form_of_an_enum_member() {
+    let line = |operation: &str, kind: &str| {
+        format!(
+            r#"{{"protocol":"cmux.protocol/2","type":{kind},"id":"r-1","operation":{operation},"params":{{}}}}"#
+        )
+    };
+    let parse = |line: String| serde_json::from_str::<super::RequestEnvelope>(&line);
+    let accepted = parse(line(r#""session.ping""#, r#""request""#)).expect("the string form");
+    assert_eq!(accepted.operation, ResourceOperation::SessionPing);
+    assert!(parse(line(r#"{"session.ping":null}"#, r#""request""#)).is_err(), "map-form operation");
+    assert!(parse(line(r#""session.ping""#, r#"{"request":null}"#)).is_err(), "map-form type");
+}
