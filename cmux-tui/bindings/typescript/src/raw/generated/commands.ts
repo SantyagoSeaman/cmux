@@ -1,5 +1,5 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499. */
+/* cmux-tui mux protocol 12, IR 9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e. */
 
 
 import type * as T from "./types.js";
@@ -787,6 +787,11 @@ export interface CancelRequestRequest extends CmuxRequestBase {
   "target": (T.JsonValue) | null;
 }
 export type CancelRequestResult = T.EmptyResult;
+
+/** Protocol v12; authority: frontend. */
+export interface CancelStreamRequest extends CmuxRequestBase {
+  cmd: "cancel-stream";
+}
 
 /** Protocol v12; authority: local-admin. */
 export interface ChiefInspectRequest extends CmuxRequestBase {
@@ -3722,6 +3727,7 @@ export type CmuxRequest =
   | BrowserWheelRequest
   | BrowserWheelGuardedRequest
   | CancelRequestRequest
+  | CancelStreamRequest
   | ChiefInspectRequest
   | ClearHistoryRequest
   | ClearWindowTitleRequest
@@ -4589,6 +4595,14 @@ export interface CmuxCommandDefinitionMap {
     authority: "local-admin";
     since: 12;
     capability: "cancel-request-v1";
+    stream: null;
+  };
+  "cancel-stream": {
+    request: CancelStreamRequest;
+    result: T.CancelStreamResult;
+    authority: "frontend";
+    since: 12;
+    capability: "attach-streams-v1";
     stream: null;
   };
   "chief-inspect": {

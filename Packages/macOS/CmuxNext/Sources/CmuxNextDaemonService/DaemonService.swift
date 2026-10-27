@@ -32,6 +32,8 @@ public final class DaemonService {
     /// Its connections echo `placement-shift-v1` (this build orders sidebar rows from the
     /// sidebar document; ``DaemonConnectionConfiguration/echoesPlacementShift``).
     let echoesPlacementShift: Bool
+    /// Views attach as streams on its connection (``DaemonConnectionConfiguration/terminalStreams``).
+    let terminalStreams: Bool
     /// Where this machine's daemon connections count their wire traffic (``DaemonWireStats``,
     /// `debug.daemon.wire`): the app's recorder in Debug and bench builds and opted-in release
     /// builds, else nil.
@@ -96,9 +98,13 @@ public final class DaemonService {
     ///     attachment this service opens; nil (tests) watches nothing.
     ///   - crashKeys: The app's crash keys, for the local daemon's service only: its store names its connection
     ///     epoch there (``DaemonStore/init(waitDeadlines:causes:crashKeys:)``).
+    ///   - terminalStreams: Terminal views attach as streams on this machine's connection when its daemon
+    ///     serves them (the `daemonTerminalStreams` feature); false keeps one connection per view.
     public init(machineID: String = "local", echoesPlacementShift: Bool = false, mainWork: MainWorkScheduler,
-                wireStats: DaemonWireStats? = nil, hangWatch: (any HangWatchScoping)? = nil, crashKeys: CrashKeySlots? = nil) {
+                wireStats: DaemonWireStats? = nil, hangWatch: (any HangWatchScoping)? = nil, crashKeys: CrashKeySlots? = nil,
+                terminalStreams: Bool = false) {
         self.machineID = machineID
+        self.terminalStreams = terminalStreams
         self.echoesPlacementShift = echoesPlacementShift
         // Its keyed waits' timeouts share the main thread's one deadline timer.
         store = DaemonStore(waitDeadlines: mainWork.wakeUps, causes: mainWork.causes, crashKeys: crashKeys)
@@ -204,7 +210,7 @@ public final class DaemonService {
                                                     resolvesShellIntegration: resolvesShellIntegration,
                                                     installKey: launcher.configuration.installKey,
                                                     echoesPlacementShift: echoesPlacementShift, retryWake: retryWake,
-                                                    hangWatch: hangWatch)
+                                                    hangWatch: hangWatch, terminalStreams: terminalStreams)
         // The launch's connect milestones: the prestart's, or this start's first attempt's when there is none.
         let marks = prestart?.marks ?? Self.launchConnectMarks()
         marks.mark(.connectStarted)
@@ -321,9 +327,14 @@ public final class DaemonService {
         monitor.start(queue: DispatchQueue(label: "com.cmuxterm.next.daemon.path.\(machineID)", qos: .utility))
         pathMonitor = monitor
         let clock = startupClock
-        var configuration = DaemonConnection.Configuration(retryWake: wake, terminalEnvironment: nil, sessionEvents: true)
+        // Binary frames only where every hop carries bytes unchanged: a paired
+        // server's `cmux link dial` bridge does; the SSH bridge parses lines.
+        var configuration = DaemonConnection.Configuration(
+            advertisedCapabilities: DaemonCapability.advertised(carriesFrames: bridge != nil),
+            retryWake: wake, terminalEnvironment: nil, sessionEvents: true)
         configuration.echoesPlacementShift = echoesPlacementShift
         configuration.hangWatch = hangWatch
+        configuration.terminalStreams = terminalStreams
         runTask = Task { [weak self, drainScheduler, logger, configuration] in
             weak let weakSelf = self
             var ends = RetryPacer(.firstConnect)

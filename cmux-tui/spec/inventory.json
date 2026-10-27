@@ -541,7 +541,8 @@
       "url-open-result",
       "terminal-clipboard-subscribe",
       "terminal-clipboard-reply",
-      "snapshot-request"
+      "snapshot-request",
+      "cancel-stream"
     ],
     "local-admin": [
       "server-stats",

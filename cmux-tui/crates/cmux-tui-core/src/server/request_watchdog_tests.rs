@@ -362,7 +362,7 @@ fn request_watchdog_records_a_slow_command_on_the_connection_sequence() {
     let mux = crate::Mux::new_for_test("request-watchdog-cmd", crate::SurfaceOptions::default());
     let conn = connect(&mux);
     let holder = hold_registry(&mux, Duration::from_millis(300));
-    let mut list = Some(Request { id: Some(json!(1)), cmd: Command::ListWorkspaces });
+    let mut list = Some(Request { id: Some(json!(1)), stream: None, cmd: Command::ListWorkspaces });
     assert_eq!(
         conn.scheduler.dispatch(mux.clone(), conn.client, &mut list, 0, conn.writer.clone()),
         Some(true)
@@ -387,7 +387,7 @@ fn request_watchdog_stack_of_a_slow_command_on_the_connection_sequence() {
     let mux = crate::Mux::new_for_test("request-watchdog-stack", crate::SurfaceOptions::default());
     let conn = connect(&mux);
     let holder = hold_registry(&mux, Duration::from_millis(600));
-    let mut list = Some(Request { id: Some(json!(1)), cmd: Command::ListWorkspaces });
+    let mut list = Some(Request { id: Some(json!(1)), stream: None, cmd: Command::ListWorkspaces });
     assert_eq!(
         conn.scheduler.dispatch(mux.clone(), conn.client, &mut list, 0, conn.writer.clone()),
         Some(true)
@@ -411,6 +411,7 @@ fn request_watchdog_leaves_a_long_wait_for_out() {
     let conn = connect(&mux);
     let mut wait = Some(Request {
         id: Some(json!(1)),
+        stream: None,
         cmd: Command::WaitFor(WaitForParams {
             surface: surface.id,
             pattern: "never-matches".to_string(),

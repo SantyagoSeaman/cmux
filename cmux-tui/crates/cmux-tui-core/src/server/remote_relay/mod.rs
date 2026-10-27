@@ -355,6 +355,7 @@ pub(super) fn handle_watched_frame(
                 RequestArrival::parsed_now(arrived),
                 writer,
                 None,
+                None,
             )
         }
         Err(_) => refuse(routed, REMOTE_ERROR),

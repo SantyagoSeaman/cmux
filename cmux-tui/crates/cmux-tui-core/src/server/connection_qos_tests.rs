@@ -310,6 +310,7 @@ fn an_automation_connection_runs_its_requests_at_utility() {
     );
     let mut clear = Some(Request {
         id: Some(json!(1)),
+        stream: None,
         cmd: Command::ClearHistory(ClearHistoryParams { surface: surface.id, fallback_key: None }),
     });
     // The worker waits for the terminal lock held here, so both threads

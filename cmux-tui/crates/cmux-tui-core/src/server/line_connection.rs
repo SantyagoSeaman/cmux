@@ -212,9 +212,10 @@ pub(super) fn serve_connection(
                 OutboundItem::Frame(header, _) | OutboundItem::Chunk { header, .. } => {
                     writer_ipc.frame_sent(header.kind(), header.frame_len());
                 }
+                OutboundItem::AttachFrame(frame) => writer_ipc.frame_sent(frame.kind(), frame.len()),
                 OutboundItem::Flush(_) => {}
             }
-            if write_line_outbound_item(&mut writer_ipc.counted(&mut *write_half), item).is_err() {
+            if write_stream_outbound_item(&mut *write_half, &writer_ipc, item).is_err() {
                 writer_outbound.close();
                 let _ = write_half.shutdown(Shutdown::Both);
                 break;

@@ -96,7 +96,7 @@ fn the_connection_dispatcher_is_a_request_thread_that_records_its_blocking() {
     let scheduler =
         Arc::new(ConnectionSurfaceScheduler::new(mux.surface_operation_admission.clone()));
     let before = site_count("src/server.rs", BlockingKind::Sqlite);
-    let mut list = Some(Request { id: Some(json!(1)), cmd: Command::ListWorkspaces });
+    let mut list = Some(Request { id: Some(json!(1)), stream: None, cmd: Command::ListWorkspaces });
     assert_eq!(scheduler.dispatch(mux, client, &mut list, 0, writer), Some(true));
     // The dispatcher stays up until the scheduler finishes.
     assert_declared("mux-control-dispatch", ThreadQos::UserInitiated);
@@ -162,6 +162,7 @@ fn a_clear_history_worker_is_a_user_initiated_request_thread() {
         Arc::new(ConnectionSurfaceScheduler::new(mux.surface_operation_admission.clone()));
     let mut clear = Some(Request {
         id: Some(json!(1)),
+        stream: None,
         cmd: Command::ClearHistory(ClearHistoryParams { surface: surface.id, fallback_key: None }),
     });
     let held = surface.with_terminal(|_| {

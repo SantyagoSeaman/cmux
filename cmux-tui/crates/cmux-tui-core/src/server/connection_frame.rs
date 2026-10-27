@@ -176,6 +176,18 @@ pub(super) fn dispatch_line(line: &LineFrame<'_>) -> bool {
     // (command_names_tests), so no route span is open here.
     drop(routed);
     let arrival = RequestArrival::parsed_now(arrived);
+    // A per-view request of a client stream runs on that stream's lane, so it
+    // never waits behind another view's or the control lane's requests.
+    if let Some(stream) = request.stream.filter(|_| request.cmd.runs_on_stream_lane()) {
+        let lane_request = StreamLaneRequest { stream, request, arrival };
+        return scheduler.dispatch_on_stream(
+            mux.clone(),
+            client,
+            lane_request,
+            message.len(),
+            writer,
+        );
+    }
     let mut pending = Some(request);
     match scheduler.dispatch_at(
         mux.clone(),
@@ -191,7 +203,7 @@ pub(super) fn dispatch_line(line: &LineFrame<'_>) -> bool {
                 if let Some(scope) = watched {
                     scope.command(&request.cmd);
                 }
-                handle_request_with_cancellation(mux, client, request, arrival, writer, None)
+                handle_request_with_cancellation(mux, client, request, arrival, writer, None, None)
             }
             None => true,
         },
@@ -279,7 +291,7 @@ pub(super) fn handle_request(
     request: Request,
     writer: &MessageWriter,
 ) -> bool {
-    handle_request_with_cancellation(mux, client, request, RequestArrival::now(), writer, None)
+    handle_request_with_cancellation(mux, client, request, RequestArrival::now(), writer, None, None)
 }
 
 pub(super) fn handle_request_with_cancellation(
@@ -289,8 +301,9 @@ pub(super) fn handle_request_with_cancellation(
     arrival: RequestArrival,
     writer: &MessageWriter,
     cancellation: Option<&ConnectionCancellation>,
+    acceptance: Option<&RequestAcceptance>,
 ) -> bool {
-    let Request { id, cmd } = request;
+    let Request { id, stream, cmd } = request;
     // A panic in the handler names its command (cmux-panic-log crash keys, this thread's own).
     let _crash_key = cmux_panic_log::crash_keys::scoped_thread(
         cmux_panic_log::crash_keys::Key::ActionId,
@@ -347,7 +360,8 @@ pub(super) fn handle_request_with_cancellation(
         _ => None,
     };
     let shutdown_daemon = matches!(&cmd, Command::ShutdownDaemon { .. });
-    let result = handle_command_with_cancellation(mux, client, cmd, writer, cancellation);
+    let context = CommandContext { cancellation, acceptance, stream };
+    let result = handle_command_with_cancellation(mux, client, cmd, writer, context);
     let mut response_ok = false;
     let sent = span.reply(|| {
         let (ok, sent) = send_command_result(mux, client, id, result, writer);
@@ -413,8 +427,13 @@ fn start_sized_browser_attach(
         Shutdown::ContinueOnShutdown,
         move || {
             let reply = reply.start();
-            let result =
-                handle_command_with_cancellation(&worker_mux, client, cmd, &worker_writer, None);
+            let result = handle_command_with_cancellation(
+                &worker_mux,
+                client,
+                cmd,
+                &worker_writer,
+                CommandContext::default(),
+            );
             reply.reply(|| {
                 send_command_result(&worker_mux, client, worker_id, result, &worker_writer).1
             });

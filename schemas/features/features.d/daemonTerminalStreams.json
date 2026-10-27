@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "daemonTerminalStreams",
+  "owner": "PL-conn",
+  "description": "Terminal views attach as client streams on the app's one connection to each daemon (attach-streams-v1, binary attach frames and the local output ring) instead of opening a connection and a handshake per view.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "app",
+  "params": [],
+  "stories": ["split-latency", "typing-flood-stress"],
+  "sticky": false,
+  "runtimeMutable": false
+}

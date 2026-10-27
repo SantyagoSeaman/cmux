@@ -3,8 +3,9 @@
 //! local, bridged, unverified, WebSocket, remote-entry and page-relay
 //! connection, and to a client one API revision behind. Every request takes
 //! the connection's real frame path (`handle_connection_frame`), the remote
-//! relay's gate included. Tests other than the unbound one bind every
-//! transport, as the tasks that land them will.
+//! relay's gate included. D3 binds streams, attach frames and the ring
+//! (`IpcTransports::BOUND`); tests other than the default one bind the frame
+//! reader too, as the task that lands it will.
 
 use cmux_api_compat::{Change, Compat, MessageChange, Schema};
 
@@ -79,6 +80,7 @@ impl Connection {
                     return serde_json::from_str(&text.to_string()).unwrap();
                 }
                 Some(OutboundItem::Flush(flushed)) => drop(flushed.send(())),
+                Some(OutboundItem::AttachFrame(_)) => panic!("an attach frame before the reply"),
                 None => panic!("the connection closed without a reply"),
             }
         }
@@ -121,14 +123,22 @@ fn mux(name: &str) -> Arc<Mux> {
     mux
 }
 
+/// The bound transports of this build: D3's streams, attach frames and (on
+/// Unix) the ring; the frame reader is not bound yet.
+#[cfg(unix)]
+const BOUND_BY_DEFAULT: [&str; 3] =
+    ["attach-streams-v1", "attach-frames-v1", "terminal-output-ring-v1"];
+#[cfg(not(unix))]
+const BOUND_BY_DEFAULT: [&str; 2] = ["attach-streams-v1", "attach-frames-v1"];
+
 #[test]
-fn ipc_grant_unbound_transports_are_never_advertised_or_granted() {
+fn ipc_grant_only_bound_transports_are_advertised_or_granted() {
     let mux = Mux::new_for_test("ipc-grant-unbound", crate::SurfaceOptions::default());
     let local = Connection::local(&mux);
-    assert!(local.advertised().is_empty(), "no frame reader, stream table or ring yet");
+    assert_eq!(local.advertised(), BOUND_BY_DEFAULT, "no frame reader yet");
     assert_eq!(local.ask(13)["ok"], true);
-    assert!(local.granted().is_empty());
-    assert!(local.recorded().is_empty());
+    assert_eq!(local.granted(), BOUND_BY_DEFAULT);
+    assert_eq!(local.recorded(), BOUND_BY_DEFAULT);
     mux.shutdown();
 }
 
@@ -263,11 +273,15 @@ fn ipc_grant_needs_what_each_capability_requires() {
     let reply = local.request(json!({"id":2,"cmd":"set-client-info",
         "capabilities":["attach-frames-v1","terminal-output-ring-v1"],"api_revision":13}));
     assert_eq!(reply["ok"], true);
-    assert!(local.granted().is_empty(), "frames on a stream need ipc-frames-v2 and streams");
+    assert!(local.granted().is_empty(), "frames on a stream need streams");
     let reply = local.request(json!({"id":3,"cmd":"set-client-info",
-        "capabilities":["ipc-frames-v2","attach-streams-v1","attach-frames-v1"]}));
+        "capabilities":["attach-streams-v1","attach-frames-v1"]}));
     assert_eq!(reply["ok"], true);
-    assert_eq!(local.granted(), &ALL[..3], "an earlier grant counts; the ring was not asked again");
+    assert_eq!(
+        local.granted(),
+        &ALL[1..3],
+        "an earlier grant counts; the ring was not asked again; frames need no framed reader"
+    );
     mux.shutdown();
 }
 
@@ -286,7 +300,13 @@ fn ipc_grant_rule_table() {
     assert_eq!(IpcCapability::offered(IpcPeer::Local, false, &bound), [AttachStreams]);
     assert_eq!(IpcCapability::offered(IpcPeer::Bridged, true, &bound), [AttachStreams]);
     assert_eq!(IpcCapability::offered(IpcPeer::Unverified, true, &bound), [AttachStreams]);
-    assert!(IpcCapability::offered(IpcPeer::Local, true, &IpcTransports::default()).is_empty());
+    assert_eq!(
+        IpcCapability::offered(IpcPeer::Local, true, &IpcTransports::default())
+            .into_iter()
+            .map(IpcCapability::name)
+            .collect::<Vec<_>>(),
+        BOUND_BY_DEFAULT
+    );
     assert!(AttachStreams.allowed(IpcPeer::Local, false));
     assert!(!Frames.allowed(IpcPeer::Local, false));
     assert!(!OutputRing.allowed(IpcPeer::Bridged, true));

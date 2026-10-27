@@ -298,6 +298,7 @@ extension DaemonCommandName {
         case 0x48F958DB14D17514: return (288, "terminal-history")
         case 0x6834682484AAC514: return (289, "terminal-read-range")
         case 0x3DB044A820B4367E: return (290, "scroll-surface")
+        case 0x54CB36A671DD407A: return (291, "cancel-stream")
         default: return nil
         }
     }

@@ -445,6 +445,7 @@ impl ClientRegistry {
                 browser_pointer_owner: None,
                 attached: BTreeMap::new(),
                 view_leases: HashMap::new(),
+                client_streams: HashMap::new(),
                 retired_view_leases: HashMap::new(),
                 retired_view_lease_order: VecDeque::new(),
                 retired_surfaces: HashSet::new(),

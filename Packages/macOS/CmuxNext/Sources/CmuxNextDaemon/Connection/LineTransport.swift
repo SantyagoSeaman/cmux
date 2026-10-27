@@ -32,6 +32,25 @@ final class LineTransport: Sendable {
     typealias EventHandler = @Sendable (_ name: String, _ line: Data, _ index: UInt64) -> Void
     typealias CloseHandler = @Sendable (TransportCloseReason) -> Void
 
+    /// One message of a client attach stream (`attach-streams-v1`), delivered on
+    /// the reader thread in wire order.
+    enum StreamMessage: Sendable {
+        /// A binary frame other than EVENT and RING (`attach-frames-v1`).
+        case frame(AttachFrameHeader, Data)
+        /// A RING frame and the ring's read-only descriptor that rode on it;
+        /// the sink owns the descriptor (`terminal-output-ring-v1`).
+        case ring(AttachFrameHeader, Data, descriptor: Int32)
+        /// One JSON event of the stream: an EVENT frame's object, or a JSON
+        /// line tagged with the stream. `stream-end` is the stream's last one.
+        case event(name: String, line: Data)
+        /// The connection ended; no message follows.
+        case closed(TransportCloseReason)
+    }
+
+    /// Receives one stream's messages on the reader thread. It must not block:
+    /// every stream and the control plane share the reader.
+    typealias StreamSink = @Sendable (StreamMessage) -> Void
+
     /// Inbound limit: the server may send up to 32 MiB (VT replay).
     static let maxLineBytes = 64 << 20
     /// SO_SNDBUF and SO_RCVBUF of the socket, and the reader's read size: the daemon's own value
@@ -84,10 +103,28 @@ final class LineTransport: Sendable {
     /// - Parameter stats: Where the connection counts (``DaemonEndpoint/wireStats``); nil for none.
     /// - Parameter hangs: Watches each line the reader handles and each writer drain step; nil: none. `writerTarget`: see `open`.
     /// - Parameter clock: What reply deadlines are measured and slept on; tests pass a `ManualClock`.
-    init(path: String, opened: DaemonBridge.Opened? = nil, role: DaemonWireStats.Role, stats: DaemonWireStats?,
-         hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil, trace: TraceRuntime = .shared,
-         clock: any Clock<Duration> = ContinuousClock()) throws(DaemonError) {
+    convenience init(path: String, opened: DaemonBridge.Opened? = nil, role: DaemonWireStats.Role, stats: DaemonWireStats?,
+                     hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil, trace: TraceRuntime = .shared,
+                     clock: any Clock<Duration> = ContinuousClock()) throws(DaemonError) {
+        let fd: Int32
+        if let opened { fd = opened.fd } else { fd = try LineTransport.connect(path) }
+        self.init(fd: fd, child: opened?.child, bridged: opened != nil, path: path, role: role, stats: stats, hangs: hangs,
+                  writerTarget: writerTarget, trace: trace, clock: clock)
+    }
+
+    /// A transport over an already connected socket `fd`, which it owns
+    /// (tests: one end of a `socketpair`; `path` only names it).
+    convenience init(connected fd: Int32, path: String) {
+        self.init(fd: fd, child: nil, bridged: false, path: path, role: .control, stats: nil, hangs: nil,
+                  writerTarget: nil, trace: .shared, clock: ContinuousClock())
+    }
+
+    /// A transport that owns the connected socket `fd` and, when bridged, the bridge `child`.
+    private init(fd: Int32, child: BridgeChild?, bridged: Bool, path: String, role: DaemonWireStats.Role,
+                 stats: DaemonWireStats?, hangs: (any HangWatchScoping)?, writerTarget: DispatchQueue?,
+                 trace: TraceRuntime, clock: any Clock<Duration>) {
         self.path = path
+        self.child = child
         self.role = role
         self.trace = trace
         traceConnection = Self.traceConnectionBits(scope: trace.nextAsyncScope())
@@ -97,19 +134,11 @@ final class LineTransport: Sendable {
         let recorder = stats?.recorder()
         self.recorder = recorder
         decoder = WireCoding.decoder(recorder)
-        let fd: Int32
-        if let opened {
-            fd = opened.fd
-            child = opened.child
-        } else {
-            fd = try Self.connect(path)
-            child = nil
-        }
         Self.sizeBuffers(fd)
         socket = Mutex(Socket(fd: fd))
         writer = SocketWriter(fd: fd, label: "com.cmuxterm.next.daemon.write", qos: role.writerQoS, target: writerTarget, hangs: hangs)
-        recorder?.connectionOpened(role, bridged: opened != nil)
-        // After the last throw: a transport that never opened registers nothing (its deinit does not run).
+        recorder?.connectionOpened(role, bridged: bridged)
+        // A transport that never opened (its connect threw) registers nothing.
         hangWatched = hangs.map { HangWatchedLane("daemon.line", deadline: Self.lineHangDeadline, on: $0) }
     }
 
@@ -171,6 +200,23 @@ final class LineTransport: Sendable {
     var isClosed: Bool { state.withLock { $0.closed != nil } }
     /// The writer queue's class (``DaemonWireStats/Role/writerQoS``; tests).
     var writerQoS: DispatchQoS { writer.queueQoS }
+
+    /// Opens a client attach stream: mints its id and registers `sink`
+    /// before any request names it, so the messages that precede the attach
+    /// reply (the READY) are routed. Nil once the transport closed.
+    func openStream(_ sink: @escaping StreamSink) -> UInt16? {
+        state.withLock { $0.openAttachStream(sink) }
+    }
+
+    /// Forgets a stream whose attach request failed before the daemon opened
+    /// it (the daemon then sends nothing for the id). A stream the daemon
+    /// opened is forgotten at its `stream-end`.
+    func forgetStream(_ id: UInt16) {
+        _ = state.withLock { $0.attachStreams.removeValue(forKey: id) }
+    }
+
+    /// Messages that named a stream id not open (diagnostics, tests).
+    var strayStreamMessages: UInt64 { state.withLock { $0.strayStreamMessages } }
     func setStreamHandler(_ handler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?) { state.withLock { $0.streamHandler = handler } }
 
     /// Counts `streamID`'s lines as stream-0 events until its `stream_end`;
@@ -335,13 +381,17 @@ final class LineTransport: Sendable {
     }
 
     private func failAll(_ reason: TransportCloseReason) {
-        let unanswered: [PendingRequest] = state.withLock { state in
+        let (unanswered, streams): ([PendingRequest], [StreamSink]) = state.withLock { state in
             if state.closed == nil { state.closed = reason }
             state.deadlines.removeAll()
             state.armedAt = nil
-            return state.pending.removeAllInSendOrder()
+            let streams = Array(state.attachStreams.values)
+            state.attachStreams.removeAll()
+            return (state.pending.removeAllInSendOrder(), streams)
         }
         deadlineTimer.cancel()
+        let closedReason = state.withLock { $0.closed } ?? reason
+        for sink in streams { sink(.closed(closedReason)) }
         let error = Self.closedError(reason)
         for entry in unanswered {
             // A request the connection closed under never gets its reply.
@@ -358,15 +408,23 @@ final class LineTransport: Sendable {
         // An attach connection carries the terminal's output: the reader's copies of its bytes
         // are copies of that output (``DaemonWireStats/Snapshot/outputBytesCopiedApp``).
         let outputStream = role == .terminalAttach ? recorder : nil
-        // Frames come only with their negotiation (p05-ipc-092); until then a 0xFF boundary is a bad message.
+        // Frames come only once a client attach stream is open (``State/framesAllowed``); until then a 0xFF
+        // boundary is a bad message.
         var reader = FrameReader(limits: FrameReader.Limits(maxLine: Self.maxLineBytes, maxFramePayload: FrameHeader.maxPayloadCap))
+        var framesNegotiated = false
+        // recvmsg: a RING frame's descriptor rides on its bytes (`terminal-output-ring-v1`).
+        var received = SocketDescriptorReader()
         var chunk = [UInt8](repeating: 0, count: Self.socketBufferBytes)
         var closeDetail = "EOF"
         // wakeup-allow: bounded: blocking read on a dedicated thread; EOF, errors and bad messages end it, EINTR retries
-        while true {
-            // SAFETY: read writes at most $0.count bytes into the array's own storage, which the closure lends
+        reading: while true {
+            // SAFETY: recvmsg writes at most $0.count bytes into the array's own storage, which the closure lends
             // for the call and nothing else touches meanwhile.
-            let count = unsafe chunk.withUnsafeMutableBytes { unsafe Darwin.read(fd, $0.baseAddress, $0.count) }
+            let count = unsafe chunk.withUnsafeMutableBytes { unsafe received.read(fd, into: $0) }
+            if received.truncated {
+                closeDetail = "the daemon passed more descriptors than one read holds"
+                break
+            }
             if count == 0 { break }
             if count < 0 {
                 if errno == EINTR { continue }
@@ -375,15 +433,28 @@ final class LineTransport: Sendable {
             }
             recorder?.bytesRead(count)
             outputStream?.outputCopied(count)  // into the reader's buffer
+            // The frame of a stream comes after the request that opened it, so the flag is set by then.
+            if !framesNegotiated, state.withLock({ $0.framesAllowed }) {
+                reader.negotiateFrames()
+                framesNegotiated = true
+            }
             // SAFETY: push copies the first `count` bytes of the array's own storage, the ones read(2) just
             // wrote (count <= its size); the closure lends the storage for the call only.
             unsafe chunk.withUnsafeBytes { unsafe reader.push(UnsafeRawBufferPointer(rebasing: $0.prefix(count))) }
             var next = Self.nextMessage(&reader)
             while case .success(let message?) = next {
-                // An empty line carries nothing; a frame cannot come before frames are negotiated.
-                if case .json(let bytes) = message, !bytes.isEmpty {
+                switch message {
+                case .json(let bytes) where !bytes.isEmpty:
+                    // An empty line carries nothing.
                     outputStream?.outputCopied(2 * bytes.count)  // out of the reader as the line, then into its Data
                     handle(bytes, decoder: decoder, onEvent: onEvent)
+                case .json:
+                    break
+                case .frame(let frame):
+                    if let failure = routeStreamFrame(frame, descriptors: &received, decoder: decoder) {
+                        closeDetail = failure
+                        break reading
+                    }
                 }
                 next = Self.nextMessage(&reader)
             }
@@ -396,6 +467,7 @@ final class LineTransport: Sendable {
             if let closed = state.closed { return closed }
             return state.sawShutdown ? .daemonShutdown : .lost(closeDetail)
         }
+        received.closeAll()
         failAll(reason)
         writer.close()
         closeDescriptor()
@@ -415,5 +487,56 @@ final class LineTransport: Sendable {
     where Line.Index == Int {
         guard let hangWatched else { return route(bytes, decoder: decoder, onEvent: onEvent) }
         hangWatched.run { route(bytes, decoder: decoder, onEvent: onEvent) }
+    }
+
+    /// Routes one frame of a client attach stream; a malformed one (or a RING frame without its
+    /// descriptor) ends the connection with the returned reason.
+    private func routeStreamFrame(_ frame: Frame, descriptors: inout SocketDescriptorReader, decoder: WireDecoder) -> String? {
+        let header: AttachFrameHeader
+        do {
+            header = try AttachFrameHeader(frame.header.encode())
+        } catch {
+            return "bad frame: \(error)"
+        }
+        let payload = Data(frame.payload)
+        guard header.kind == .ring else {
+            routeFrame(header, payload, decoder: decoder)
+            return nil
+        }
+        // A RING frame takes the descriptor that rode on it.
+        guard let descriptor = descriptors.take() else { return "a RING frame came without its descriptor" }
+        deliverRing(header, payload, descriptor: descriptor)
+        return nil
+    }
+
+    /// Hands a RING frame and its descriptor to its stream, which owns the
+    /// descriptor from then on; a stream that is not open gets none, and the
+    /// descriptor is closed here.
+    private func deliverRing(_ header: AttachFrameHeader, _ payload: Data, descriptor: Int32) {
+        let sink: StreamSink? = state.withLock { $0.attachSink(header.stream, removing: false) }
+        guard let sink else {
+            Darwin.close(descriptor)
+            return
+        }
+        sink(.ring(header, payload, descriptor: descriptor))
+    }
+
+    /// Routes one frame to its stream; an EVENT frame as the stream's event.
+    private func routeFrame(_ header: AttachFrameHeader, _ payload: Data, decoder: WireDecoder) {
+        guard header.kind == .event else { return deliver(stream: header.stream, .frame(header, payload)) }
+        guard let name = (try? decoder.decode(Envelope.self, from: payload))?.event else {
+            state.withLock { $0.strayStreamMessages += 1 }
+            return
+        }
+        deliver(stream: header.stream, .event(name: name, line: payload))
+    }
+
+    /// Hands `message` to the open stream `id`; after its `stream-end` the id
+    /// is free again.
+    func deliver(stream id: UInt16, _ message: StreamMessage) {
+        var ends = false
+        if case .event(let name, _) = message, name == "stream-end" { ends = true }
+        let sink: StreamSink? = state.withLock { $0.attachSink(id, removing: ends) }
+        sink?(message)
     }
 }

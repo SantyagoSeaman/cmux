@@ -140,9 +140,9 @@ impl IpcCapability {
     pub(super) const fn name(self) -> &'static str {
         match self {
             Self::Frames => "ipc-frames-v2",
-            Self::AttachStreams => "attach-streams-v1",
-            Self::AttachFrames => "attach-frames-v1",
-            Self::OutputRing => "terminal-output-ring-v1",
+            Self::AttachStreams => attach_frames::ATTACH_STREAMS_CAPABILITY,
+            Self::AttachFrames => attach_frames::ATTACH_FRAMES_CAPABILITY,
+            Self::OutputRing => attach_frames::TERMINAL_OUTPUT_RING_CAPABILITY,
         }
     }
 
@@ -154,12 +154,14 @@ impl IpcCapability {
         1 << self as u8
     }
 
-    /// What must be granted with it: frames on a stream need both, and the
-    /// ring announces its spans with frames on the attach stream.
+    /// What must be granted with it: attach frames ride a client stream, and
+    /// the ring announces its spans with frames on the attach stream. Attach
+    /// frames go daemon to client only (the client's requests stay JSON
+    /// lines, server/attach_frames.rs), so they need no framed reader.
     const fn requires(self) -> &'static [Self] {
         match self {
             Self::Frames | Self::AttachStreams => &[],
-            Self::AttachFrames => &[Self::Frames, Self::AttachStreams],
+            Self::AttachFrames => &[Self::AttachStreams],
             Self::OutputRing => &[Self::AttachFrames],
         }
     }
@@ -202,14 +204,20 @@ impl IpcCapability {
 /// Which framed IPC capabilities have a transport in this daemon. One that
 /// has none is never advertised or granted: Mojo exposes an interface only
 /// once its implementation is bound. The task that lands a transport adds its
-/// capability to [`Self::BOUND`]: the frame reader (p05-ipc-061) `Frames`,
-/// streams and `cancel-stream` (p05-ipc-074) `AttachStreams`, attach frames
-/// `AttachFrames`, the ring (p05-ipc-111) `OutputRing`.
+/// capability to [`Self::BOUND`]: the frame reader (p05-ipc-061) `Frames`.
+/// D3 (plans/cmux-next/app-daemon-connection-DESIGN.md) bound client streams
+/// and `cancel-stream` (server/stream_lanes.rs), attach frames
+/// (server/attach_frames.rs) and the ring (surface/output_ring.rs).
 pub(super) struct IpcTransports(AtomicU8);
 
 impl IpcTransports {
-    /// The capabilities whose transport this build serves.
-    const BOUND: [IpcCapability; 0] = [];
+    /// The capabilities whose transport this build serves. The ring passes a
+    /// descriptor, so only a Unix build serves it.
+    #[cfg(unix)]
+    const BOUND: [IpcCapability; 3] =
+        [IpcCapability::AttachStreams, IpcCapability::AttachFrames, IpcCapability::OutputRing];
+    #[cfg(not(unix))]
+    const BOUND: [IpcCapability; 2] = [IpcCapability::AttachStreams, IpcCapability::AttachFrames];
 
     pub(super) fn bound(&self, capability: IpcCapability) -> bool {
         self.0.load(Ordering::Acquire) & capability.bit() != 0

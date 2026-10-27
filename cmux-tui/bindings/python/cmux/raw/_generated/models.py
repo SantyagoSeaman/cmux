@@ -897,6 +897,12 @@ class BrowserRuntimeStopResult:
 
 
 @dataclass(frozen=True)
+class CancelStreamResult:
+    __cmux_schema_path__: ClassVar[str] = 'types/CancelStreamResult'
+    outcome: Literal['applied', 'ended']
+
+
+@dataclass(frozen=True)
 class CellPixelFailure:
     __cmux_schema_path__: ClassVar[str] = 'types/CellPixelFailure'
     surface: Id
@@ -3683,6 +3689,12 @@ class BrowserWheelGuardedRequest:
 class CancelRequestRequest:
     __cmux_schema_path__: ClassVar[str] = 'commands/cancel-request/request'
     target: Union[JsonValue, None]
+
+
+@dataclass(frozen=True)
+class CancelStreamRequest:
+    __cmux_schema_path__: ClassVar[str] = 'commands/cancel-stream/request'
+    pass
 
 
 @dataclass(frozen=True)
@@ -7726,6 +7738,7 @@ __all__ = [
     'BrowserRuntimeStartResult',
     'BrowserRuntimeStatusResult',
     'BrowserRuntimeStopResult',
+    'CancelStreamResult',
     'CellPixelFailure',
     'CellPixelResize',
     'CellPixelSurface',
@@ -8026,6 +8039,7 @@ __all__ = [
     'BrowserWheelRequest',
     'BrowserWheelGuardedRequest',
     'CancelRequestRequest',
+    'CancelStreamRequest',
     'ChiefInspectRequest',
     'ChiefInspectResult',
     'ClearHistoryRequest',

@@ -129,6 +129,10 @@ pub(crate) struct SnapshotAttachStream {
     pub receiver: AttachFrameReceiver,
     pub lifecycle: AttachLifecycle,
     pub requests: SnapshotRequestGate,
+    /// The terminal's output ring this viewer reads (a ring attach whose ring
+    /// could be made); its offsets are the snapshots'.
+    #[cfg(unix)]
+    pub ring: Option<SharedOutputRing>,
 }
 
 /// Outcome of a `snapshot-request` / channel `snapshot_request`.
@@ -138,7 +142,9 @@ pub(crate) enum SnapshotAdmission {
     Accepted,
     /// A snapshot is already pending; this request is answered by it.
     Collapsed,
-    /// Refused: the viewer got a snapshot less than 500 ms ago.
+    /// Held: the viewer got a snapshot less than 500 ms ago. The snapshot is
+    /// sent when the interval ends, `retry_after_ms` from now (or earlier, by
+    /// any snapshot sent before then); the client never needs to ask again.
     Throttled { retry_after_ms: u64 },
     /// The viewer is gone.
     NotAttached,
@@ -176,6 +182,13 @@ impl SnapshotRequestGate {
         if let Some(last) = state.last_snapshot_at {
             let next = last + SNAPSHOT_REQUEST_MIN_INTERVAL;
             if now < next {
+                // Hold the request until the interval ends: a client that
+                // never reads this reply (it dropped output until the READY)
+                // still gets its snapshot.
+                if !self.handle.request_at(next) {
+                    return SnapshotAdmission::NotAttached;
+                }
+                state.pending = true;
                 let wait = next - now;
                 return SnapshotAdmission::Throttled {
                     retry_after_ms: wait.as_millis().max(1) as u64,
@@ -203,12 +216,29 @@ impl SnapshotRequestGate {
 impl Surface {
     /// Register a snapshot viewer. Its first event is a READY snapshot.
     /// `local_history`: the viewer reflows its own history, so a resize
-    /// reaches it as a local-history READY at the resize cut.
+    /// reaches it as a local-history READY at the resize cut. Tests only: the
+    /// server attaches through [`Self::attach_snapshot_stream_reading`].
+    #[cfg(test)]
     pub(crate) fn attach_snapshot_stream(
         &self,
         lifecycle: AttachLifecycle,
         backlog_bytes: usize,
         local_history: bool,
+    ) -> ghostty_vt::Result<SnapshotAttachStream> {
+        self.attach_snapshot_stream_reading(lifecycle, backlog_bytes, local_history, false)
+    }
+
+    /// [`Self::attach_snapshot_stream`]; with `ring` the viewer reads its
+    /// bytes from the terminal's output ring (made at its first ring viewer,
+    /// at the snapshot offset, under the terminal lock: ring offsets are
+    /// snapshot offsets). A ring that cannot be made leaves the viewer on
+    /// byte frames (`stream.ring` is None).
+    pub(crate) fn attach_snapshot_stream_reading(
+        &self,
+        lifecycle: AttachLifecycle,
+        backlog_bytes: usize,
+        local_history: bool,
+        ring: bool,
     ) -> ghostty_vt::Result<SnapshotAttachStream> {
         let Some(pty) = self.as_pty() else {
             return Err(ghostty_vt::Error::InvalidValue);
@@ -221,17 +251,46 @@ impl Surface {
         if dead && !exited {
             return Err(ghostty_vt::Error::NoValue);
         }
-        let (tap, receiver) =
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let (mut tap, receiver) =
             AttachTap::snapshot_pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes);
         receiver.set_local_history(local_history);
+        #[cfg(unix)]
+        let mut viewer_ring = None;
         if exited {
             // The final screen is still served once; then the stream ends.
             drop(tap);
         } else {
-            pty.taps.lock().unwrap().push(tap);
+            let mut taps = pty.taps.lock().unwrap();
+            #[cfg(unix)]
+            if ring {
+                viewer_ring = taps.iter().find_map(|tap| tap.ring.clone()).or_else(|| {
+                    let base = pty.snapshot_position.load().1;
+                    match output_ring::OutputRing::create(base, output_ring::DEFAULT_CAPACITY) {
+                        Ok(ring) => Some(Arc::new(Mutex::new(ring))),
+                        Err(error) => {
+                            eprintln!(
+                                "cmux-tui: surface {} output ring not made: {error}",
+                                self.id
+                            );
+                            None
+                        }
+                    }
+                });
+                tap.ring = viewer_ring.clone();
+            }
+            #[cfg(not(unix))]
+            let _ = ring;
+            taps.push(tap);
         }
         let requests = SnapshotRequestGate::new(receiver.snapshot_request_handle());
-        Ok(SnapshotAttachStream { receiver, lifecycle, requests })
+        Ok(SnapshotAttachStream {
+            receiver,
+            lifecycle,
+            requests,
+            #[cfg(unix)]
+            ring: viewer_ring,
+        })
     }
 
     /// Take the snapshot a viewer's worker owes it and drop the queued

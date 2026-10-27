@@ -14,7 +14,7 @@
 namespace cmux::raw {
 
 inline constexpr std::uint32_t kMuxProtocolVersion = 12U;
-inline constexpr std::string_view kProtocolIrSha256 = "92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499";
+inline constexpr std::string_view kProtocolIrSha256 = "9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e";
 
 enum class AccessRequestKind;
 struct AccessRequestPending;
@@ -82,6 +82,7 @@ struct BrowserRuntimeRow;
 struct BrowserRuntimeStartResult;
 struct BrowserRuntimeStatusResult;
 struct BrowserRuntimeStopResult;
+struct CancelStreamResult;
 struct CellPixelFailure;
 struct CellPixelResize;
 struct CellPixelSurface;
@@ -416,6 +417,7 @@ struct BrowserRuntimeStopRequest;
 struct BrowserWheelRequest;
 struct BrowserWheelGuardedRequest;
 struct CancelRequestRequest;
+struct CancelStreamRequest;
 struct ChiefInspectRequest;
 struct ChiefInspectResult;
 struct ClearHistoryRequest;
@@ -862,6 +864,7 @@ struct AgentCliJobResolutionIndeterminate;
 struct AgentCliJobResolutionNotFound;
 struct AgentCliJobResolutionPending;
 struct AgentCliJobResolutionPrepared;
+enum class CancelStreamResultOutcome;
 enum class CopyResultMode;
 struct DeclarativeLayoutLeaf;
 struct DeclarativeLayoutSplit;
@@ -2273,6 +2276,20 @@ struct BrowserWheelRequest {
 struct CancelRequestRequest {
     std::optional<JsonValue> target{};
     friend bool operator==(const CancelRequestRequest&, const CancelRequestRequest&) = default;
+};
+
+struct CancelStreamRequest {
+    friend bool operator==(const CancelStreamRequest&, const CancelStreamRequest&) = default;
+};
+
+enum class CancelStreamResultOutcome {
+    applied,
+    ended,
+};
+
+struct CancelStreamResult {
+    CancelStreamResultOutcome outcome{};
+    friend bool operator==(const CancelStreamResult&, const CancelStreamResult&) = default;
 };
 
 struct CellPixelFailure {
@@ -8118,6 +8135,12 @@ struct Codec<BrowserRuntimeStopResult> {
 };
 
 template <>
+struct Codec<CancelStreamResult> {
+    static Result<Json> encode(const CancelStreamResult& value);
+    static Result<CancelStreamResult> decode(const Json& value);
+};
+
+template <>
 struct Codec<CellPixelFailure> {
     static Result<Json> encode(const CellPixelFailure& value);
     static Result<CellPixelFailure> decode(const Json& value);
@@ -10119,6 +10142,12 @@ template <>
 struct Codec<CancelRequestRequest> {
     static Result<Json> encode(const CancelRequestRequest& value);
     static Result<CancelRequestRequest> decode(const Json& value);
+};
+
+template <>
+struct Codec<CancelStreamRequest> {
+    static Result<Json> encode(const CancelStreamRequest& value);
+    static Result<CancelStreamRequest> decode(const Json& value);
 };
 
 template <>
@@ -12795,6 +12824,12 @@ template <>
 struct Codec<AgentCliJobResolutionPrepared> {
     static Result<Json> encode(const AgentCliJobResolutionPrepared& value);
     static Result<AgentCliJobResolutionPrepared> decode(const Json& value);
+};
+
+template <>
+struct Codec<CancelStreamResultOutcome> {
+    static Result<Json> encode(const CancelStreamResultOutcome& value);
+    static Result<CancelStreamResultOutcome> decode(const Json& value);
 };
 
 template <>

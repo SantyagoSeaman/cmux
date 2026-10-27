@@ -1,437 +1,291 @@
-//! Attach output as frames on a stream granted `attach-frames-v1`
-//! (plans/cmux-next/chrome-parity/p05-ipc.md 3.2, task 076;
-//! spec/transports.md "Attach frames").
+//! Client attach streams on a shared connection (`attach-streams-v1`) and
+//! their binary frames (`attach-frames-v1`):
+//! plans/cmux-next/app-daemon-connection-DESIGN.md section 3.
 //!
-//! One [`AttachFrameEncoder`] per attach stream turns each [`AttachFrame`] the
-//! viewer's tap delivers into frames whose aux is an absolute PTY offset:
-//!
-//! - output: one OUTPUT frame whose payload is the PTY bytes themselves, the
-//!   tap's shared chunk handed over without a copy, aux the offset of its first
-//!   byte. Colors replaced by the same parser transition, or the key press
-//!   the bytes echo, follow as an `output` sidecar EVENT whose aux is that
-//!   same offset: the JSON `output` event without `data`.
-//! - a grid replacement (`resized`): one GRID frame at the current offset,
-//!   `meta_len u32 | JSON meta | replay | pending`, the JSON meta being the
-//!   `resized` event without `replay` and `pending`, plus `pending_len`.
-//! - any other attach event: one EVENT frame at the current offset whose
-//!   payload is the event's JSON line text.
-//!
-//! The offsets of consecutive OUTPUT frames are contiguous, so a reader that
-//! sees a gap knows it lost bytes (Chrome's cc::BeginFrameArgs carry a
-//! sequence number for the same reason, cc/scheduler/begin_frame_source.cc).
-//! An attach frame the outbound budget refuses comes back whole in a
-//! [`RefusedAttachFrame`] with the offset unchanged, so the writer waits and
-//! encodes it again at the same offset, as it retries a JSON line.
-//! Long payloads are cut by the connection's `LaneWriter`, which keeps the
-//! OUTPUT offsets contiguous across chunks (cmux-ipc/src/lane_writer.rs).
-//! Decoding the frames gives back the JSON events byte for byte; only the
-//! base64 is gone.
+//! A frame is a 16-byte little-endian header, then `len` payload bytes:
+//! `0xFF | kind u8 | stream u16 | len u32 | offset u64`. `0xFF` never starts
+//! a UTF-8 JSON line, so frames and JSON lines share one byte stream. Client
+//! to daemon stays JSON lines.
 
-use super::AttachWireShape;
-use super::render_service::{
-    BudgetedJsonWriter, OutboundByteBudget, json_error_to_io, write_colors_changed_json,
-    write_output_sidecar_fields, write_resized_state_fields,
-};
-use crate::AttachFrame;
-use crate::SurfaceId;
-use crate::TerminalColors;
-use crate::surface::AttachResize;
-use cmux_ipc::{Aux, BadMessage, FrameHeader, FrameKind, MAX_FRAME_PAYLOAD};
-use serde::Serialize;
-use std::io::Write;
+use super::render_service::OutboundByteBudget;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
-/// Bytes of the little-endian `meta_len` that opens a GRID payload.
-pub(super) const GRID_META_LEN_BYTES: usize = 4;
+/// The first byte of every frame (cmux-ipc's header, crates/cmux-ipc/src/frame.rs).
+pub(crate) const FRAME_MAGIC: u8 = cmux_ipc::MAGIC;
+/// Header bytes before a frame's payload.
+pub(crate) const FRAME_HEADER_LEN: usize = cmux_ipc::HEADER_LEN;
+/// The largest payload: the server's existing message budget
+/// (`REMOTE_SESSION_MESSAGE_MAX_BYTES`, cmux-ipc's `MAX_FRAME_PAYLOAD`).
+pub(crate) const FRAME_MAX_PAYLOAD: usize = cmux_ipc::MAX_FRAME_PAYLOAD as usize;
+const _: () = assert!(FRAME_MAX_PAYLOAD == crate::REMOTE_SESSION_MESSAGE_MAX_BYTES);
 
-/// Why an attach frame could not be encoded.
-#[derive(Debug)]
-pub(super) enum AttachFrameError {
-    /// Attach frames ride a client-minted stream, never the control stream 0.
-    ControlStream,
-    /// Writing the payload failed: the outbound byte budget is full
-    /// (`WouldBlock`, as for a JSON line) or the JSON did not serialize.
-    Write(std::io::Error),
-    /// The payload does not fit one frame.
-    Frame(BadMessage),
+/// Client capability and daemon capability of client-minted attach streams.
+pub(crate) const ATTACH_STREAMS_CAPABILITY: &str = "attach-streams-v1";
+/// Client capability and daemon capability of binary attach frames.
+pub(crate) const ATTACH_FRAMES_CAPABILITY: &str = "attach-frames-v1";
+/// Client capability and daemon capability of the shared-memory output ring
+/// (surface/output_ring.rs): a local snapshot stream's bytes stay in the ring
+/// the client maps; the stream carries RING_ADVANCE frames.
+pub(crate) const TERMINAL_OUTPUT_RING_CAPABILITY: &str = "terminal-output-ring-v1";
+
+/// What a frame's payload holds (design 3.2): cmux-ipc's kinds, one wire
+/// table for the daemon, the app and the SSH bridge.
+pub(crate) use cmux_ipc::FrameKind;
+
+/// A client-minted stream id (1-65535), unique among a connection's open
+/// streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ClientStreamId(NonZeroU16);
+
+impl ClientStreamId {
+    pub(crate) fn new(raw: u16) -> Option<Self> {
+        NonZeroU16::new(raw).map(Self)
+    }
+
+    pub(crate) fn get(self) -> u16 {
+        self.0.get()
+    }
 }
 
-impl std::fmt::Display for AttachFrameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ControlStream => write!(f, "attach frames need a stream other than 0"),
-            Self::Write(error) => write!(f, "attach frame payload: {error}"),
-            Self::Frame(error) => write!(f, "attach frame: {error}"),
+impl<'de> serde::Deserialize<'de> for ClientStreamId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = u16::deserialize(deserializer)?;
+        Self::new(raw).ok_or_else(|| serde::de::Error::custom("stream must be 1-65535"))
+    }
+}
+
+impl serde::Serialize for ClientStreamId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u16(self.get())
+    }
+}
+
+/// How one attach stream is written on its connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct StreamFraming {
+    /// The client's id for the stream; `None` for a legacy attach (one per
+    /// connection, untagged events).
+    pub(crate) id: Option<ClientStreamId>,
+    /// Write the stream's events as binary frames (needs `id`).
+    pub(crate) frames: bool,
+}
+
+impl StreamFraming {
+    pub(crate) const LEGACY: Self = Self { id: None, frames: false };
+
+    /// The framing of a stream the client names `id` on a connection with
+    /// `frames` negotiated. Frames without an id are impossible: a frame
+    /// header always names its stream.
+    pub(crate) fn client(id: ClientStreamId, frames: bool) -> Self {
+        Self { id: Some(id), frames }
+    }
+
+    /// The stream id frames carry; `Some` exactly when frames are written.
+    pub(crate) fn frame_stream(self) -> Option<ClientStreamId> {
+        if self.frames { self.id } else { None }
+    }
+}
+
+/// A frame's header fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameHeader {
+    pub(crate) kind: FrameKind,
+    pub(crate) stream: ClientStreamId,
+    pub(crate) len: u32,
+    pub(crate) offset: u64,
+}
+
+/// Why a header did not decode (the daemon never reads frames: tests and
+/// the app's decoder only).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameHeaderError {
+    Magic,
+    Kind(u8),
+    Stream,
+    TooLarge(u32),
+}
+
+impl FrameHeader {
+    pub(crate) fn encode(self) -> [u8; FRAME_HEADER_LEN] {
+        let mut header = [0_u8; FRAME_HEADER_LEN];
+        header[0] = FRAME_MAGIC;
+        header[1] = self.kind.wire();
+        header[2..4].copy_from_slice(&self.stream.get().to_le_bytes());
+        header[4..8].copy_from_slice(&self.len.to_le_bytes());
+        header[8..16].copy_from_slice(&self.offset.to_le_bytes());
+        header
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: &[u8; FRAME_HEADER_LEN]) -> Result<Self, FrameHeaderError> {
+        if bytes[0] != FRAME_MAGIC {
+            return Err(FrameHeaderError::Magic);
         }
-    }
-}
-
-impl std::error::Error for AttachFrameError {}
-
-impl From<std::io::Error> for AttachFrameError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Write(error)
-    }
-}
-
-impl From<BadMessage> for AttachFrameError {
-    fn from(error: BadMessage) -> Self {
-        Self::Frame(error)
-    }
-}
-
-/// An [`AttachFrame`] that was not encoded, handed back so the writer can
-/// encode it again once the budget has room: the offset did not move.
-#[derive(Debug)]
-pub(super) struct RefusedAttachFrame {
-    pub(super) frame: Box<AttachFrame>,
-    pub(super) error: AttachFrameError,
-}
-
-impl std::fmt::Display for RefusedAttachFrame {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
-    }
-}
-
-impl std::error::Error for RefusedAttachFrame {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
-    }
-}
-
-impl From<RefusedAttachFrame> for std::io::Error {
-    fn from(refused: RefusedAttachFrame) -> Self {
-        refused.error.into()
-    }
-}
-
-impl From<AttachFrameError> for std::io::Error {
-    fn from(error: AttachFrameError) -> Self {
-        match error {
-            AttachFrameError::Write(error) => error,
-            AttachFrameError::ControlStream => {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-            }
-            AttachFrameError::Frame(_) => {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-            }
+        let kind = FrameKind::from_wire(bytes[1]).ok_or(FrameHeaderError::Kind(bytes[1]))?;
+        let stream = ClientStreamId::new(u16::from_le_bytes([bytes[2], bytes[3]]))
+            .ok_or(FrameHeaderError::Stream)?;
+        let len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        if len as usize > FRAME_MAX_PAYLOAD {
+            return Err(FrameHeaderError::TooLarge(len));
         }
+        let mut offset = [0_u8; 8];
+        offset.copy_from_slice(&bytes[8..16]);
+        Ok(Self { kind, stream, len, offset: u64::from_le_bytes(offset) })
     }
 }
 
-/// A frame payload charged to an outbound byte budget until it drops, as a
-/// `BudgetedText` is for a JSON line: a payload it wrote by the capacity of
-/// its allocation, a shared PTY output chunk by its length.
-pub(super) struct BudgetedBytes {
-    bytes: bytes::Bytes,
+/// One encoded frame, charged to the connection's outbound byte budget until
+/// it is written.
+pub(crate) struct BudgetedFrame {
+    kind: FrameKind,
+    bytes: Vec<u8>,
     retained_bytes: usize,
     budget: Arc<OutboundByteBudget>,
+    /// Passed with the frame's first byte (`SCM_RIGHTS`): a RING frame's
+    /// read-only ring descriptor. Closed once the frame is written or dropped.
+    #[cfg(unix)]
+    descriptor: Option<std::os::fd::OwnedFd>,
 }
 
-impl BudgetedBytes {
-    /// Shares a buffer that already exists (a PTY output chunk, not copied)
-    /// once its length is charged, as the viewer queue counts it
-    /// (surface/attach_tap.rs); a refused chunk is not taken.
-    fn share(bytes: &bytes::Bytes, budget: &Arc<OutboundByteBudget>) -> std::io::Result<Self> {
-        let retained_bytes = bytes.len();
-        if !budget.try_retain(retained_bytes) {
-            return Err(budget_overflow());
-        }
-        Ok(Self { bytes: bytes.clone(), retained_bytes, budget: budget.clone() })
+impl BudgetedFrame {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
-    /// The bytes `writer` wrote, as one shared buffer.
-    fn finish(mut writer: BudgetedJsonWriter) -> Self {
-        let bytes = std::mem::take(&mut writer.bytes);
-        let retained_bytes = bytes.capacity();
-        if retained_bytes < writer.retained_bytes {
-            writer.budget.release(writer.retained_bytes - retained_bytes);
-        }
-        // The writer's drop releases nothing more: the payload owns the charge.
-        writer.retained_bytes = 0;
-        writer.reservation_bytes = 0;
-        Self { bytes: bytes.into(), retained_bytes, budget: writer.budget.clone() }
+    #[cfg(unix)]
+    pub(crate) fn descriptor(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd as _;
+        self.descriptor.as_ref().map(|descriptor| descriptor.as_raw_fd())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub(crate) fn kind(&self) -> FrameKind {
+        self.kind
     }
 }
 
-impl Drop for BudgetedBytes {
+impl Drop for BudgetedFrame {
     fn drop(&mut self) {
         self.budget.release(self.retained_bytes);
     }
 }
 
-fn budget_overflow() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::WouldBlock, "global outbound byte budget overflowed")
+fn would_block(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::WouldBlock, message)
 }
 
-/// A writer that holds exactly `capacity` bytes, charged before it
-/// allocates: a frame payload whose length is known up front.
-fn exact_writer(
+/// Builds one frame from payload parts (written in order, no intermediate
+/// copy), charged to `budget`.
+pub(crate) fn encode_frame(
     budget: &Arc<OutboundByteBudget>,
-    capacity: usize,
-) -> std::io::Result<BudgetedJsonWriter> {
-    let mut writer = BudgetedJsonWriter::with_reservation(budget.clone(), capacity)?;
-    writer.bytes.try_reserve_exact(capacity).map_err(std::io::Error::other)?;
-    // The allocator may round the capacity up; charge what it gave.
-    let extra = writer.bytes.capacity().saturating_sub(writer.retained_bytes);
-    if extra > 0 {
-        if !budget.try_retain(extra) {
-            return Err(budget_overflow());
-        }
-        writer.retained_bytes += extra;
-    }
-    Ok(writer)
-}
-
-/// One frame and its payload, charged to the outbound budget until it drops.
-pub(super) struct BudgetedFrame {
-    header: FrameHeader,
-    payload: BudgetedBytes,
-}
-
-impl BudgetedFrame {
-    fn new(header: FrameHeader, payload: BudgetedBytes) -> Result<Self, AttachFrameError> {
-        let len = usize::try_from(header.len()).unwrap_or(usize::MAX);
-        if payload.bytes.len() != len {
-            return Err(BadMessage::Truncated { have: payload.bytes.len(), need: len }.into());
-        }
-        Ok(Self { header, payload })
-    }
-
-    pub(super) fn header(&self) -> &FrameHeader {
-        &self.header
-    }
-
-    pub(super) fn payload(&self) -> &bytes::Bytes {
-        &self.payload.bytes
-    }
-
-    /// The PTY offset in the header's aux (every attach frame kind has one).
-    pub(super) fn offset(&self) -> Option<u64> {
-        match self.header.aux() {
-            Aux::Offset(offset) => Some(offset),
-            Aux::FlowId(_) | Aux::SharedBufferSize(_) | Aux::Call(_) => None,
-        }
-    }
-}
-
-/// The frames of one [`AttachFrame`]: the frame itself and, for output that
-/// carries colors or a flow, its sidecar EVENT. Written in this order.
-pub(super) struct EncodedAttachFrame {
-    pub(super) frame: BudgetedFrame,
-    pub(super) sidecar: Option<BudgetedFrame>,
-}
-
-impl EncodedAttachFrame {
-    fn single(frame: BudgetedFrame) -> Self {
-        Self { frame, sidecar: None }
-    }
-
-    /// Every frame, in write order.
-    pub(super) fn frames(&self) -> impl Iterator<Item = &BudgetedFrame> {
-        std::iter::once(&self.frame).chain(self.sidecar.as_ref())
-    }
-}
-
-/// Encodes one attach stream's frames and keeps its absolute PTY offset.
-pub(super) struct AttachFrameEncoder {
-    stream: u16,
-    surface: SurfaceId,
-    shape: AttachWireShape,
-    /// Offset of the next output byte.
+    kind: FrameKind,
+    stream: ClientStreamId,
     offset: u64,
+    parts: &[&[u8]],
+) -> std::io::Result<Arc<BudgetedFrame>> {
+    let len = parts.iter().try_fold(0_usize, |total, part| total.checked_add(part.len()));
+    let len = len.filter(|len| *len <= FRAME_MAX_PAYLOAD).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "frame payload exceeds the limit")
+    })?;
+    let total = FRAME_HEADER_LEN + len;
+    if !budget.try_retain(total) {
+        return Err(would_block("global outbound byte budget overflowed"));
+    }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(total).is_err() {
+        budget.release(total);
+        return Err(would_block("could not allocate a frame"));
+    }
+    let header = FrameHeader { kind, stream, len: len as u32, offset };
+    bytes.extend_from_slice(&header.encode());
+    for part in parts {
+        bytes.extend_from_slice(part);
+    }
+    Ok(Arc::new(BudgetedFrame {
+        kind,
+        bytes,
+        retained_bytes: total,
+        budget: budget.clone(),
+        #[cfg(unix)]
+        descriptor: None,
+    }))
 }
 
-impl AttachFrameEncoder {
-    /// An encoder for `stream` whose first output byte is at `offset`
-    /// (`AttachStream::offset`, taken with the replay).
-    pub(super) fn new(
-        stream: u16,
-        surface: SurfaceId,
-        shape: AttachWireShape,
-        offset: u64,
-    ) -> Result<Self, AttachFrameError> {
-        if stream == 0 {
-            return Err(AttachFrameError::ControlStream);
-        }
-        Ok(Self { stream, surface, shape, offset })
-    }
-
-    /// Offset of the next output byte.
-    pub(super) fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    /// The frames of `frame`. The offset advances only when every frame of
-    /// it was encoded; a refused frame comes back whole, to be encoded again
-    /// at the same offset, so the reader never sees a gap over lost bytes.
-    pub(super) fn encode(
-        &mut self,
-        mut frame: AttachFrame,
-        budget: &Arc<OutboundByteBudget>,
-    ) -> Result<EncodedAttachFrame, RefusedAttachFrame> {
-        let encoded = match &mut frame {
-            AttachFrame::Output(output) => self.output(output, None, 0, budget),
-            AttachFrame::FlowOutput { output, flow } => self.output(output, None, *flow, budget),
-            AttachFrame::OutputWithColors { output, colors, flow } => {
-                self.output(output, Some(colors), *flow, budget)
-            }
-            AttachFrame::ColorsChanged(colors) => {
-                let (surface, shape) = (self.surface, self.shape);
-                self.json_event(self.offset, budget, |writer| {
-                    write_colors_changed_json(writer, surface, colors, shape)
-                })
-                .map(EncodedAttachFrame::single)
-            }
-            AttachFrame::Resized {
-                cols,
-                rows,
-                replay,
-                kitty_image_aliases,
-                kitty_state,
-                pending_sequence,
-            } => self
-                .grid(
-                    &AttachResize {
-                        cols: *cols,
-                        rows: *rows,
-                        replay,
-                        kitty_image_aliases,
-                        kitty_state: *kitty_state,
-                        colors: None,
-                        pending_sequence,
-                    },
-                    budget,
-                )
-                .map(EncodedAttachFrame::single),
-            AttachFrame::ResizedWithColors {
-                cols,
-                rows,
-                replay,
-                kitty_image_aliases,
-                kitty_state,
-                colors,
-                pending_sequence,
-            } => self
-                .grid(
-                    &AttachResize {
-                        cols: *cols,
-                        rows: *rows,
-                        replay,
-                        kitty_image_aliases,
-                        kitty_state: *kitty_state,
-                        colors: Some(colors),
-                        pending_sequence,
-                    },
-                    budget,
-                )
-                .map(EncodedAttachFrame::single),
-        };
-        encoded.map_err(|error| RefusedAttachFrame { frame: Box::new(frame), error })
-    }
-
-    /// Another attach event (`detached`, `overflow`) as an EVENT frame at
-    /// the current offset.
-    pub(super) fn event<T: Serialize + ?Sized>(
-        &self,
-        value: &T,
-        budget: &Arc<OutboundByteBudget>,
-    ) -> Result<BudgetedFrame, AttachFrameError> {
-        self.json_event(self.offset, budget, |writer| {
-            serde_json::to_writer(writer, value).map_err(json_error_to_io)
-        })
-    }
-
-    /// Shares the tap's chunk only once every frame of it is encoded; on an
-    /// error nothing of it is charged.
-    fn output(
-        &mut self,
-        output: &bytes::Bytes,
-        colors: Option<&TerminalColors>,
-        flow: u64,
-        budget: &Arc<OutboundByteBudget>,
-    ) -> Result<EncodedAttachFrame, AttachFrameError> {
-        let start = self.offset;
-        let len = output.len();
-        let header = self.header(FrameKind::Output, len, start)?;
-        let sidecar = if colors.is_some() || flow != 0 {
-            let (surface, shape) = (self.surface, self.shape);
-            Some(self.json_event(start, budget, |writer| {
-                write!(writer, "{{\"event\":\"output\",\"surface\":{surface}")?;
-                write_output_sidecar_fields(writer, colors, flow, shape)?;
-                writer.write_all(b"}")
-            })?)
-        } else {
-            None
-        };
-        // The header was made from `len`, so the frame is complete.
-        let frame = BudgetedFrame { header, payload: BudgetedBytes::share(output, budget)? };
-        self.offset = start.saturating_add(u64::try_from(len).unwrap_or(u64::MAX));
-        Ok(EncodedAttachFrame { frame, sidecar })
-    }
-
-    /// `meta_len | meta | replay | pending`. A viewer without
-    /// `terminal-pending-sequence-v1` gets no `pending_len`, so the pending
-    /// bytes end its replay, as in its JSON `resized` event.
-    fn grid(
-        &self,
-        resize: &AttachResize<'_>,
-        budget: &Arc<OutboundByteBudget>,
-    ) -> Result<BudgetedFrame, AttachFrameError> {
-        let mut meta = BudgetedJsonWriter::new(budget.clone());
-        write!(
-            meta,
-            "{{\"event\":\"resized\",\"surface\":{},\"cols\":{},\"rows\":{}",
-            self.surface, resize.cols, resize.rows
-        )?;
-        write_resized_state_fields(&mut meta, resize, self.shape)?;
-        if self.shape.pending_sequence && !resize.pending_sequence.is_empty() {
-            write!(meta, ",\"pending_len\":{}", resize.pending_sequence.len())?;
-        }
-        meta.write_all(b"}")?;
-        let meta = BudgetedBytes::finish(meta);
-        let meta_len = u32::try_from(meta.bytes.len())
-            .map_err(|_| BadMessage::Oversize { len: u32::MAX, max: MAX_FRAME_PAYLOAD })?;
-        let len = GRID_META_LEN_BYTES
-            .saturating_add(meta.bytes.len())
-            .saturating_add(resize.replay.len())
-            .saturating_add(resize.pending_sequence.len());
-        // Validate the length before the payload is allocated.
-        let header = self.header(FrameKind::Grid, len, self.offset)?;
-        let mut payload = exact_writer(budget, len)?;
-        payload.write_all(&meta_len.to_le_bytes())?;
-        payload.write_all(&meta.bytes)?;
-        payload.write_all(resize.replay)?;
-        payload.write_all(resize.pending_sequence)?;
-        drop(meta);
-        BudgetedFrame::new(header, BudgetedBytes::finish(payload))
-    }
-
-    fn json_event(
-        &self,
-        offset: u64,
-        budget: &Arc<OutboundByteBudget>,
-        write: impl FnOnce(&mut BudgetedJsonWriter) -> std::io::Result<()>,
-    ) -> Result<BudgetedFrame, AttachFrameError> {
-        let mut writer = BudgetedJsonWriter::new(budget.clone());
-        write(&mut writer)?;
-        let payload = BudgetedBytes::finish(writer);
-        let header = self.header(FrameKind::Event, payload.bytes.len(), offset)?;
-        BudgetedFrame::new(header, payload)
-    }
-
-    fn header(
-        &self,
-        kind: FrameKind,
-        len: usize,
-        offset: u64,
-    ) -> Result<FrameHeader, AttachFrameError> {
-        let len = u32::try_from(len)
-            .map_err(|_| BadMessage::Oversize { len: u32::MAX, max: MAX_FRAME_PAYLOAD })?;
-        Ok(FrameHeader::new(kind, self.stream, len, Aux::Offset(offset))?)
-    }
+/// A frame that passes `descriptor` with its first byte (a RING frame).
+#[cfg(unix)]
+pub(crate) fn encode_frame_passing(
+    budget: &Arc<OutboundByteBudget>,
+    kind: FrameKind,
+    stream: ClientStreamId,
+    offset: u64,
+    parts: &[&[u8]],
+    descriptor: std::os::fd::OwnedFd,
+) -> std::io::Result<Arc<BudgetedFrame>> {
+    let frame = encode_frame(budget, kind, stream, offset, parts)?;
+    let mut frame =
+        Arc::try_unwrap(frame).map_err(|_| std::io::Error::other("a new frame has one owner"))?;
+    frame.descriptor = Some(descriptor);
+    Ok(Arc::new(frame))
 }
+
+/// A frame whose payload is `meta_len u32 | meta | data parts`, with `meta`
+/// already serialized JSON.
+pub(crate) fn encode_raw_meta_frame(
+    budget: &Arc<OutboundByteBudget>,
+    kind: FrameKind,
+    stream: ClientStreamId,
+    offset: u64,
+    meta: &[u8],
+    data: &[&[u8]],
+) -> std::io::Result<Arc<BudgetedFrame>> {
+    let meta_len = u32::try_from(meta.len())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame meta too large"))?
+        .to_le_bytes();
+    let mut parts: Vec<&[u8]> = Vec::with_capacity(2 + data.len());
+    parts.push(&meta_len);
+    parts.push(meta);
+    parts.extend_from_slice(data);
+    encode_frame(budget, kind, stream, offset, &parts)
+}
+
+/// A frame whose payload is `meta_len u32 | meta | data parts`.
+pub(crate) fn encode_meta_frame(
+    budget: &Arc<OutboundByteBudget>,
+    kind: FrameKind,
+    stream: ClientStreamId,
+    offset: u64,
+    meta: &serde_json::Value,
+    data: &[&[u8]],
+) -> std::io::Result<Arc<BudgetedFrame>> {
+    let meta = serde_json::to_vec(meta).map_err(std::io::Error::other)?;
+    encode_raw_meta_frame(budget, kind, stream, offset, &meta, data)
+}
+
+/// `json` (one serialized JSON object) with `"attach_stream":id` as its
+/// first member: the JSON shape of a client stream's event. Its own key: other
+/// protocols on the same connection already use `stream` (`loopback-forward-v1`).
+pub(crate) fn tag_json_object(json: &str, stream: ClientStreamId) -> Option<String> {
+    let rest = json.strip_prefix('{')?;
+    let empty = rest.trim_start().starts_with('}');
+    let mut tagged = String::with_capacity(json.len() + 16);
+    tagged.push_str("{\"attach_stream\":");
+    tagged.push_str(&stream.get().to_string());
+    if !empty {
+        tagged.push(',');
+    }
+    tagged.push_str(rest);
+    Some(tagged)
+}
+
+/// The largest OUTPUT payload: a stream's output is cut into frames of at
+/// most this size, so what queues ahead of another stream's frame stays
+/// bounded (design 3.2). Its value is measured in the slice-1 fleet run.
+pub(crate) const OUTPUT_FRAME_MAX: usize = 64 * 1024;
 
 #[cfg(test)]
 #[path = "attach_frames_tests.rs"]

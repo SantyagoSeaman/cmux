@@ -8,7 +8,7 @@ from typing import Mapping, Optional, Tuple
 
 SCHEMA_VERSION = 2
 MUX_PROTOCOL = 12
-IR_SHA256 = '92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499'
+IR_SHA256 = '9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e'
 
 
 @dataclass(frozen=True)
@@ -979,6 +979,16 @@ COMMANDS = {
         None,
         {
             'target': CommandFieldMetadata(None, None),
+        },
+    ),
+    'cancel-stream': CommandMetadata(
+        'cancel-stream',
+        'frontend',
+        12,
+        'attach-streams-v1',
+        ('frontend',),
+        None,
+        {
         },
     ),
     'chief-inspect': CommandMetadata(

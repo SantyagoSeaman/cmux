@@ -47,6 +47,9 @@ fn written(item: OutboundItem) -> Written {
             len: header.len() as usize,
             aux: Some(header.aux()),
         },
+        OutboundItem::AttachFrame(frame) => {
+            Written { stream: 0, kind: Some(frame.kind()), len: frame.len(), aux: None }
+        }
         OutboundItem::Flush(_) => panic!("no flush was queued"),
     }
 }

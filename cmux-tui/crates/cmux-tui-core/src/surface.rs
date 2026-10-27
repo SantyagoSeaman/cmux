@@ -103,6 +103,7 @@ use test_pty::FdMasterPty;
 #[cfg(test)]
 use test_pty::{
     StartupChild, StartupChildState, TestChildKiller, TestMasterPty, TestMasterPtyControl,
+    TestPtyWriter,
 };
 #[cfg(any(unix, windows))]
 mod clipboard_read;
@@ -127,6 +128,10 @@ mod host_kitty_limits;
 #[cfg(any(unix, windows))]
 mod journal_reconnect;
 mod kitty_pixels;
+/// A terminal's output ring in shared memory for local attach streams
+/// (`terminal-output-ring-v1`).
+#[cfg(unix)]
+pub(crate) mod output_ring;
 #[cfg(any(unix, windows))]
 mod prelaunch;
 #[cfg(any(unix, windows))]
@@ -348,6 +353,8 @@ mod attach_tap;
 pub use attach_tap::AttachFrameReceiver;
 pub(crate) use attach_tap::AttachLifecycle;
 pub(crate) use attach_tap::AttachResize;
+#[cfg(unix)]
+pub(crate) use attach_tap::SharedOutputRing;
 pub(crate) use attach_tap::ViewerEvent;
 #[cfg(test)]
 use attach_tap::{

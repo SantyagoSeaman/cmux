@@ -38,17 +38,23 @@ extension LineTransport {
         var retryable: Bool?
         /// An event's `cause` (`frontend`, `program`, `automation`); scheduling only.
         var cause: String?
+        /// The client attach stream an event belongs to (`attach-streams-v1`).
+        var attachStream: UInt16?
 
         enum CodingKeys: String, CodingKey {
             case id, ok, event, error, type, reason, retryable, data, cause
+            /// Not `stream`: `loopback-forward-v1` events use that key.
+            case stream = "attach_stream"
             case errorCode = "error_code"
             case streamID = "stream_id"
         }
 
         /// The routing fields alone (``LineRouteScan/envelope``); a reply that is not `ok:true` is
         /// decoded whole for its error fields.
-        init(id: UInt64?, ok: Bool?, event: String?, type: String?, streamID: String?, cause: String?) {
+        init(id: UInt64?, ok: Bool?, event: String?, type: String?, streamID: String?, cause: String?,
+             attachStream: UInt16? = nil) {
             (self.id, self.ok, self.event, self.type, self.streamID, self.cause) = (id, ok, event, type, streamID, cause)
+            self.attachStream = attachStream
         }
 
         private struct ResourceError: Decodable {
@@ -69,6 +75,7 @@ extension LineTransport {
             (event, streamID) = (try? c.decodeIfPresent(String.self, forKey: .event), try? c.decodeIfPresent(String.self, forKey: .streamID))
             if event != nil { cause = try? c.decodeIfPresent(String.self, forKey: .cause) }
             type = try? c.decodeIfPresent(String.self, forKey: .type)
+            attachStream = try? c.decodeIfPresent(UInt16.self, forKey: .stream)
             errorCode = try? c.decodeIfPresent(String.self, forKey: .errorCode)
             if let text = try? c.decodeIfPresent(String.self, forKey: .error) {
                 error = text

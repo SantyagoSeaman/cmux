@@ -59,22 +59,29 @@ connection's `set-client-info`. A peer without one keeps today's behavior for th
 
 ### 3.1 Streams (`attach-streams-v1`)
 
-- `attach-surface` takes `stream` (u16, 1-65535), minted by the client, unique among the streams the
+- `attach-surface` takes `attach_stream` (u16, 1-65535; its own JSON key, because `loopback-forward-v1`
+  lines already use `stream` on the same connection), minted by the client, unique among the streams the
   connection has open. The daemon refuses a duplicate (`stream_in_use`). The id is the client's handle from
   the first byte: the READY snapshot that precedes the reply is already tagged, so the client routes it
   before it has the reply (today the daemon sends READY before the reply, and only "one attach per
   connection" makes that routable).
-- Every event of that attach carries the id: JSON events get `"stream": N`; frames carry it in the header.
+- Every event of that attach carries the id: JSON events get `"attach_stream": N`; frames carry it in the
+  header.
   This covers the attach's own events and the client-scoped ones the registry sends on attach streams
   (`size-state`, `scroll-changed`, `notification`, `detached`, `overflow`, `digest`).
-- Requests that act for a view carry the same `stream` (top-level field next to `cmd`): `send`,
-  `resize-attached-view`, `release-attached-view-size`, `set-client-sizing`, `set-size-counts`,
-  `set-size-policy`, `snapshot-request`, `detach-attached-view`, `scroll-surface`. The daemon checks that the
-  stream is this connection's and names that surface.
-- `cancel-stream {stream}` ends a stream at once, also one whose `attach-surface` has not answered yet
-  (idempotent: an unknown or ended id answers `ended`). `detach-attached-view` stays valid.
-- The last item of every stream is `stream-end {stream, reason}` (`detached`, `overflow`, `canceled`,
-  `refused`). Only after it may the client reuse the id: no late frame of an old stream can reach a new one.
+- Requests that act for a view carry the same `attach_stream` (top-level field next to `cmd`): `send`, `send-key`,
+  `resize-attached-view`, `release-attached-view-size`, `detach-attached-view`, `reattach-view`,
+  `set-client-sizing`, `set-size-counts`, `set-size-policy`, `note-size-activity`, `snapshot-request`,
+  `scroll-surface`, `attach-surface`, `cancel-stream`. `attach_stream` only picks the request's lane (3.3); each
+  request still names and checks its own surface and lease, so a wrong `attach_stream` cannot reach another view.
+- `cancel-stream {stream}` ends a stream after the stream's earlier requests (it runs on the stream's lane,
+  so a cancel sent before the attach answered ends the stream right after it). Idempotent: an id that is not
+  open answers `ended`. `detach-attached-view` stays valid.
+- The last item of every stream is `stream-end {stream, reason}` (`ended`, or `overflow` when the daemon
+  dropped the stream's backlog). A surface that went away sends `detached` before it. A failed
+  `attach-surface` that named a stream also ends it after its error reply (unless the id is another open
+  stream's). Only after `stream-end` may the client reuse the id: no late frame of an old stream can reach a
+  new one.
 - Sizing identity: views of one connection are leases of one client (today each view was its own client).
   The registry already supports several leases per (client, surface) (`client_registry_views.rs:44-82`:
   `view_leases`, `geometry_lease`), and the participant of a view of terminal T is `c<client>[@placement]`
@@ -109,10 +116,10 @@ one byte that matters for the framing is `0xFF`. No code sends `\xFFCO` yet.
 |---|---|---|---|
 | 1 | OUTPUT | raw PTY bytes | offset of the first payload byte |
 | 2 | GRID | JSON meta: `cols`, `rows`, optional `history_rows`, `history_digest` (G2 in-band resize marker) | stream offset of the resize |
-| 3 | EVENT | one JSON event object, no newline (`size-state`, `colors-changed`, `scroll-changed`, `notification`, `digest`, `detached`, `overflow`, `stream-end`) | stream offset the event applies after |
+| 3 | EVENT | one JSON event object, no newline (`size-state`, `colors-changed`, `scroll-changed`, `notification`, `digest`, `detached`, `stream-end`) | 0: an event applies at its place in the stream |
 | 4 | SNAPSHOT | `meta_len u32`, JSON meta (today's `snapshot` fields without `data`), raw data | the READY's cut |
 | 5 | SNAPSHOT_MORE | same shape, `phase` `history` or `images` (history stays raw DEFLATE) | the READY's cut |
-| 6 | REPLAY | `meta_len u32`, JSON meta (`vt-state` / `resized` fields without `data`, plus `pending_len`), replay bytes then pending bytes | stream offset of the replay's end |
+| 6 | REPLAY | `meta_len u32`, JSON meta (`vt-state` / `resized` fields without `data`, plus `pending_len`), replay bytes then pending bytes | 0 (a byte-replay stream has no snapshot offsets; its OUTPUT offsets are 0 too) |
 | 7 | RING | JSON meta `{capacity, base, layout}`; one descriptor rides on this frame (SCM_RIGHTS) | ring end when sent |
 | 8 | RING_ADVANCE | empty | new ring end: bytes up to here are published |
 
@@ -147,8 +154,10 @@ Daemon to client, per stream:
 Client side (`app:CmuxNextDaemon/Connection`):
 - The connection's reader thread never waits for a consumer. Each stream has its own bounded queue
   (8 MiB of output, as today's per-view high-water). When a stream's queue would pass it, the reader drops
-  that stream's queued output, marks it resyncing, sends `snapshot-request {stream, reason:"overflow"}`, and
+  that stream's queued output, marks it resyncing, sends `snapshot-request {stream, reason:"gap"}`, and
   drops the stream's output until the next READY. Other streams and control replies keep flowing.
+  The queue does not merge output chunks on a shared connection: each OUTPUT frame and each ring span is
+  its own event (no copy, and nothing moves past a grid change).
 - Ring streams queue spans of the mapping (no bytes); their bound is the ring itself (section 4.4).
 
 Client to daemon (requests), per stream lane:
@@ -156,10 +165,33 @@ Client to daemon (requests), per stream lane:
   connection that would put a key for terminal A behind a slow request for terminal B (an attach waits up
   to 1 s for a hosted resize, `cmd_attach.rs:57`; a `send` to a PTY whose program stopped reading waits for
   POLLOUT, `pty_write.rs`). That is head-of-line blocking the per-view connections never had.
-- With `attach-streams-v1`, a request with `stream` runs on that stream's lane; every other request runs on
+- With `attach-streams-v1`, a request with `attach_stream` runs on that stream's lane; every other request runs on
   the control lane (the existing dispatcher, unchanged order). Lanes are independent FIFOs, exactly the
   ordering domains that separate connections gave: requests of one view stay in order, views and the
   control plane do not wait for each other.
+- Cross-lane order (lead review, required): a surface's requests keep their wire order across lanes, by
+  ACCEPTANCE, not completion. Each request that names a surface gets an arrival number and a ticket in that
+  surface's order (`connection_scheduler.rs` `SurfaceOrder`); a stream request waits until the surface's
+  earlier control requests are accepted, and a control request is held until the surface's earlier stream
+  requests are accepted. A request is accepted when its effect is applied (`RequestAcceptance`; by default
+  when it finishes). The one request kind that blocks on a condition, `wait-for`, is accepted once its wait
+  is registered, so a key after a blocked `wait-for` of its own surface runs at once (the 10 s wait of the
+  red guard stays gone on the same surface). The other ordered kinds reply right after their effect, or
+  after a bounded write (the clear-history fallback key, an image paste), so for them acceptance and
+  completion are one moment. An `attach-surface` is accepted once its view is registered (lease and
+  initial size); only its own reply waits (up to 1 s) for a hosted resize, so a resize or clear of the new
+  pane on the control lane is applied at once (lead review: the Cmd-D early-resize path). No later request
+  needs the attach's resized state: what it changes is in the replay or snapshot the attach takes after. That covers every order that matters: clear-history after the input sent
+  before it and before the input sent after it; close-surface after the view's pending writes; a read
+  after the writes it should see. Output is not a request (it is ordered by the stream itself), and a
+  detach or cancel runs on its stream's lane, so its `stream-end` follows the stream's queued frames.
+  Different surfaces never wait for each other, so a key for terminal A still never waits for terminal B.
+  A control request held for its surface's stream input (a close after a send that blocks while the
+  terminal's program stopped reading, or while its host reconnects) holds back only that surface's later
+  control requests; the control lane runs every other request past it (review of 0ade7bf4318, M2).
+  `set-client-info` is the only connection-wide barrier: a stream request sent after it waits until it is
+  applied, because it records the capabilities and sizing identity an attach needs. Other control requests
+  of no surface (a workspace switch, a new tab) order nothing on the stream lanes.
 - Lane workers: a per-connection pool of threads that park on a condvar when no lane is runnable (no timer,
   no polling, D6). A lane runs on at most one worker at a time. A worker is spawned only when a lane becomes
   runnable and every worker is busy, so the thread count is the high-water of concurrently busy lanes
@@ -184,7 +216,7 @@ offset on continue it exactly.
 - SSH machines (`cmux-tui remote connect`): not in slices 1-4. The SSH bridge splits on `\n` and parses JSON
   in both directions and spreads one connection across lanes (`cmux-remote/src/mux_codec.rs:34-54`,
   `mux_lanes.rs:113-200`, `services.rs:1350`). The app does not advertise `attach-frames-v1` there and gets
-  JSON with `stream` ids (3.1 still removes the 3 round trips per pane). Slice 5 teaches the bridge frames
+  JSON with `attach_stream` ids (3.1 still removes the 3 round trips per pane). Slice 5 teaches the bridge frames
   ("the SSH link keeps the framed stream"): the remote side reads a `0xFF` message by its header, sends all
   frames of one stream on one lane (OUTPUT on Bulk keeps the stream's order only if the stream's EVENTs ride
   the same lane: per-stream lane, not per-kind), and the app side writes them unchanged.
@@ -205,6 +237,10 @@ to the remote entry transport (`ClientTransport::Remote`) or a WebSocket.
   is not this ring).
 - Readers: the app's ring streams of that terminal (one per attached view). Readers never write the ring.
 - Snapshot viewers only (the app's normal attach). A byte-replay attach keeps OUTPUT frames.
+- Built: `cmux-tui-core/src/surface/output_ring.rs` (the writer); `PtySurface::broadcast_attach_output` /
+  `broadcast_attach_frame` write it once per chunk under the taps lock; a ring viewer's tap queues
+  `RingAdvance(end)` items (merged), never a copy of the bytes. The first ring viewer of a terminal makes the
+  ring at the snapshot offset under the terminal lock; the ring goes when its last viewer does.
 
 ### 4.2 Layout (little endian)
 
@@ -249,10 +285,10 @@ the size is raised with that number as its reason.
 - Daemon restart: the connection drops, streams end, the app reattaches to the new daemon (snapshot, new
   ring). Holder restart: the daemon keeps every master and keeps writing the ring (terminal-host-model 5);
   nothing changes for the app.
-- Reconnect and resume by offset: a reattach names `resume_offset` (the end the app parsed). When the daemon
-  still holds the terminal's ring and the offset is inside it, the attach skips the READY and sends RING plus
-  RING_ADVANCE from that offset; otherwise a READY as today. (Slice 3; saves the snapshot on a stream
-  restart inside one daemon, e.g. after a client queue overflow that recovered.)
+- Reconnect and resume by offset (not built yet): a reattach names `resume_offset` (the end the app parsed).
+  When the daemon still holds the terminal's ring and the offset is inside it, the attach skips the READY
+  and sends RING plus RING_ADVANCE from that offset; otherwise a READY as today. Today every reattach gets
+  a READY.
 
 ### 4.4 Reading and zero copy
 
@@ -280,9 +316,10 @@ the size is raised with that number as its reason.
 ### 4.5 Security
 
 - The ring carries the terminal's output, which the stream already carries; the same peer may read it. The
-  daemon grants it only on a local Unix connection whose peer has the daemon's euid (`getpeereid`), and
-  that is trusted by the existing origin gate as the app (`request_origin`); never on the remote entry,
-  a relay, a WebSocket, or a `DaemonBridge` link.
+  daemon grants it only on a local Unix connection (its listener admits only its own user and root,
+  `cmux-tui-platform` transport `peer_may_connect`) that is not the remote entry or a relay, to a client that
+  advertised `terminal-output-ring-v1`. Only the app's connection to its local daemon advertises it
+  (`DaemonCapabilities.advertisedLocally`): a descriptor cannot cross a `DaemonBridge` link or SSH.
 - The reader's descriptor is read-only (opened `O_RDONLY` before the unlink), so a reader cannot change the
   ring. The daemon never reads the data area back, so nothing a reader does reaches the parser.
 
@@ -293,7 +330,7 @@ the size is raised with that number as its reason.
   (stream id to sink) without copying: a frame payload is a slice of the read buffer.
 - `TerminalAttachment` keeps its public surface (`TerminalByteChannel`, `events`, the synchronous command
   path) and becomes a stream on the machine's `DaemonConnection`: it mints the stream id, registers its sink
-  before it sends `attach-surface`, and sends every command on the shared transport with `stream`. No
+  before it sends `attach-surface`, and sends every command on the shared transport with `attach_stream`. No
   `identify`, no `set-client-info` per view. `detachNow` sends `cancel-stream`; the id is freed at
   `stream-end` or when the connection ends.
 - Reconnect: when `DaemonConnection` replaces its transport, every stream on the old one ends with
@@ -307,8 +344,12 @@ the size is raised with that number as its reason.
 
 - Old app, new daemon: no capability, today's per-view connections and JSON.
 - New app, old daemon: the daemon does not advertise the capabilities; the app uses per-view connections.
-- One release keeps the per-view path in the app behind `CMUX_NEXT_TERMINAL_STREAMS=0` (default on), then
-  slice 4 deletes it. The daemon keeps JSON/base64 output for the other clients (iOS `CmuxMobileSSH`,
+- Streams are behind the `daemonTerminalStreams` feature (schemas/features/features.d, default off on
+  every channel while the chrome-parity push measures it; p01-process-126). One release after it turns on,
+  slice 4 deletes the per-view path.
+- Binary frames and the ring follow p05-ipc's grant rule (capabilities.rs `IpcCapability`): only a direct
+  same-user local client that declared this daemon's `api_revision` gets them. Until the app declares its
+  revision in `set-client-info`, its streams carry JSON events tagged with `attach_stream`. The daemon keeps JSON/base64 output for the other clients (iOS `CmuxMobileSSH`,
   `cmux-next-ios` CmuxMobileLive, the cmux-tui TUI, the Rust and TypeScript SDKs, chatmux-relay) until each
   negotiates frames; nothing changes for them.
 
@@ -332,7 +373,7 @@ STRESS before and after.
    (reader holds a span while the writer laps) requires a resync and a correct screen.
 4. **Remove the per-view path** after one release: the flag, the per-view `LineTransport`, the blocking
    `TerminalEventQueue` mode.
-5. **SSH bridge frames** (cmux-remote): frames over the link, per-stream lane, `stream` kept on `send`.
+5. **SSH bridge frames** (cmux-remote): frames over the link, per-stream lane, `attach_stream` kept on `send`.
 
 ## 8. Files (for coordination)
 

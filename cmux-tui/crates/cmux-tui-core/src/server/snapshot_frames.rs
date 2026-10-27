@@ -113,6 +113,12 @@ impl<'a> SnapshotEvent<'a> {
         Self { offset, meta, data: data.into() }
     }
 
+    /// The READY's offset, the meta and the bytes of `data`: what D3's
+    /// stream writer frames (server/terminal_snapshot.rs `send_snapshot_event`).
+    pub(in crate::server) fn into_parts(self) -> (u64, Value, Cow<'a, [u8]>) {
+        (self.offset, self.meta, self.data)
+    }
+
     /// The JSON line: the meta with `data` in base64.
     pub(in crate::server) fn into_json(self) -> Value {
         let mut value = self.meta;

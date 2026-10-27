@@ -59,6 +59,7 @@ pub(super) fn next_reply(outbound: &BoundedOutbound) -> Value {
             Some(OutboundItem::Flush(flushed)) => {
                 let _ = flushed.send(());
             }
+            Some(OutboundItem::AttachFrame(_)) => panic!("an attach frame before the answer"),
             None => panic!("the connection closed before an answer"),
         }
     }

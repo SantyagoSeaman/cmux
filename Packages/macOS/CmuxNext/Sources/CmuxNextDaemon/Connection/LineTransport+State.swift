@@ -20,6 +20,40 @@ extension LineTransport {
         var controlStreams: Set<String> = []
         /// Gets resource API stream lines (`stream_item`, `stream_end`).
         var streamHandler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?
+        /// Open client attach streams by id, until their `stream-end` or the
+        /// connection's end (`attach-streams-v1`).
+        var attachStreams: [UInt16: StreamSink] = [:]
+        /// The next id to try when minting one.
+        var nextAttachStream: UInt16 = 1
+        /// Messages for a stream id that is not open (a contract drift).
+        var strayStreamMessages: UInt64 = 0
+        /// A stream was opened: the daemon may send its binary frames
+        /// (`attach-frames-v1`), so the reader cuts 0xFF frames from then on.
+        var framesAllowed = false
+
+        /// Mints an id no open stream holds and registers `sink` under it.
+        mutating func openAttachStream(_ sink: @escaping StreamSink) -> UInt16? {
+            guard closed == nil else { return nil }
+            // At most one pass over the 65,535 ids: nil when every one is open.
+            for _ in 0..<0xFFFF {
+                let id = nextAttachStream
+                nextAttachStream = id == UInt16.max ? 1 : id + 1
+                if attachStreams[id] == nil {
+                    attachStreams[id] = sink
+                    framesAllowed = true
+                    return id
+                }
+            }
+            return nil
+        }
+
+        /// The open stream `id`'s sink; taken out when `removing` (its end).
+        /// A message for an id that is not open counts as stray.
+        mutating func attachSink(_ id: UInt16, removing: Bool) -> StreamSink? {
+            let sink = removing ? attachStreams.removeValue(forKey: id) : attachStreams[id]
+            if sink == nil { strayStreamMessages += 1 }
+            return sink
+        }
 
         /// Takes every deadline due at `now` out and marks its request expired: what each one's
         /// `timedOut` needs. The timer is no longer armed (its fire called this).

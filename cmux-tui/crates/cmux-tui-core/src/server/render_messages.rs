@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::{
-    BudgetedJsonWriter, BudgetedText, MessageWriter, OutboundStream, RenderService,
+    BudgetedJsonWriter, MessageWriter, OutboundStream, RenderService, WireMessage,
     write_base64_json_string,
 };
 use crate::browser::{BrowserAttachUpdate, BrowserFrameUpdate};
@@ -561,7 +561,7 @@ pub(super) fn browser_frame_json(surface: SurfaceId, update: &BrowserFrameUpdate
 
 /// A browser attach update as the texts [`send_encoded_browser_attach_update`]
 /// sends: its frame, then its state.
-pub(super) type EncodedBrowserAttachUpdate = [Option<std::io::Result<Arc<BudgetedText>>>; 2];
+pub(super) type EncodedBrowserAttachUpdate = [Option<std::io::Result<WireMessage>>; 2];
 
 /// A browser attach update encoded: the work an attach thread watches,
 /// not the hand-off that waits for room.
@@ -569,10 +569,11 @@ pub(super) fn encode_browser_attach_update(
     writer: &MessageWriter,
     surface: SurfaceId,
     update: BrowserAttachUpdate,
+    stream: &OutboundStream,
 ) -> EncodedBrowserAttachUpdate {
     [
-        update.frame.map(|frame| writer.encode(&browser_frame_json(surface, &frame))),
-        update.state.map(|state| writer.encode(&browser_state_message(surface, &state, false))),
+        update.frame.map(|frame| writer.encode(&browser_frame_json(surface, &frame), stream)),
+        update.state.map(|state| writer.encode(&browser_state_message(surface, &state, false), stream)),
     ]
 }
 

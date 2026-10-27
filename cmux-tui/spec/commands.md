@@ -8608,7 +8608,9 @@ Asks the host for one READY `snapshot` on this connection's snapshot attach of
 `surface`. It is the raw form of the terminal channel message
 `snapshot_request` (sync-and-transport.md). A request while a snapshot is
 pending for that viewer collapses into it. A viewer gets at most one requested
-snapshot per 500 ms; an earlier request answers `snapshot_throttled`.
+snapshot per 500 ms; an earlier request answers `snapshot_throttled` and is
+held: its snapshot is sent when the interval ends (`retry_after_ms`), so the
+client never asks again.
 
 Params:
 
@@ -8632,6 +8634,30 @@ Errors:
 | `not_attached` | This connection has no snapshot attach of `surface` |
 | `unsupported_version` | `have.snapshot_version` differs from the host's |
 | `unknown surface <id>` | Surface id does not exist |
+
+### cancel-stream
+
+| Field | Value |
+| --- | --- |
+| name | `cancel-stream` |
+| status | implemented |
+| since | protocol 12, capability `attach-streams-v1` |
+
+Ends the request's client stream, named by the envelope's `attach_stream`
+(transports.md "Attach streams"), at once. It runs on that stream's lane, after
+the stream's earlier requests. The stream's producers stop, its view detaches,
+and its `stream-end` follows every item already queued for it. A stream that is
+not open answers `ended`, so a repeat is harmless.
+
+Params: none (the stream is the envelope's `attach_stream`).
+
+Result: `object{outcome: "applied" | "ended"}`
+
+Errors:
+
+| Error | Condition |
+| --- | --- |
+| `bad request: cancel-stream needs stream` | The envelope names no `attach_stream` |
 
 ### terminal-history
 

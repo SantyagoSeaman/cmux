@@ -125,9 +125,29 @@ impl PtySurface {
         cmux_flow_trace::hop("daemon.output.attach", flow, self.flow_terminal_id());
         self.snapshot_position.add_output(bytes.len());
         let mut taps = self.taps.lock().unwrap();
-        let Some(chunk) = taps.output_chunk(bytes) else { return false };
-        let frame = AttachFrame::with_flow(chunk, flow);
-        taps.retain(|tap| tap.try_send(frame.clone()));
+        // Ring viewers read the bytes from the terminal's ring, written once
+        // here; the other viewers share one chunk, cut only if one needs it.
+        #[cfg(unix)]
+        let ring_end = write_output_ring(&taps, bytes);
+        #[cfg(unix)]
+        let only_ring_viewers = ring_end.is_some() && taps.iter().all(|tap| tap.ring.is_some());
+        #[cfg(not(unix))]
+        let only_ring_viewers = false;
+        let frame = if only_ring_viewers {
+            None
+        } else {
+            let Some(chunk) = taps.output_chunk(bytes) else { return false };
+            Some(AttachFrame::with_flow(chunk, flow))
+        };
+        taps.retain(|tap| {
+            #[cfg(unix)]
+            if tap.ring.is_some()
+                && let Some(end) = ring_end
+            {
+                return tap.try_send_ring_advance(end);
+            }
+            frame.as_ref().is_some_and(|frame| tap.try_send(frame.clone()))
+        });
         let sent = !taps.is_empty();
         drop(taps);
         if sent {
@@ -190,7 +210,29 @@ impl PtySurface {
         }
         self.snapshot_position.observe_frame(&frame);
         let mut taps = self.taps.lock().unwrap();
-        taps.retain(|tap| tap.try_send(frame.clone()));
+        #[cfg(unix)]
+        let ring_end = match &frame {
+            AttachFrame::Output(output) | AttachFrame::OutputWithColors { output, .. } => {
+                write_output_ring(&taps, output)
+            }
+            _ => None,
+        };
+        taps.retain(|tap| {
+            #[cfg(unix)]
+            if tap.ring.is_some()
+                && let Some(end) = ring_end
+            {
+                // The bytes, then the colors that apply after them.
+                return tap.try_send_ring_advance(end)
+                    && match &frame {
+                        AttachFrame::OutputWithColors { colors, .. } => {
+                            tap.try_send(AttachFrame::ColorsChanged(Arc::new(**colors)))
+                        }
+                        _ => true,
+                    };
+            }
+            tap.try_send(frame.clone())
+        });
         let sent_output = matches!(frame, AttachFrame::OutputWithColors { .. }) && !taps.is_empty();
         drop(taps);
         if sent_output {
@@ -692,4 +734,16 @@ impl PtySurface {
         self.stream_progress.notify();
         Ok(true)
     }
+}
+
+/// Writes `bytes` into the terminal's output ring, when a ring viewer is
+/// attached, and returns the ring's new end. Every ring viewer of the
+/// terminal holds the same ring; the caller holds the taps lock, so this is
+/// the ring's one writer.
+#[cfg(unix)]
+fn write_output_ring(taps: &[AttachTap], bytes: &[u8]) -> Option<u64> {
+    let ring = taps.iter().find_map(|tap| tap.ring.as_ref())?;
+    let mut ring = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    ring.push(bytes);
+    Some(ring.end())
 }

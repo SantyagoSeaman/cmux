@@ -1,5 +1,5 @@
 // This file is generated. Do not edit by hand.
-// cmux-tui mux protocol 12, IR 92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499.
+// cmux-tui mux protocol 12, IR 9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e.
 // The emitter owns this layout so generation is independent of the installed rustfmt.
 
 use super::metadata::*;
@@ -1061,6 +1061,11 @@ pub struct CancelRequestRequest {
 
 #[rustfmt::skip]
 pub type CancelRequestResult = T::EmptyResult;
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CancelStreamRequest {
+}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5473,6 +5478,10 @@ impl CmuxClient {
 
     pub fn cancel_request(&mut self, request: CancelRequestRequest) -> Result<CancelRequestResult> {
         self.execute(&CANCEL_REQUEST_METADATA, &request)
+    }
+
+    pub fn cancel_stream(&mut self, request: CancelStreamRequest) -> Result<T::CancelStreamResult> {
+        self.execute(&CANCEL_STREAM_METADATA, &request)
     }
 
     pub fn chief_inspect(&mut self, request: ChiefInspectRequest) -> Result<ChiefInspectResult> {

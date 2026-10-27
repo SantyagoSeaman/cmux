@@ -14,8 +14,9 @@ pub(super) fn handle_command_with_cancellation(
     client: u64,
     cmd: Command,
     writer: &MessageWriter,
-    cancellation: Option<&ConnectionCancellation>,
+    context: CommandContext<'_>,
 ) -> anyhow::Result<Value> {
+    let CommandContext { cancellation, acceptance, stream } = context;
     // Who a durable legacy command acts as (P8): read once per command.
     let actor = origin_gate::connection_actor(mux, client);
     if let Some(remote) = remote_relay::intercept(mux, client, &cmd, writer) {
@@ -234,7 +235,7 @@ pub(super) fn handle_command_with_cancellation(
             cmd_frontend::sidebar_plugin(mux, cols, rows, relaunch)
         }
         Command::WaitFor(WaitForParams { surface, pattern, timeout_ms }) => {
-            cmd_terminal_io::wait_for(mux, cancellation, surface, pattern, timeout_ms)
+            cmd_terminal_io::wait_for(mux, cancellation, acceptance, surface, pattern, timeout_ms)
         }
         Command::Run { argv, command, cwd, pane, new_workspace, key, name, cols, rows } => {
             cmd_terminal_io::run(
@@ -854,7 +855,9 @@ pub(super) fn handle_command_with_cancellation(
             cmd_server::report_focus(mux, client_id, pane, tab)
         }
         Command::ClientFocus { client_id } => cmd_server::client_focus(mux, client_id),
-        Command::SnapshotRequest(params) => cmd_terminal_io::snapshot_request(mux, client, params),
+        Command::SnapshotRequest(params) => {
+            cmd_terminal_io::snapshot_request(mux, client, params, stream)
+        }
         Command::TerminalHistory(params) => cmd_terminals::terminal_history(mux, params),
         Command::TerminalReadRange(params) => cmd_terminals::terminal_read_range(mux, params),
         Command::ScrollSurface(ScrollSurfaceParams { surface, delta }) => {
@@ -879,7 +882,7 @@ pub(super) fn handle_command_with_cancellation(
             if let Some(surface) = surface_id.filter(|_| cols.is_some() && rows.is_some()) {
                 size_lease::renew_size_lease(mux, client, surface);
             }
-            cmd_attach::attach_surface(
+            let attached = cmd_attach::attach_surface(
                 mux,
                 client,
                 writer,
@@ -890,7 +893,17 @@ pub(super) fn handle_command_with_cancellation(
                 expected_generation,
                 expected_terminal_id,
                 snapshot,
-            )
+                stream,
+                acceptance,
+            );
+            if attached.is_err()
+                && let Some(stream) = stream
+            {
+                cmd_attach::end_failed_stream(mux, client, writer, stream);
+            }
+            attached
         }
+        // The stream is the request envelope's (`attach_stream`); it has no params.
+        Command::CancelStream => cmd_attach::cancel_stream(mux, client, stream),
     }
 }

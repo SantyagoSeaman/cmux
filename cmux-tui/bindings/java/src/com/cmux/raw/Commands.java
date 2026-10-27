@@ -82,6 +82,7 @@ public final class Commands {
     public static final CommandMetadata BROWSER_WHEEL = new CommandMetadata("browser-wheel", Authority.FRONTEND, 6, null, StreamKind.NONE, Map.of(), Map.of());
     public static final CommandMetadata BROWSER_WHEEL_GUARDED = new CommandMetadata("browser-wheel-guarded", Authority.FRONTEND, 10, "browser-pointer-frame-guard-v1", StreamKind.NONE, Map.of(), Map.of());
     public static final CommandMetadata CANCEL_REQUEST = new CommandMetadata("cancel-request", Authority.LOCAL_ADMIN, 12, "cancel-request-v1", StreamKind.NONE, Map.of(), Map.of());
+    public static final CommandMetadata CANCEL_STREAM = new CommandMetadata("cancel-stream", Authority.FRONTEND, 12, "attach-streams-v1", StreamKind.NONE, Map.of(), Map.of());
     public static final CommandMetadata CHIEF_INSPECT = new CommandMetadata("chief-inspect", Authority.LOCAL_ADMIN, 12, "chief-inspect-v1", StreamKind.NONE, Map.of(), Map.of());
     public static final CommandMetadata CLEAR_HISTORY = new CommandMetadata("clear-history", Authority.CONTROL, 9, "clear-history-v1", StreamKind.NONE, Map.ofEntries(Map.entry("fallback_key", 9L)), Map.ofEntries(Map.entry("fallback_key", "clear-history-key-v1")));
     public static final CommandMetadata CLEAR_WINDOW_TITLE = new CommandMetadata("clear-window-title", Authority.CONTROL, 6, null, StreamKind.NONE, Map.of(), Map.of());
@@ -448,6 +449,7 @@ public final class Commands {
         values.put("browser-wheel", BROWSER_WHEEL);
         values.put("browser-wheel-guarded", BROWSER_WHEEL_GUARDED);
         values.put("cancel-request", CANCEL_REQUEST);
+        values.put("cancel-stream", CANCEL_STREAM);
         values.put("chief-inspect", CHIEF_INSPECT);
         values.put("clear-history", CLEAR_HISTORY);
         values.put("clear-window-title", CLEAR_WINDOW_TITLE);

@@ -1,7 +1,7 @@
 import Foundation
 
-/// The routing fields of one line (``LineTransport/Envelope``'s `id`, `ok`, `event`, `type`, `stream_id` and
-/// `cause`), read from its bytes, so a reply or an event is parsed once: by the code that reads its body. Mojo
+/// The routing fields of one line (``LineTransport/Envelope``'s `id`, `ok`, `event`, `type`, `stream_id`,
+/// `cause` and `attach_stream`), read from its bytes, so a reply or an event is parsed once: by the code that reads its body. Mojo
 /// routes a message by its header and leaves the payload to the receiving stub
 /// (mojo/public/cpp/bindings/lib/message.cc, `Message::name()` and `Message::request_id()`); a JSON line has no
 /// header, so the scan walks the top-level object and checks the JSON grammar of every value it skips.
@@ -17,6 +17,8 @@ struct LineRouteScan: Equatable {
     var type: String?
     var streamID: String?
     var cause: String?
+    /// The client attach stream of a tagged event (`attach-streams-v1`).
+    var attachStream: UInt16?
 
     /// Containers deeper than this are left to the decoder, so the scan's recursion stays shallow.
     static let maxDepth = 64
@@ -32,11 +34,12 @@ struct LineRouteScan: Equatable {
     /// The routing fields as an envelope with no error fields: a reply that is not `ok:true` is
     /// decoded whole for those.
     var envelope: LineTransport.Envelope {
-        LineTransport.Envelope(id: id, ok: ok, event: event, type: type, streamID: streamID, cause: cause)
+        LineTransport.Envelope(id: id, ok: ok, event: event, type: type, streamID: streamID, cause: cause,
+                               attachStream: attachStream)
     }
 
     private enum Field: UInt8 {
-        case id = 1, ok = 2, event = 4, type = 8, streamID = 16, cause = 32
+        case id = 1, ok = 2, event = 4, type = 8, streamID = 16, cause = 32, attachStream = 64
 
         init?(key: some Sequence<UInt8>) {
             if key.elementsEqual(Byte.idKey) {
@@ -51,6 +54,8 @@ struct LineRouteScan: Equatable {
                 self = .streamID
             } else if key.elementsEqual(Byte.causeKey) {
                 self = .cause
+            } else if key.elementsEqual(Byte.attachStreamKey) {
+                self = .attachStream
             } else {
                 return nil
             }
@@ -142,6 +147,16 @@ struct LineRouteScan: Equatable {
                 guard digits.allSatisfy(Byte.isDigit) else { return false }
                 fields.id = UInt64(String(decoding: digits, as: UTF8.self), radix: 10)
                 return true
+            case .attachStream:
+                // The decoder takes a UInt16 number; anything else is left to it.
+                guard Byte.isDigit(first) else { return false }
+                let start = index
+                guard skipNumber() else { return false }
+                let digits = slice(start..<index)
+                guard digits.allSatisfy(Byte.isDigit),
+                      let stream = UInt16(String(decoding: digits, as: UTF8.self), radix: 10) else { return false }
+                fields.attachStream = stream
+                return true
             case .ok:
                 if literal(Byte.trueWord) {
                     fields.ok = true
@@ -160,7 +175,7 @@ struct LineRouteScan: Equatable {
                 case .type: fields.type = text
                 case .streamID: fields.streamID = text
                 case .cause: fields.cause = text
-                case .id, .ok: break  // read above
+                case .id, .ok, .attachStream: break  // read above
                 }
                 return true
             }
@@ -287,6 +302,7 @@ struct LineRouteScan: Equatable {
         static let typeKey = Array("type".utf8)
         static let streamIDKey = Array("stream_id".utf8)
         static let causeKey = Array("cause".utf8)
+        static let attachStreamKey = Array("attach_stream".utf8)
         /// The one-letter escapes after a backslash: `"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`.
         static let simpleEscapes: Set<UInt8> = Set("\"\\/bfnrt".utf8)
 

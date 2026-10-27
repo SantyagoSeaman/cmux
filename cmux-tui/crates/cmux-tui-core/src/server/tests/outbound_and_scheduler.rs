@@ -253,7 +253,7 @@ fn resize_stream_serialization_reserves_budget_before_queueing() {
         pending_sequence: Arc::from([]),
     };
 
-    let encoded = writer.encode_attach_frame(7, &frame, AttachWireShape::default());
+    let encoded = writer.encode_attach_frame(7, &frame, AttachWireShape::default(), &stream);
     let error = writer.send_encoded_backpressured(encoded, &stream).unwrap_err();
 
     assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
@@ -586,12 +586,13 @@ fn blocking_wait_cannot_overtake_input_queued_behind_a_clear_barrier() {
         ),
     ] {
         state.requests.push_back(PendingSurfaceRequest {
-            request: Request { id: Some(json!(id)), cmd },
+            request: Request { id: Some(json!(id)), stream: None, cmd },
             arrival: RequestArrival::now(),
             cause: crate::event_cause::EventCause::Program,
             frame_call: None,
             retained_bytes: 0,
             _bytes_permit: admission.try_reserve_bytes(0).unwrap(),
+            order: None,
         });
     }
 
@@ -627,12 +628,13 @@ fn guarded_browser_pointer_input_overtakes_an_unrelated_clear_barrier() {
         let mut state = ConnectionSurfaceState::default();
         state.active_clear_surfaces.insert(1);
         state.requests.push_back(PendingSurfaceRequest {
-            request: Request { id: Some(json!(1)), cmd },
+            request: Request { id: Some(json!(1)), stream: None, cmd },
             arrival: RequestArrival::now(),
             cause: crate::event_cause::EventCause::Program,
             frame_call: None,
             retained_bytes: 0,
             _bytes_permit: admission.try_reserve_bytes(0).unwrap(),
+            order: None,
         });
 
         assert_eq!(
@@ -657,6 +659,7 @@ fn queued_same_surface_clears_do_not_reserve_worker_permits() {
     for id in 0..SERVER_SURFACE_WORKER_CAPACITY {
         let mut clear = Some(Request {
             id: Some(json!(id)),
+            stream: None,
             cmd: Command::ClearHistory(terminal_io_wire::ClearHistoryParams {
                 surface: surface.id,
                 fallback_key: None,
@@ -688,6 +691,7 @@ fn queued_wait_releases_clear_worker_permit_after_clear_settles() {
 
     let mut clear = Some(Request {
         id: Some(json!(1)),
+        stream: None,
         cmd: Command::ClearHistory(terminal_io_wire::ClearHistoryParams {
             surface: surface.id,
             fallback_key: None,
@@ -696,6 +700,7 @@ fn queued_wait_releases_clear_worker_permit_after_clear_settles() {
     assert_eq!(scheduler.dispatch(mux.clone(), 0, &mut clear, 0, writer.clone()), Some(true));
     let mut wait = Some(Request {
         id: Some(json!(2)),
+        stream: None,
         cmd: Command::WaitFor(terminal_io_wire::WaitForParams {
             surface: surface.id,
             pattern: "never-matches".to_string(),
@@ -744,6 +749,7 @@ fn connection_close_cancels_a_wait_queued_after_clear_history() {
 
     let mut clear = Some(Request {
         id: Some(json!(1)),
+        stream: None,
         cmd: Command::ClearHistory(terminal_io_wire::ClearHistoryParams {
             surface: surface.id,
             fallback_key: None,
@@ -752,6 +758,7 @@ fn connection_close_cancels_a_wait_queued_after_clear_history() {
     assert_eq!(scheduler.dispatch(mux.clone(), 0, &mut clear, 0, writer.clone()), Some(true));
     let mut wait = Some(Request {
         id: Some(json!(2)),
+        stream: None,
         cmd: Command::WaitFor(terminal_io_wire::WaitForParams {
             surface: surface.id,
             pattern: "release-wait".to_string(),
@@ -1133,10 +1140,10 @@ fn sequence_depth_records_the_arrival_a_full_sequence_refuses() {
     scheduler.state.lock().unwrap().dispatcher_started = true;
     let (writer, outbound) = captured_writer();
     for id in 0..CONNECTION_SURFACE_QUEUE_CAPACITY {
-        let mut ping = Some(Request { id: Some(json!(id)), cmd: Command::Ping });
+        let mut ping = Some(Request { id: Some(json!(id)), stream: None, cmd: Command::Ping });
         assert_eq!(scheduler.dispatch(mux.clone(), 0, &mut ping, 0, writer.clone()), Some(true));
     }
-    let mut refused = Some(Request { id: Some(json!("over")), cmd: Command::Ping });
+    let mut refused = Some(Request { id: Some(json!("over")), stream: None, cmd: Command::Ping });
     assert_eq!(scheduler.dispatch(mux.clone(), 0, &mut refused, 0, writer), Some(true));
     assert!(refused.is_none(), "the full sequence refused it");
     let reply = pop_json(&outbound);
@@ -1147,4 +1154,176 @@ fn sequence_depth_records_the_arrival_a_full_sequence_refuses() {
     assert_eq!(depth.max, arrivals, "the refused arrival met a full sequence");
     scheduler.close();
     scheduler.finish_dispatcher();
+}
+
+/// A clear-history on the control lane waits for the earlier, unfinished
+/// stream request of its surface (the input the clear must follow), and only
+/// for that surface: across lanes a surface keeps its wire order.
+#[test]
+fn clear_history_waits_for_its_surfaces_earlier_stream_input_and_nothing_else() {
+    let scheduler = Arc::new(ConnectionSurfaceScheduler::new(Arc::new(
+        ServerSurfaceOperationAdmission::default(),
+    )));
+    let admission = scheduler.admission.clone();
+    let mut state = scheduler.state.lock().unwrap();
+    // The view's stream input for surface 1 is still running.
+    let input =
+        scheduler.take_order_ticket(&mut state, RequestOrder::Surface(1), OrderLane::Stream);
+    let queue = |state: &mut ConnectionSurfaceState, id: u64, cmd: Command| {
+        let order = scheduler.take_order_ticket(state, cmd.request_order(), OrderLane::Control);
+        state.requests.push_back(PendingSurfaceRequest {
+            request: Request { id: Some(json!(id)), stream: None, cmd },
+            arrival: RequestArrival::now(),
+            cause: crate::event_cause::EventCause::Program,
+            frame_call: None,
+            retained_bytes: 0,
+            _bytes_permit: admission.try_reserve_bytes(0).unwrap(),
+            order,
+        });
+    };
+    queue(&mut state, 1, Command::ClearHistory(terminal_io_wire::ClearHistoryParams { surface: 1, fallback_key: None }));
+    queue(&mut state, 2, Command::ReadScreen(terminal_io_wire::ReadScreenParams { surface: 1 }));
+    queue(&mut state, 3, Command::ReadScreen(terminal_io_wire::ReadScreenParams { surface: 2 }));
+    assert_eq!(
+        ConnectionSurfaceScheduler::next_runnable_index(&state),
+        Some(2),
+        "the clear of surface 1 ran before that surface's earlier stream input finished, \
+         a later request of surface 1 overtook the clear, or surface 2 waited for surface 1"
+    );
+    // Run surface 2's read: its ticket drops without the state lock held.
+    let read = state.requests.remove(2);
+    drop(state);
+    drop(read);
+    let state = scheduler.state.lock().unwrap();
+    assert_eq!(ConnectionSurfaceScheduler::next_runnable_index(&state), None);
+    drop(state);
+    // The input finished: the clear runs first, in wire order.
+    drop(input);
+    let state = scheduler.state.lock().unwrap();
+    assert_eq!(ConnectionSurfaceScheduler::next_runnable_index(&state), Some(0));
+    drop(state);
+    scheduler.close();
+}
+
+/// One terminal whose input blocks (its program stopped reading, or its host
+/// is reconnecting) never stops the connection: a close of that terminal
+/// waits for the input, and only that terminal's later control requests wait
+/// behind it. Another terminal's close and a request of no surface run past
+/// it, and the other terminal's keys never wait for any of it.
+#[test]
+fn a_blocked_send_on_one_surface_delays_no_other_surfaces_close_or_keys() {
+    let scheduler = Arc::new(ConnectionSurfaceScheduler::new(Arc::new(
+        ServerSurfaceOperationAdmission::default(),
+    )));
+    let admission = scheduler.admission.clone();
+    let mut state = scheduler.state.lock().unwrap();
+    // The send to surface 1 is blocked on its stream's lane.
+    let blocked_send =
+        scheduler.take_order_ticket(&mut state, RequestOrder::Surface(1), OrderLane::Stream);
+    let queue = |state: &mut ConnectionSurfaceState, id: u64, cmd: Command| {
+        let order = scheduler.take_order_ticket(state, cmd.request_order(), OrderLane::Control);
+        state.requests.push_back(PendingSurfaceRequest {
+            request: Request { id: Some(json!(id)), stream: None, cmd },
+            arrival: RequestArrival::now(),
+            cause: crate::event_cause::EventCause::Program,
+            frame_call: None,
+            retained_bytes: 0,
+            _bytes_permit: admission.try_reserve_bytes(0).unwrap(),
+            order,
+        });
+    };
+    queue(&mut state, 1, serde_json::from_value(json!({"cmd": "close-surface", "surface": 1})).unwrap());
+    queue(&mut state, 2, Command::ListWorkspaces);
+    queue(&mut state, 3, Command::ReadScreen(terminal_io_wire::ReadScreenParams { surface: 1 }));
+    queue(&mut state, 4, serde_json::from_value(json!({"cmd": "close-surface", "surface": 2})).unwrap());
+    // A key to surface 2, on its own stream, after all of them.
+    let key = scheduler
+        .take_order_ticket(&mut state, RequestOrder::Surface(2), OrderLane::Stream)
+        .unwrap();
+    assert!(
+        !state.earlier_barrier(key.arrival()),
+        "the key to surface 2 waits for a workspace request sent before it"
+    );
+    let mut ran = Vec::new();
+    while let Some(index) = ConnectionSurfaceScheduler::next_runnable_index(&state) {
+        let pending = state.requests.remove(index).unwrap();
+        ran.push(pending.request.id.clone().unwrap());
+        // Accepted as it runs, as the dispatcher's handler does.
+        drop(state);
+        drop(pending);
+        state = scheduler.state.lock().unwrap();
+    }
+    assert_eq!(
+        ran,
+        [json!(2), json!(4)],
+        "the requests of other surfaces waited behind surface 1's blocked send"
+    );
+    assert!(
+        !state.earlier_on(2, OrderLane::Control, key.arrival()),
+        "the key to surface 2 still waits for a control request"
+    );
+    drop(state);
+    // The send returns: surface 1's close, then its read, in wire order.
+    drop(blocked_send);
+    let mut state = scheduler.state.lock().unwrap();
+    let mut ran = Vec::new();
+    while let Some(index) = ConnectionSurfaceScheduler::next_runnable_index(&state) {
+        let pending = state.requests.remove(index).unwrap();
+        ran.push(pending.request.id.clone().unwrap());
+        drop(state);
+        drop(pending);
+        state = scheduler.state.lock().unwrap();
+    }
+    assert_eq!(ran, [json!(1), json!(3)]);
+    drop(state);
+    drop(key);
+    scheduler.close();
+}
+
+/// `set-client-info` is a connection-wide barrier: a stream request sent
+/// after it (an attach that needs the capability it records) waits until it
+/// is accepted, as on one serial connection. Other control requests of no
+/// surface are no barrier, and a stream request of no surface is none either.
+#[test]
+fn a_stream_request_waits_for_an_earlier_connection_wide_control_request() {
+    let scheduler = Arc::new(ConnectionSurfaceScheduler::new(Arc::new(
+        ServerSurfaceOperationAdmission::default(),
+    )));
+    let set_client_info: Command =
+        serde_json::from_value(json!({"cmd": "set-client-info", "name": "t"})).unwrap();
+    assert_eq!(set_client_info.request_order(), RequestOrder::Barrier);
+    assert_eq!(Command::ListWorkspaces.request_order(), RequestOrder::Unordered);
+    let mut state = scheduler.state.lock().unwrap();
+    let workspaces =
+        scheduler.take_order_ticket(&mut state, RequestOrder::Unordered, OrderLane::Control);
+    let client_info =
+        scheduler.take_order_ticket(&mut state, RequestOrder::Barrier, OrderLane::Control);
+    let attach = scheduler
+        .take_order_ticket(&mut state, RequestOrder::Surface(7), OrderLane::Stream)
+        .expect("a stream request orders by its surface");
+    let cancel = scheduler
+        .take_order_ticket(&mut state, RequestOrder::Unordered, OrderLane::Stream)
+        .expect("a stream request without a surface still gets its arrival");
+    assert!(
+        state.earlier_barrier(attach.arrival()),
+        "the attach ran before the set-client-info sent ahead of it"
+    );
+    assert!(state.earlier_barrier(cancel.arrival()), "a cancel also waits for the barrier");
+    let later_control =
+        scheduler.take_order_ticket(&mut state, RequestOrder::Barrier, OrderLane::Control);
+    assert!(
+        !state.earlier_barrier(client_info.as_ref().unwrap().arrival()),
+        "a barrier never waits for itself"
+    );
+    drop(state);
+    drop(client_info);
+    let state = scheduler.state.lock().unwrap();
+    assert!(
+        !state.earlier_barrier(attach.arrival()),
+        "accepted: the attach runs, never waiting for the earlier list-workspaces"
+    );
+    drop(state);
+    drop(later_control);
+    drop(workspaces);
+    scheduler.close();
 }

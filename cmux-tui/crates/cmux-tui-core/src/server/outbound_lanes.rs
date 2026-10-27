@@ -24,6 +24,7 @@ use super::BudgetedText;
 use super::ControlOutbound;
 use super::OutboundItem;
 use super::OutboundStream;
+use super::WireMessage;
 use cmux_ipc::lane_writer::{BULK_FRAME_MAX, STARVATION_BOUND, STREAM_CREDIT};
 use cmux_ipc::{
     Aux, BadMessage, CallFlags, FrameHeader, FrameKind, Lane, MAX_FRAME_PAYLOAD, StreamLane,
@@ -53,19 +54,21 @@ pub(super) fn parse_bulk_frame_max(value: Option<&str>) -> usize {
         .unwrap_or(BULK_FRAME_MAX)
 }
 
-/// A stream item: a line, or a frame's payload and how much of it left.
+/// A stream item: a line, a frame's payload and how much of it left, or an
+/// attach frame encoded whole (server/attach_frames.rs).
 pub(in crate::server) struct RegularOutbound {
-    pub(super) text: Arc<BudgetedText>,
+    pub(super) text: WireMessage,
     pub(super) stream: OutboundStream,
-    /// The frame's header when `text` is a frame payload; `None` for a line.
+    /// The frame's header when `text` is a line used as a frame payload;
+    /// `None` for a line or an encoded attach frame.
     pub(super) frame: Option<FrameHeader>,
     /// Payload bytes already written as chunks.
     sent: usize,
 }
 
 impl RegularOutbound {
-    pub(super) fn line(text: Arc<BudgetedText>, stream: &OutboundStream) -> Self {
-        Self { text, stream: stream.clone(), frame: None, sent: 0 }
+    pub(super) fn line(text: impl Into<WireMessage>, stream: &OutboundStream) -> Self {
+        Self { text: text.into(), stream: stream.clone(), frame: None, sent: 0 }
     }
 
     pub(super) fn frame(
@@ -78,9 +81,10 @@ impl RegularOutbound {
 
     /// The item written whole: the line, or the frame with all its payload.
     fn whole_item(&self) -> OutboundItem {
-        match self.frame {
-            Some(header) => OutboundItem::Frame(header, self.text.clone()),
-            None => OutboundItem::Text(self.text.clone()),
+        match (&self.text, self.frame) {
+            (WireMessage::Line(text), Some(header)) => OutboundItem::Frame(header, text.clone()),
+            (WireMessage::Line(text), None) => OutboundItem::Text(text.clone()),
+            (WireMessage::Frame(frame), _) => OutboundItem::AttachFrame(frame.clone()),
         }
     }
 }
@@ -361,7 +365,9 @@ fn next_chunk(
     message: &mut RegularOutbound,
     chunk_bytes: usize,
 ) -> Option<Result<(OutboundItem, bool), BadMessage>> {
-    let len = message.text.len();
+    let WireMessage::Line(text) = &message.text else { return None };
+    let text = text.clone();
+    let len = text.len();
     let start = message.sent;
     let rule = chunk_rule(header.kind()).filter(|_| start > 0 || len > chunk_bytes)?;
     let end = len.min(start.saturating_add(chunk_bytes));
@@ -369,7 +375,7 @@ fn next_chunk(
     let chunk = chunk_header(header, rule, start, end, last);
     message.sent = end;
     Some(chunk.map(|chunk| {
-        (OutboundItem::Chunk { header: chunk, text: message.text.clone(), range: start..end }, last)
+        (OutboundItem::Chunk { header: chunk, text, range: start..end }, last)
     }))
 }
 
@@ -465,7 +471,7 @@ impl BoundedOutboundState {
         Some(match self.control.pop_front()? {
             ControlOutbound::Text(text) => {
                 self.release_control(text.len());
-                OutboundItem::Text(text)
+                OutboundItem::from(text)
             }
             ControlOutbound::Frame(header, text) => {
                 self.release_control(text.len());

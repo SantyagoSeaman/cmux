@@ -77,7 +77,7 @@ nonisolated final class DaemonTerminalIO: TerminalIO {
          createIntent: UInt64 = 0, creatingInput: CreatingTerminalInput? = nil,
          burstTrace: BurstTrace? = nil, policyBlocked: @escaping @Sendable () -> Bool = { false },
          hangWatch: (any HangWatchScoping)? = nil, screenChanged: (@Sendable () -> Void)? = nil,
-         endpoint: @escaping @Sendable () async throws -> DaemonEndpoint) {
+         route: TerminalAttachRoute) {
         self.resizes = resizes
         let logger = Logger(subsystem: "com.cmuxterm.app.next", category: "app.terminal")
         let surface = target.attachment.surface.rawValue
@@ -98,7 +98,7 @@ nonisolated final class DaemonTerminalIO: TerminalIO {
                 #if DEBUG
                 try await DebugSlowAttach.shared.beforeAttach(surface: String(surface))
                 #endif
-                return try await TerminalAttachment.attach(endpoint: try await endpoint(), target: attachment,
+                return try await TerminalAttachment.attach(route: route, target: attachment,
                                                     size: size, claimGeometry: false,
                                                     snapshotVersion: Self.attachSnapshotVersion,
                                                     localHistory: Self.attachLocalHistory,

@@ -147,7 +147,8 @@ public struct CmuxNextApp {
                                               terminalEnvironmentProvider: environment.terminalEnvironmentProvider(),
                                               resolvesShellIntegration: environment.resolvesShellIntegration,
                                               echoesPlacementShift: SidebarMirror.isLinked, wireStats: wireStats,
-                                              hangWatch: hangWatch)
+                                              hangWatch: hangWatch,
+                                              terminalStreams: features.isEnabled(.daemonTerminalStreams))
         DebugTimings.markLaunch("main.prestart")
         // The daemon's launch snapshot, read and decoded on the files lane; the daemon's start applies it (p08-startup-074).
         // A read quit drops before it started ends as `.missing`, so nothing waits for it.

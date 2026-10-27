@@ -228,6 +228,9 @@ class GeneratedClientMixin:
     def cancel_request(self, target: Union[JsonValue, None]) -> EmptyResult:
         return self._invoke_command('cancel-request', CancelRequestRequest(target=target))
 
+    def cancel_stream(self) -> CancelStreamResult:
+        return self._invoke_command('cancel-stream', CancelStreamRequest())
+
     def chief_inspect(self, path: str, *, query: Union[Dict[str, str], MissingType] = MISSING) -> ChiefInspectResult:
         return self._invoke_command('chief-inspect', ChiefInspectRequest(path=path, query=query))
 
@@ -1171,6 +1174,7 @@ GeneratedClientMixin.browser_runtime_stop.__cmux_command__ = COMMANDS['browser-r
 GeneratedClientMixin.browser_wheel.__cmux_command__ = COMMANDS['browser-wheel']
 GeneratedClientMixin.browser_wheel_guarded.__cmux_command__ = COMMANDS['browser-wheel-guarded']
 GeneratedClientMixin.cancel_request.__cmux_command__ = COMMANDS['cancel-request']
+GeneratedClientMixin.cancel_stream.__cmux_command__ = COMMANDS['cancel-stream']
 GeneratedClientMixin.chief_inspect.__cmux_command__ = COMMANDS['chief-inspect']
 GeneratedClientMixin.clear_history.__cmux_command__ = COMMANDS['clear-history']
 GeneratedClientMixin.clear_window_title.__cmux_command__ = COMMANDS['clear-window-title']

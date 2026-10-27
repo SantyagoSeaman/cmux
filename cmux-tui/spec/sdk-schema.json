@@ -47,7 +47,7 @@
   "terminal-io": {
    "id": 3,
    "description": "Terminal input, output streams, screen reads and terminal requests to the frontend.",
-   "next_ordinal": 26
+   "next_ordinal": 27
   },
   "terminals": {
    "id": 4,
@@ -8009,7 +8009,7 @@
    },
    "additional_properties": false,
    "constraints": [
-    "accepted: the viewer's next attach event is a READY snapshot. collapsed: a snapshot is already pending and answers this request. snapshot_throttled: the viewer got a snapshot less than 500 ms ago; retry after retry_after_ms. Every status echoes request_id."
+    "accepted: the viewer's next attach event is a READY snapshot. collapsed: a snapshot is already pending and answers this request. snapshot_throttled: the viewer got a snapshot less than 500 ms ago; the request is held and its snapshot is sent when the interval ends, in retry_after_ms (no retry needed). Every status echoes request_id."
    ]
   },
   "RowMarkerPoint": {
@@ -13074,6 +13074,23 @@
      "constraints": [
       "True for an exact replay of the current snapshot."
      ]
+    }
+   },
+   "additional_properties": false
+  },
+  "CancelStreamResult": {
+   "kind": "object",
+   "fields": {
+    "outcome": {
+     "type": {
+      "kind": "enum",
+      "values": [
+       "applied",
+       "ended"
+      ]
+     },
+     "presence": "required",
+     "nullable": false
     }
    },
    "additional_properties": false
@@ -35874,6 +35891,32 @@
    "clients": [
     "macos",
     "sdk"
+   ]
+  },
+  "cancel-stream": {
+   "authority": "frontend",
+   "since": 12,
+   "capability": "attach-streams-v1",
+   "request": {
+    "kind": "object",
+    "fields": {},
+    "additional_properties": false
+   },
+   "result": {
+    "kind": "ref",
+    "name": "CancelStreamResult"
+   },
+   "stream": null,
+   "constraints": [
+    "Ends the request envelope's attach_stream after that stream's earlier requests; its stream-end follows every item already queued for it.",
+    "Idempotent: a stream that is not open answers ended."
+   ],
+   "method_id": 794,
+   "priority": "control",
+   "durability": "memory",
+   "stream_scoped": true,
+   "clients": [
+    "macos"
    ]
   }
  },

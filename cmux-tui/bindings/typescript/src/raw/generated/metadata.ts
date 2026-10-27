@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499. */
+/* cmux-tui mux protocol 12, IR 9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499" as const;
+export const SDK_IR_SHA256 = "9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -1009,6 +1009,17 @@ export const COMMAND_METADATA = {
       "Cancels the caller's own running apps-run request or script cell; unknown, answered or another connection's requests change nothing.",
       "Advertised with apps-v1.",
       "Local (Unix) connections only (apps.local otherwise)."
+    ]
+  },
+  "cancel-stream": {
+    "authority": "frontend",
+    "since": 12,
+    "capability": "attach-streams-v1",
+    "fields": {},
+    "stream": null,
+    "constraints": [
+      "Ends the request envelope's attach_stream after that stream's earlier requests; its stream-end follows every item already queued for it.",
+      "Idempotent: a stream that is not open answers ended."
     ]
   },
   "chief-inspect": {
@@ -7562,6 +7573,23 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         "type": {
           "kind": "literal",
           "value": true
+        }
+      }
+    },
+    "kind": "object"
+  },
+  "CancelStreamResult": {
+    "additional_properties": false,
+    "fields": {
+      "outcome": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "enum",
+          "values": [
+            "applied",
+            "ended"
+          ]
         }
       }
     },
@@ -15823,7 +15851,7 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
   "SnapshotRequestResult": {
     "additional_properties": false,
     "constraints": [
-      "accepted: the viewer's next attach event is a READY snapshot. collapsed: a snapshot is already pending and answers this request. snapshot_throttled: the viewer got a snapshot less than 500 ms ago; retry after retry_after_ms. Every status echoes request_id."
+      "accepted: the viewer's next attach event is a READY snapshot. collapsed: a snapshot is already pending and answers this request. snapshot_throttled: the viewer got a snapshot less than 500 ms ago; the request is held and its snapshot is sent when the interval ends, in retry_after_ms (no retry needed). Every status echoes request_id."
     ],
     "fields": {
       "reason": {
@@ -21634,6 +21662,17 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
     "result": {
       "kind": "ref",
       "name": "EmptyResult"
+    }
+  },
+  "cancel-stream": {
+    "request": {
+      "additional_properties": false,
+      "fields": {},
+      "kind": "object"
+    },
+    "result": {
+      "kind": "ref",
+      "name": "CancelStreamResult"
     }
   },
   "chief-inspect": {

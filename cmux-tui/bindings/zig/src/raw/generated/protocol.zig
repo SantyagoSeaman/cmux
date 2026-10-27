@@ -7,7 +7,7 @@ const client_runtime = @import("../client.zig");
 
 pub const schema_version: u16 = 2;
 pub const mux_protocol: u16 = 12;
-pub const ir_sha256 = "92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499";
+pub const ir_sha256 = "9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e";
 
 pub const AccessRequestKind = enum {
     file,
@@ -894,6 +894,28 @@ pub const BrowserRuntimeStatusResult = struct {
 
 pub const BrowserRuntimeStopResult = struct {
     stopped: bool,
+};
+
+pub const CancelStreamResultOutcome = enum {
+    applied,
+    ended,
+
+    pub fn fromWire(value: []const u8) !@This() {
+        if (std.mem.eql(u8, value, "applied")) return .applied;
+        if (std.mem.eql(u8, value, "ended")) return .ended;
+        return error.UnknownEnumValue;
+    }
+
+    pub fn toWire(self: @This()) []const u8 {
+        return switch (self) {
+            .applied => "applied",
+            .ended => "ended",
+        };
+    }
+};
+
+pub const CancelStreamResult = struct {
+    outcome: CancelStreamResultOutcome,
 };
 
 pub const CellPixelFailure = struct {
@@ -6082,6 +6104,21 @@ pub fn cancelRequest(client: anytype, request: CancelRequestRequest) !wire.Decod
             .authority = "local-admin",
             .since = 12,
             .capability = "cancel-request-v1",
+        },
+        request,
+    );
+}
+
+pub const CancelStreamRequest = struct {};
+
+pub fn cancelStream(client: anytype, request: CancelStreamRequest) !wire.Decoded(CancelStreamResult) {
+    return client.callTyped(
+        CancelStreamResult,
+        .{
+            .name = "cancel-stream",
+            .authority = "frontend",
+            .since = 12,
+            .capability = "attach-streams-v1",
         },
         request,
     );
@@ -14783,7 +14820,7 @@ pub const CommandDescriptor = struct {
     stream: ?[]const u8,
 };
 
-pub const command_count: usize = 362;
+pub const command_count: usize = 363;
 pub const commands = [_]CommandDescriptor{
     .{ .name = "access-request", .authority = "local-admin", .since = 12, .capability = "access-request-v1", .stream = null },
     .{ .name = "access-request-answer", .authority = "local-admin", .since = 12, .capability = "access-request-v1", .stream = null },
@@ -14857,6 +14894,7 @@ pub const commands = [_]CommandDescriptor{
     .{ .name = "browser-wheel", .authority = "frontend", .since = 6, .capability = null, .stream = null },
     .{ .name = "browser-wheel-guarded", .authority = "frontend", .since = 10, .capability = "browser-pointer-frame-guard-v1", .stream = null },
     .{ .name = "cancel-request", .authority = "local-admin", .since = 12, .capability = "cancel-request-v1", .stream = null },
+    .{ .name = "cancel-stream", .authority = "frontend", .since = 12, .capability = "attach-streams-v1", .stream = null },
     .{ .name = "chief-inspect", .authority = "local-admin", .since = 12, .capability = "chief-inspect-v1", .stream = null },
     .{ .name = "clear-history", .authority = "control", .since = 9, .capability = "clear-history-v1", .stream = null },
     .{ .name = "clear-window-title", .authority = "control", .since = 6, .capability = null, .stream = null },

@@ -83,6 +83,8 @@ impl AttachFrameReceiver {
                 QueuedFrame::Output(rope) => return Some(TakenFrame::Output(rope)),
                 QueuedFrame::Frame(frame) => return Some(TakenFrame::Frame(frame)),
                 QueuedFrame::LocalReady(_) => {}
+                #[cfg(unix)]
+                QueuedFrame::RingAdvance(_) => {}
             }
         }
     }
@@ -329,6 +331,10 @@ pub(super) enum QueuedFrame {
     /// A local-history READY at a resize cut, after every frame queued before
     /// the resize (`terminal-snapshot-local-history-v1`).
     LocalReady(Arc<LocalReadySnapshot>),
+    /// A ring viewer's bytes up to this offset are in the ring (consecutive
+    /// advances merge into the newest).
+    #[cfg(unix)]
+    RingAdvance(u64),
 }
 
 impl QueuedFrame {
@@ -344,6 +350,8 @@ impl QueuedFrame {
         match self {
             Self::Output(rope) => rope.retained_bytes(),
             Self::Frame(frame) => frame.retained_bytes(),
+            #[cfg(unix)]
+            Self::RingAdvance(_) => size_of::<Self>(),
             // The READY bytes are shared between viewers; each viewer's
             // backlog still counts them, so a stuck viewer stays bounded.
             Self::LocalReady(ready) => size_of::<Self>() + ready.frame.data.len(),
@@ -434,7 +442,18 @@ impl AttachLifecycle {
 pub(super) struct AttachTap {
     pub(super) state: Arc<AttachTapState>,
     pub(super) lifecycle: AttachLifecycle,
+    /// The terminal's output ring this viewer reads its bytes from
+    /// (`terminal-output-ring-v1`): its queue then gets the ring's new end
+    /// instead of a copy of the bytes. Every ring viewer of a terminal holds
+    /// the same ring; the output path writes it once.
+    #[cfg(unix)]
+    pub(super) ring: Option<SharedOutputRing>,
 }
+
+/// One terminal's output ring, shared by its ring viewers and written by its
+/// output path (under the taps lock, so one writer at a time).
+#[cfg(unix)]
+pub(crate) type SharedOutputRing = Arc<Mutex<output_ring::OutputRing>>;
 
 pub(super) struct AttachTapState {
     pub(super) queue: Mutex<AttachTapQueue>,
@@ -458,6 +477,11 @@ pub(super) struct AttachTapQueue {
     /// The last snapshot could not be encoded (an unfinished escape sequence
     /// over the continuation budget); the next output asks again.
     snapshot_deferred: bool,
+    /// A requested snapshot the per-viewer interval holds until this moment
+    /// (`SnapshotRequestGate`): the worker's wait ends then and the snapshot
+    /// is sent, so a throttled request is never lost. Any snapshot sent
+    /// before then answers it.
+    snapshot_due_at: Option<Instant>,
     /// The viewer reflows its own history: a resize reaches it as a
     /// local-history READY while it is not behind.
     local_history: bool,
@@ -470,6 +494,7 @@ impl AttachTapQueue {
     fn fall_behind(&mut self) {
         self.frames.clear();
         self.retained_bytes = 0;
+        self.snapshot_due_at = None;
         if !self.needs_snapshot {
             self.needs_snapshot = true;
             self.resyncs += 1;
@@ -495,6 +520,9 @@ pub(crate) enum ViewerEvent {
     Snapshot,
     /// Send this local-history READY (no history follows it).
     LocalReady(Arc<LocalReadySnapshot>),
+    /// The ring holds this viewer's bytes up to this offset.
+    #[cfg(unix)]
+    RingAdvance(u64),
 }
 
 /// Lets a command outside the attach worker (`snapshot-request`) ask one
@@ -505,10 +533,32 @@ pub(crate) struct SnapshotRequestHandle {
 }
 
 impl SnapshotRequestHandle {
-    /// Whether a snapshot is queued for the viewer (a deferred one is not:
-    /// it waits for output, and a request may ask again).
+    /// Whether a snapshot is queued for the viewer, now or at its due time
+    /// (one that could not be encoded is not: it waits for output, and a
+    /// request may ask again).
     pub(crate) fn snapshot_pending(&self) -> bool {
-        self.state.upgrade().is_some_and(|state| state.queue.lock().unwrap().needs_snapshot)
+        self.state.upgrade().is_some_and(|state| {
+            let queue = state.queue.lock().unwrap();
+            queue.needs_snapshot || queue.snapshot_due_at.is_some()
+        })
+    }
+
+    /// Ask for a snapshot at `due` (a request the per-viewer interval holds):
+    /// the viewer's worker wakes then and sends it, unless a snapshot was sent
+    /// before. Returns false when the viewer is gone.
+    pub(crate) fn request_at(&self, due: Instant) -> bool {
+        let Some(state) = self.state.upgrade() else { return false };
+        let mut queue = state.queue.lock().unwrap();
+        if !queue.receiver_alive || !queue.sender_alive {
+            return false;
+        }
+        if !queue.needs_snapshot {
+            queue.snapshot_due_at = Some(queue.snapshot_due_at.map_or(due, |at| at.min(due)));
+        }
+        drop(queue);
+        // The worker may be waiting without a deadline: wake it to wait until `due`.
+        state.ready.notify_all();
+        true
     }
 
     /// Returns false when the viewer is gone.
@@ -539,6 +589,11 @@ impl AttachFrameReceiver {
     ) -> Result<ViewerEvent, RecvTimeoutError> {
         let mut queue = self.state.queue.lock().unwrap();
         loop {
+            let now = Instant::now();
+            if queue.snapshot_due_at.is_some_and(|due| now >= due) {
+                // The held request is due: the snapshot replaces the queued frames.
+                queue.fall_behind();
+            }
             if queue.needs_snapshot {
                 return Ok(ViewerEvent::Snapshot);
             }
@@ -549,20 +604,26 @@ impl AttachFrameReceiver {
                 }
                 Some(QueuedFrame::Frame(frame)) => return Ok(ViewerEvent::Frame(frame)),
                 Some(QueuedFrame::LocalReady(ready)) => return Ok(ViewerEvent::LocalReady(ready)),
+                #[cfg(unix)]
+                Some(QueuedFrame::RingAdvance(end)) => return Ok(ViewerEvent::RingAdvance(end)),
                 None => {}
             }
             if !queue.sender_alive {
                 return Err(RecvTimeoutError::Disconnected);
             }
-            if interrupt.is_fired() {
+            if interrupt.is_fired() || deadline.is_some_and(|deadline| now >= deadline) {
                 return Err(RecvTimeoutError::Timeout);
             }
-            queue = match deadline {
+            // Wake at the caller's deadline or a held snapshot's due time,
+            // whichever is first; both are after `now`.
+            let wake_at = match (deadline, queue.snapshot_due_at) {
+                (Some(deadline), Some(due)) => Some(deadline.min(due)),
+                (deadline, due) => deadline.or(due),
+            };
+            queue = match wake_at {
                 None => self.state.ready.wait(queue).unwrap(),
-                Some(deadline) => {
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        return Err(RecvTimeoutError::Timeout);
-                    };
+                Some(wake_at) => {
+                    let remaining = wake_at.saturating_duration_since(now);
                     self.state.ready.wait_timeout(queue, remaining).unwrap().0
                 }
             };
@@ -578,6 +639,7 @@ impl AttachFrameReceiver {
         queue.retained_bytes = 0;
         queue.needs_snapshot = false;
         queue.snapshot_deferred = false;
+        queue.snapshot_due_at = None;
     }
 
     /// The snapshot could not be encoded now: drop queued frames and retry
@@ -588,6 +650,7 @@ impl AttachFrameReceiver {
         queue.retained_bytes = 0;
         queue.needs_snapshot = false;
         queue.snapshot_deferred = true;
+        queue.snapshot_due_at = None;
     }
 
     /// Opt this viewer into local-history READYs at resizes.
@@ -647,12 +710,18 @@ impl AttachTap {
                 needs_snapshot: snapshot_mode,
                 resyncs: 0,
                 snapshot_deferred: false,
+                snapshot_due_at: None,
                 local_history: false,
             }),
             ready: Condvar::new(),
         });
         (
-            Self { state: state.clone(), lifecycle: lifecycle.clone() },
+            Self {
+                state: state.clone(),
+                lifecycle: lifecycle.clone(),
+                #[cfg(unix)]
+                ring: None,
+            },
             AttachFrameReceiver { state, lifecycle },
         )
     }
@@ -747,6 +816,40 @@ impl AttachTap {
         drop(queue);
         self.lifecycle.mark_overflow();
         false
+    }
+
+    /// A ring viewer's output: the ring holds its bytes up to `end`. Queued
+    /// like output (merged with a pending advance), never as a copy of them.
+    #[cfg(unix)]
+    pub(super) fn try_send_ring_advance(&self, end: u64) -> bool {
+        if self.lifecycle.is_canceled() {
+            return false;
+        }
+        let mut queue = self.state.queue.lock().unwrap();
+        if !queue.receiver_alive {
+            drop(queue); // cancel fires interrupt wakers that lock this queue.
+            self.lifecycle.cancel();
+            return false;
+        }
+        if queue.snapshot_deferred {
+            // Retry the snapshot now that the parser has moved on.
+            queue.snapshot_deferred = false;
+            queue.fall_behind();
+            drop(queue);
+            self.state.ready.notify_one();
+            return true;
+        }
+        if queue.needs_snapshot {
+            // The pending snapshot is taken at or after this end.
+            return true;
+        }
+        if let Some(QueuedFrame::RingAdvance(pending)) = queue.frames.back_mut() {
+            *pending = end;
+            drop(queue);
+            self.state.ready.notify_one();
+            return true;
+        }
+        self.push(queue, QueuedFrame::RingAdvance(end))
     }
 
     pub(super) fn try_send(&self, mut frame: AttachFrame) -> bool {

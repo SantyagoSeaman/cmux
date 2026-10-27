@@ -128,6 +128,7 @@ fn next_reply(outbound: &BoundedOutbound) -> Value {
             Some(OutboundItem::Flush(flushed)) => {
                 let _ = flushed.send(());
             }
+            Some(OutboundItem::AttachFrame(_)) => panic!("an attach frame before the answer"),
             None => panic!("the connection closed before an answer"),
         }
     }
@@ -203,7 +204,7 @@ fn git_status_runs_off_the_request_thread() {
 fn machine_listening_tcp_runs_off_the_request_thread() {
     let mux = Mux::new("request-path-work-tcp", SurfaceOptions::default());
     let (client, writer, outbound) = client(&mux);
-    let request = Request { id: Some(json!(7)), cmd: Command::MachineListeningTcp };
+    let request = Request { id: Some(json!(7)), stream: None, cmd: Command::MachineListeningTcp };
 
     assert!(on_request_thread(&mux, move |mux| handle_request(mux, client, request, &writer)));
 

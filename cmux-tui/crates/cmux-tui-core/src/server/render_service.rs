@@ -1,7 +1,7 @@
 //! Render attach serialization budget: the render-graphic base64 cache, the
 //! outbound byte budget and budgeted JSON writer, `RenderService`, and the
 //! JSON writers for base64 replays and kitty graphics state, and the frame
-//! variant of the attach writer (server/attach_frames.rs).
+//! variant of the attach writer (server/attach_frame_encoder.rs).
 
 use super::AttachWireShape;
 use super::OUTBOUND_CONTROL_BYTE_RESERVE;
@@ -10,7 +10,7 @@ use super::OUTBOUND_GLOBAL_CONTROL_BYTE_CAPACITY;
 use super::RENDER_GRAPHIC_BASE64_CACHE_MAX_BYTES;
 use super::RENDER_GRAPHIC_BASE64_CACHE_MAX_ENTRIES;
 use super::VtStateMessage;
-use super::attach_frames::{
+use super::attach_frame_encoder::{
     AttachFrameEncoder, AttachFrameError, BudgetedFrame, EncodedAttachFrame, RefusedAttachFrame,
 };
 use super::terminal_colors_json;
@@ -314,27 +314,49 @@ impl RenderService {
         &self,
         value: &VtStateMessage,
     ) -> std::io::Result<Arc<BudgetedText>> {
+        self.serialize_vt_state_as(value, ReplayBytes::Base64)
+    }
+
+    /// The `vt-state` event, with its replay as base64 `data`, or (a REPLAY
+    /// frame's meta) without it and with `pending_len`: one writer for both
+    /// forms, so their fields never differ and nothing is parsed back.
+    pub(super) fn serialize_vt_state_as(
+        &self,
+        value: &VtStateMessage,
+        bytes: ReplayBytes,
+    ) -> std::io::Result<Arc<BudgetedText>> {
         let mut writer = BudgetedJsonWriter::new(self.outbound_budget.clone());
         write!(
             writer,
-            "{{\"event\":\"vt-state\",\"surface\":{},\"cols\":{},\"rows\":{},\"data\":\"",
+            "{{\"event\":\"vt-state\",\"surface\":{},\"cols\":{},\"rows\":{}",
             value.surface, value.cols, value.rows
         )?;
-        {
-            let mut encoder = base64::write::EncoderWriter::new(
-                &mut writer,
-                &base64::engine::general_purpose::STANDARD,
-            );
-            encoder.write_all(&value.replay)?;
-            encoder.finish()?;
+        match bytes {
+            ReplayBytes::Base64 => {
+                writer.write_all(b",\"data\":\"")?;
+                {
+                    let mut encoder = base64::write::EncoderWriter::new(
+                        &mut writer,
+                        &base64::engine::general_purpose::STANDARD,
+                    );
+                    encoder.write_all(&value.replay)?;
+                    encoder.finish()?;
+                }
+                writer.write_all(b"\"")?;
+            }
+            ReplayBytes::Omitted => {
+                write!(writer, ",\"pending_len\":{}", value.pending_sequence.len())?;
+            }
         }
-        writer.write_all(b"\",\"kitty_image_aliases\":")?;
+        writer.write_all(b",\"kitty_image_aliases\":")?;
         write_kitty_image_aliases_json(&mut writer, &value.kitty_image_aliases)?;
         writer.write_all(b",\"kitty_graphics_state\":")?;
         write_kitty_replay_state_json(&mut writer, value.kitty_state)?;
         writer.write_all(b",\"colors\":")?;
         serde_json::to_writer(&mut writer, &value.colors).map_err(json_error_to_io)?;
-        write_pending_sequence_json(&mut writer, &value.pending_sequence)?;
+        if bytes == ReplayBytes::Base64 {
+            write_pending_sequence_json(&mut writer, &value.pending_sequence)?;
+        }
         writer.write_all(b"}")?;
         Ok(writer.finish())
     }
@@ -345,19 +367,36 @@ impl RenderService {
         frame: &AttachFrame,
         shape: AttachWireShape,
     ) -> std::io::Result<Arc<BudgetedText>> {
+        self.serialize_attach_frame_as(surface, frame, shape, ReplayBytes::Base64)
+    }
+
+    /// [`Self::serialize_attach_frame`]; for a resize, with its replay as base64
+    /// or (a REPLAY frame's meta) without it and with `pending_len`.
+    pub(super) fn serialize_attach_frame_as(
+        &self,
+        surface: SurfaceId,
+        frame: &AttachFrame,
+        shape: AttachWireShape,
+        bytes: ReplayBytes,
+    ) -> std::io::Result<Arc<BudgetedText>> {
         let mut writer = BudgetedJsonWriter::new(self.outbound_budget.clone());
         if let AttachFrame::ColorsChanged(colors) = frame {
             write_colors_changed_json(&mut writer, surface, colors, shape)?;
         } else if let Some(resize) = frame.resize() {
             write!(
                 writer,
-                "{{\"event\":\"resized\",\"surface\":{surface},\"cols\":{},\"rows\":{},\"replay\":\"",
+                "{{\"event\":\"resized\",\"surface\":{surface},\"cols\":{},\"rows\":{}",
                 resize.cols, resize.rows
             )?;
-            write_resized_replay_json(&mut writer, resize.replay, resize.pending_sequence, shape)?;
-            writer.write_all(b"\"")?;
+            write_resized_replay_field(
+                &mut writer,
+                resize.replay,
+                resize.pending_sequence,
+                shape,
+                bytes,
+            )?;
             write_resized_state_fields(&mut writer, &resize, shape)?;
-            if shape.pending_sequence {
+            if shape.pending_sequence && bytes == ReplayBytes::Base64 {
                 write_pending_sequence_json(&mut writer, resize.pending_sequence)?;
             }
             writer.write_all(b"}")?;
@@ -379,14 +418,14 @@ impl RenderService {
     }
 }
 
-/// Attach frames are bound with `attach-frames-v1` (`IpcTransports::BOUND`)
-/// once the outbound queue carries stream frames; until then only tests
-/// encode them.
-#[cfg_attr(not(test), expect(dead_code, reason = "no transport serves attach-frames-v1 yet"))]
+/// p05-ipc-076's encoder over cmux-ipc headers. `attach-frames-v1` is served
+/// by D3's stream writer (server/attach_frames.rs, message_writer.rs); until
+/// that writer moves onto this encoder only tests use it.
+#[cfg_attr(not(test), expect(dead_code, reason = "attach-frames-v1 rides D3's stream writer"))]
 impl RenderService {
     /// The frame variant of [`Self::serialize_attach_frame`] for a stream
     /// granted `attach-frames-v1`: raw OUTPUT, GRID and EVENT frames
-    /// (server/attach_frames.rs), charged to the same outbound budget.
+    /// (server/attach_frame_encoder.rs), charged to the same outbound budget.
     pub(super) fn encode_attach_frame(
         &self,
         encoder: &mut AttachFrameEncoder,
@@ -432,6 +471,35 @@ fn write_base64_json_parts(
 
 /// A resized replay and its pending sequence: separate fields for viewers
 /// that advertised the capability, one self-contained replay otherwise.
+/// How a replay event carries its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReplayBytes {
+    /// In the JSON event, base64 (`data`, `replay`, `pending`).
+    Base64,
+    /// Beside it, raw in a REPLAY frame: the event is the frame's meta and says
+    /// `pending_len`.
+    Omitted,
+}
+
+/// A resize's replay field: `"replay":"<base64>"`, or `"pending_len":N` when
+/// the bytes travel raw beside the meta.
+fn write_resized_replay_field(
+    writer: &mut BudgetedJsonWriter,
+    replay: &[u8],
+    pending: &[u8],
+    shape: AttachWireShape,
+    bytes: ReplayBytes,
+) -> std::io::Result<()> {
+    match bytes {
+        ReplayBytes::Base64 => {
+            writer.write_all(b",\"replay\":\"")?;
+            write_resized_replay_json(writer, replay, pending, shape)?;
+            writer.write_all(b"\"")
+        }
+        ReplayBytes::Omitted => write!(writer, ",\"pending_len\":{}", pending.len()),
+    }
+}
+
 fn write_resized_replay_json(
     writer: &mut BudgetedJsonWriter,
     replay: &[u8],

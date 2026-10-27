@@ -739,8 +739,10 @@ final class AppServices {
         // Its scroll events are timed to their frame (`key.scroll_frame`) by their latency slots (``inputLatency``).
         inputDispatch = InputDispatchContext(discreteInput: { [mainWork] in mainWork.noteDiscreteInput(expectsFrame: $0) },
                                              discreteDispatch: { [mainWork] in mainWork.noteDiscreteDispatch(began: $0) })
+        let launchFeatures = features ?? Self.launchFeatures(environment)
         daemon = DaemonService(echoesPlacementShift: SidebarMirror.isLinked, mainWork: mainWork, wireStats: wireStats,
-                               hangWatch: hangWatch, crashKeys: crashKeys)
+                               hangWatch: hangWatch, crashKeys: crashKeys,
+                               terminalStreams: launchFeatures.isEnabled(.daemonTerminalStreams))
         self.launchReveal = launchReveal
         sidebarSnapshots = SidebarSnapshotStore(file: environment.sidebarSnapshotFile, saved: environment.sidebarSnapshot ?? environment.sidebarSnapshotFile?.startLaunchRead(on: work))
         let contextMenus = BrowserContextMenuBuilder.shared
@@ -748,7 +750,7 @@ final class AppServices {
         popups = BrowserPopupWindows(contextMenus: contextMenus, mainWork: mainWork, inputTap: inputTap)
         self.environment = environment; self.agentPaneEnvironment = agentPaneEnvironment
         crashRecovery = CrashRecoveryService(bundleID: environment.launch.bundleID, runMarker: environment.runMarker, crashKeys: crashKeys, work: work, mainWork: mainWork)
-        self.features = features ?? Self.launchFeatures(environment)
+        self.features = launchFeatures
         launchPanes = LaunchPaneGate(startup: self.features.isEnabled(.launchVisiblePanesOnly) ? launchStartup : nil)
         crashReporting = AppCrashReporting(environment: environment, features: CrashFeatureScope(FeatureFlagsPage.report(self.features, tunables: TunableStore.shared).fieldState), afterStartup: .init(handlersFirst: self.features.isEnabled(.sentryHandlersFirst), startup: launchStartup))  // after the run marker's handlers
         DebugTimings.markLaunch("services.crash_reporting")

@@ -89,6 +89,9 @@ public actor DaemonConnection {
     /// Waits for a ready connection newer than `after` (`DaemonConnection+ReadyWait`), each with its limit.
     var readyWaits: [UInt64: (after: UInt64, continuation: OnceContinuation<Bool, OnceContinuationError>, timer: DemandTimer)] = [:]
     var readyWaitNext: UInt64 = 0
+    /// This connection's device declaration for terminal streams, once per connect
+    /// (``terminalStreams(device:)``).
+    var streamSizingDeclaration: (serial: UInt64, task: Task<Void, any Error>)?
     /// The launch's first snapshot, fetched right after the handshake (``prefetchSnapshot()``).
     var prefetchedSnapshot: (serial: UInt64, fetch: Task<(tree: DaemonTree, barrier: UInt64), any Error>)?
 

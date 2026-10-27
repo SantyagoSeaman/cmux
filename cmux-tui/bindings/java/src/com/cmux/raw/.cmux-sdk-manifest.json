@@ -926,6 +926,21 @@
       "size": 2069
     },
     {
+      "path": "CancelStreamRequest.java",
+      "sha256": "97f1153a4e4e3243feb6458833264db7a8c16ecd6a87e6396a661e70d2838100",
+      "size": 1360
+    },
+    {
+      "path": "CancelStreamResult.java",
+      "sha256": "ca7934a3ed585c0d29db0ee81af5736b2ec7a84e641e5507352a962530734c64",
+      "size": 2033
+    },
+    {
+      "path": "CancelStreamResultOutcome.java",
+      "sha256": "bd8876cc4cd143302ce202271b7034578bd19fbddb3a6bd5c42c723b37d55420",
+      "size": 949
+    },
+    {
       "path": "CellPixelFailure.java",
       "sha256": "f9734ed366131510c733b3fa1c55afd00896c54486616efb0e05147e63bee20a",
       "size": 2595
@@ -1352,8 +1367,8 @@
     },
     {
       "path": "Commands.java",
-      "sha256": "31ca5a627c7c518aa955c74c771a1173b8ce1d87558f0374f6fca8359a8cb59d",
-      "size": 97556
+      "sha256": "af4f35b7730492c2538cfea463f578cfed3d0a8476d469f8b87cf781faa07b2d",
+      "size": 97784
     },
     {
       "path": "ConfigReloadRequestedEvent.java",
@@ -2112,8 +2127,8 @@
     },
     {
       "path": "GeneratedCmuxClient.java",
-      "sha256": "04af200142a8528d04b22845f1ac580cf9743708f2e42707595c958f9cc7cbeb",
-      "size": 86319
+      "sha256": "a502f81544330d87413d226fde2ddd13f18bdb60f6a097f79c51f50688f3f799",
+      "size": 86519
     },
     {
       "path": "GetBlobRequest.java",
@@ -2967,7 +2982,7 @@
     },
     {
       "path": "Protocol.java",
-      "sha256": "f45decf68f2f87a5b3b44ff46ee7262707e2cdb1c8aaa7d5dc67e9d9126677c3",
+      "sha256": "d96c39d398a786834c502c725a9bbf62e485dca01e36e3508acb9e58e4aadddc",
       "size": 7841
     },
     {
@@ -4432,7 +4447,7 @@
     }
   ],
   "format": 1,
-  "ir_sha256": "92ea0b6da7b0bd288ec4e10c0f31751140797c17e8fcdbcb3a76d518df4b8499",
+  "ir_sha256": "9d7077658827947982cf1fcd4dec91be180cfc5b3682d52fa696565dac29165e",
   "language": "java",
   "mux_protocol": 12,
   "schema_version": 2

@@ -6,6 +6,12 @@ public struct DaemonConnectionConfiguration: Sendable {
     public var clientName: String
     public var requiredCapabilities: [String]
     public var advertisedCapabilities: [String]
+    /// Terminal views attach as streams on this connection when the daemon
+    /// serves `attach-streams-v1` (``DaemonConnection/terminalStreams(device:)``);
+    /// false keeps one connection per view. The app sets it from the
+    /// `daemonTerminalStreams` feature (default off): the per-view path stays the
+    /// rollback until that path is removed (design section 6).
+    public var terminalStreams: Bool
     public var treeEvents: TreeEventMode
     /// Spacing and budget of reconnect attempts.
     public var retry: RetryPolicy
@@ -82,8 +88,10 @@ public struct DaemonConnectionConfiguration: Sendable {
         sessionEvents: Bool = false,
         role: DaemonClientRole = .main,
         relayIdentity: PageRelayIdentity? = nil,
-        clientHello: ClientHelloIdentity? = nil
+        clientHello: ClientHelloIdentity? = nil,
+        terminalStreams: Bool = false
     ) {
+        self.terminalStreams = terminalStreams
         self.clientName = clientName
         self.requiredCapabilities = requiredCapabilities
         self.advertisedCapabilities = advertisedCapabilities

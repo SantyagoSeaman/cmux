@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    AsyncReply, Command, MessageWriter, Mux, RequestSpan, Response,
+    AsyncReply, Command, CommandContext, MessageWriter, Mux, RequestSpan, Response,
     handle_command_with_cancellation, responses,
 };
 use crate::cloud_conversations::{
@@ -555,7 +555,7 @@ pub(super) fn subscribe_then_announce(
     span: &mut RequestSpan<'_>,
     writer: &MessageWriter,
 ) -> bool {
-    let result = handle_command_with_cancellation(mux, client, cmd, writer, None);
+    let result = handle_command_with_cancellation(mux, client, cmd, writer, CommandContext::default());
     let subscribed = result.is_ok();
     let sent = span.reply(|| send(writer, id, result));
     if subscribed && let Some(service) = mux.cloud_conversations() {
@@ -615,8 +615,13 @@ pub(super) fn start(
         let reply = reply.start();
         let _lock_scope = reply.enter_lock_scope();
         let _permit = permit;
-        let result =
-            handle_command_with_cancellation(&worker_mux, client, cmd, &worker_writer, None);
+        let result = handle_command_with_cancellation(
+            &worker_mux,
+            client,
+            cmd,
+            &worker_writer,
+            CommandContext::default(),
+        );
         reply.reply(|| send(&worker_writer, worker_id, result));
     });
     match spawned {

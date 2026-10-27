@@ -15,9 +15,22 @@ import Foundation
 /// Replays never block (a 10 MiB replay must not wedge the attach
 /// handshake). Consecutive plain output chunks are merged on the way out.
 final class TerminalEventQueue: Sendable {
+    /// What a push did on a queue whose reader must not wait.
+    enum PushOutcome: Equatable {
+        case queued
+        /// Output passed `highWater`: every queued output chunk and history
+        /// page was dropped (the new one too). The stream resyncs by snapshot.
+        case overflowed
+    }
+
     let highWater: Int
     let lowWater: Int
     let mergeLimit: Int
+    /// False on a shared connection (`attach-streams-v1`): the reader thread
+    /// serves every stream and the control plane, so it never waits; a
+    /// consumer that falls `highWater` behind loses its queued output instead
+    /// and its stream resyncs by snapshot (D5).
+    let blocksReader: Bool
     /// Called on the reader thread each time a `push` starts to block above
     /// `highWater`, before it waits. Tests use it to observe backpressure
     /// without timing; it must not block.
@@ -44,6 +57,13 @@ final class TerminalEventQueue: Sendable {
         mutating func parkReader(above highWater: Int) -> Bool {
             readerParked = armed && !finished && outputBytes > highWater
             return readerParked
+        }
+
+        /// Drops every queued output chunk and history page; other events stay in order.
+        mutating func dropQueuedOutput() {
+            items = items.dropFirst(head).filter { TerminalEventQueue.outputSize($0) == 0 }
+            head = 0
+            outputBytes = 0
         }
 
         /// Clears the parked mark; true when the caller must signal the reader.
@@ -79,7 +99,9 @@ final class TerminalEventQueue: Sendable {
     }
 
     init(highWater: Int = 8 << 20, lowWater: Int = 2 << 20, mergeLimit: Int = 1 << 20,
-         recorder: DaemonWireStats.Recorder?, onReaderBlocked: (@Sendable () -> Void)? = nil) {
+         blocksReader: Bool = true, recorder: DaemonWireStats.Recorder?,
+         onReaderBlocked: (@Sendable () -> Void)? = nil) {
+        self.blocksReader = blocksReader
         self.highWater = highWater
         self.lowWater = lowWater
         self.mergeLimit = mergeLimit
@@ -87,22 +109,39 @@ final class TerminalEventQueue: Sendable {
         self.onReaderBlocked = onReaderBlocked
     }
 
+    /// The queue of a view on a shared connection (`attach-streams-v1`): the
+    /// reader never waits, and chunks are not merged, so each frame and ring
+    /// span stays its own event (a ring span reaches Ghostty uncopied and no
+    /// bytes move past a grid change).
+    static func sharedConnection(recorder: DaemonWireStats.Recorder?) -> TerminalEventQueue {
+        TerminalEventQueue(mergeLimit: 0, blocksReader: false, recorder: recorder)
+    }
+
     /// Enables blocking once the consumer can start draining.
     func arm() {
         state.withLock { $0.armed = true }
     }
 
-    /// Reader thread. May block while the consumer is behind.
-    func push(_ event: TerminalChannelEvent) {
-        let (waiter, blocked) = state.withLock { state -> (OnceContinuation<TerminalChannelEvent?, OnceContinuationError>?, Bool) in
-            guard !state.finished else { return (nil, false) }
-            if let waiter = state.waiter.take() { return (waiter, false) }
+    /// Reader thread. May block while the consumer is behind (only when
+    /// ``blocksReader``).
+    @discardableResult
+    func push(_ event: TerminalChannelEvent) -> PushOutcome {
+        let blocksReader = blocksReader
+        let (waiter, blocked, outcome) = state.withLock {
+            state -> (OnceContinuation<TerminalChannelEvent?, OnceContinuationError>?, Bool, PushOutcome) in
+            guard !state.finished else { return (nil, false, .queued) }
+            if let waiter = state.waiter.take() { return (waiter, false, .queued) }
             state.items.append(event)
             state.outputBytes += Self.outputSize(event)
-            return (nil, state.parkReader(above: highWater))
+            guard blocksReader else {
+                guard state.outputBytes > highWater else { return (nil, false, .queued) }
+                state.dropQueuedOutput()
+                return (nil, false, .overflowed)
+            }
+            return (nil, state.parkReader(above: highWater), .queued)
         }
         waiter?.resume(returning: event)
-        guard blocked else { return }
+        guard blocked else { return outcome }
         onReaderBlocked?()
         var parked = blocked
         while parked {
@@ -111,6 +150,7 @@ final class TerminalEventQueue: Sendable {
             readerWake.blockingWait()
             parked = state.withLock { $0.parkReader(above: highWater) }
         }
+        return outcome
     }
 
     /// Any thread. Queues a small, non-output event without the backpressure wait, so a caller may
