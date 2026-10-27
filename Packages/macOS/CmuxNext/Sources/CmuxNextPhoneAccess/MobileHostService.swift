@@ -16,7 +16,8 @@ import os
 /// tokens from disk. This and `MobileIrxHost` are the only Iroh-aware parts:
 /// the settings and their rules (`PhoneAccessGate`) name no transport.
 public final class MobileHostService {
-    public private(set) var host: MobileIrxHost?
+    /// The current listener; tests attach one to see the pairing page's hops reach it.
+    public internal(set) var host: MobileIrxHost?
     private var starting: Task<Void, Never>?
     /// Bumped by every start and stop; a start that lost the race drops out.
     private var generation = 0

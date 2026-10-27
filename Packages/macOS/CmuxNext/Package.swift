@@ -1049,7 +1049,9 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
         ),
         .testTarget(
             name: "CmuxNextPhoneAccessTests",
-            dependencies: ["CmuxNextPhoneAccess", "CmuxNextMobile", "CmuxNextWakeups",
+            // CmuxNextDaemon: MobileHostBindTests' empty compat backend. CmuxNextWakeupsTestSupport: ManualClock (ticket holds).
+            dependencies: ["CmuxNextPhoneAccess", "CmuxNextMobile", "CmuxNextWakeups", "CmuxNextDaemon",
+                           "CmuxNextWakeupsTestSupport",
                            .product(name: "CmuxIrxTransport", package: "CmuxIrxTransport")],
             swiftSettings: uiSwiftSettings
         ),

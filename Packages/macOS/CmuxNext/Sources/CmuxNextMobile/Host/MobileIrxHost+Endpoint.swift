@@ -45,17 +45,22 @@ extension MobileIrxHost {
 
     /// A minted attach ticket keeps the endpoint until it expires, so the phone given it
     /// finds this Mac listening (`mobile.attach_ticket.create`, the pairing page's QR code).
+    /// Tickets have their own ttls: the hold lasts until the last of them expires.
     func holdEndpoint(forTicketLifetime ttl: TimeInterval) {
         guard endpointOnDemand else { return }
-        let timer = DemandTimer(owner: "MobileIrxHost.ticketHold", clock: clock)
-        ticketHold?.cancel()
-        ticketHold = timer
-        timer.schedule(after: .seconds(min(max(0, ttl), Self.longestTicketHold))) { [weak self] in await self?.ticketHoldEnded(timer) }
+        let lifetime = Duration.seconds(min(max(0, ttl), Self.longestTicketHold))
+        let until = uptime() + lifetime
+        if ticketHold.map({ $0.until < until }) ?? true {
+            let timer = DemandTimer(owner: "MobileIrxHost.ticketHold", clock: clock)
+            ticketHold?.timer.cancel()
+            ticketHold = TicketHold(timer: timer, until: until)
+            timer.schedule(after: lifetime) { [weak self] in await self?.ticketHoldEnded(timer) }
+        }
         requestEndpointReady()
     }
 
     private func ticketHoldEnded(_ timer: DemandTimer) async {
-        guard ticketHold === timer else { return }
+        guard ticketHold?.timer === timer else { return }
         ticketHold = nil
         await reconcileEndpoint()
     }
@@ -70,15 +75,23 @@ extension MobileIrxHost {
         }
     }
 
-    /// Closes the bound endpoint (the relay connection and its keepalive) and stands by.
-    /// Phone sessions closed already: no paired phone means ``enforcePermissions()`` revoked them.
-    private func releaseEndpoint() async {
+    /// Cancels the bind and the accept loop and moves their tokens on: a hop either of them
+    /// already queued (a bind that returned, an accept that the close ended) changes nothing.
+    func cancelEndpointWork() {
         endpointTask?.cancel(); endpointTask = nil
+        endpointBind &+= 1
         endpointRefreshPending = false
         acceptTask?.cancel(); acceptTask = nil
+        acceptLoop &+= 1
         acceptRestart?.cancel(); acceptRestart = nil
         endpointPacer.reset()
         acceptPacer.reset()
+    }
+
+    /// Closes the bound endpoint (the relay connection and its keepalive) and stands by.
+    /// Phone sessions closed already: no paired phone means ``enforcePermissions()`` revoked them.
+    private func releaseEndpoint() async {
+        cancelEndpointWork()
         guard phase != .standby, let supervisor else { return }
         phase = .standby
         journal.record("next-host", "endpoint-standby", [:])
@@ -106,20 +119,23 @@ extension MobileIrxHost {
         if phase == .standby { phase = .waitingForRelay }
         let wake = endpointWake
         let clock = clock
+        endpointBind &+= 1
+        let bind = endpointBind
         endpointTask = Task { [weak self] in
             // wakeup-allow: backoff: each failed activation waits in RetryWake (capped backoff, then relay-state events only)
             while !Task.isCancelled {
                 guard let self, let cache = await self.cachedState else { return }
                 do {
-                    _ = try await supervisor.readyEndpoint(credentials: Self.credentials(cache))
-                    // Teardown cancels this task; never revive the phase or
-                    // the accept loop after it.
-                    guard !Task.isCancelled else { return }
-                    await self.endpointBecameReady(supervisor)
+                    try await supervisor.bind(credentials: Self.credentials(cache))
+                    guard !Task.isCancelled else {
+                        await self.closeOutlivedBind(supervisor)
+                        return
+                    }
+                    await self.endpointBecameReady(supervisor, bind: bind)
                     return
                 } catch {
                     // A release or teardown closed the bind; it is not a failure.
-                    guard !Task.isCancelled, let delay = await self.recordEndpointFailure(error) else { return }
+                    guard !Task.isCancelled, let delay = await self.recordEndpointFailure(error, bind: bind) else { return }
                     wake.rebaseline()
                     guard await wake.awaitWake(delay: delay, clock: clock) != .cancelled else { return }
                 }
@@ -128,8 +144,9 @@ extension MobileIrxHost {
     }
 
     /// Notes a failed activation; returns the spacing before the next one,
-    /// or nil when the budget is spent (the next relay-state change retries).
-    private func recordEndpointFailure(_ error: any Error) -> Duration? {
+    /// or nil when the budget is spent (the next relay-state change retries) or the bind is not current.
+    private func recordEndpointFailure(_ error: any Error, bind: UInt64) -> Duration? {
+        guard bind == endpointBind else { return nil }
         journal.record("next-host", "endpoint-failed", ["error": String(describing: type(of: error))])
         if supervisor != nil { phase = .failed("relay endpoint unavailable") }
         let delay = endpointPacer.failed()
@@ -140,11 +157,14 @@ extension MobileIrxHost {
         return delay
     }
 
-    private func endpointBecameReady(_ supervisor: IrxEndpointSupervisor) async {
-        guard self.supervisor === supervisor else { return }
+    /// The bind `bind` is online. A release, teardown or newer bind (before or during the relay read)
+    /// supersedes it: then it sets no phase and starts no accept loop.
+    private func endpointBecameReady(_ supervisor: any MobileHostEndpoint, bind: UInt64) async {
+        guard bind == endpointBind else { return await closeOutlivedBind(supervisor) }
         endpointTask = nil
         endpointPacer.reset()
         let relay = await supervisor.homeRelayURL()
+        guard bind == endpointBind else { return await closeOutlivedBind(supervisor) }
         phase = .listening(relayURL: relay)
         journal.record("next-host", "endpoint-ready", ["relay": relay ?? "-"])
         startAcceptLoop()
@@ -153,6 +173,14 @@ extension MobileIrxHost {
             endpointRefreshPending = false
             requestEndpointReady()
         }
+    }
+
+    /// A bind that a release outran (it started before the release's close and returned after it)
+    /// left an endpoint bound that nothing wants: close it, unless a newer bind owns the endpoint now.
+    private func closeOutlivedBind(_ supervisor: any MobileHostEndpoint) async {
+        guard phase == .standby, endpointTask == nil else { return }
+        journal.record("next-host", "endpoint-outlived-release", [:])
+        await supervisor.close()
     }
 
     /// Peers address the Mac through its home relay; direct paths stay local.
@@ -172,12 +200,14 @@ extension MobileIrxHost {
     private func startAcceptLoop() {
         guard acceptTask == nil, let supervisor, let admission, let registry else { return }
         let judgment = admission.judgment()
+        acceptLoop &+= 1
+        let loop = acceptLoop
         acceptTask = Task { [weak self] in
             var accepted = false
             // wakeup-allow: bounded: awaits the next inbound connection; nil ends the loop (restart is paced by acceptRetry)
             while !Task.isCancelled {
                 guard let inbound = await supervisor.acceptNextInbound() else {
-                    await self?.acceptLoopEnded(acceptedAny: accepted)
+                    await self?.acceptLoopEnded(acceptedAny: accepted, loop: loop)
                     return
                 }
                 accepted = true
@@ -204,8 +234,10 @@ extension MobileIrxHost {
     /// re-readied at once with the activation backoff reset, so an endpoint
     /// that closed right after binding (or a driver that kept returning nil)
     /// cycled readyEndpoint/accept without pause. Now a cycle that accepted
-    /// nothing is spaced by `acceptRetry`, which spans cycles.
-    private func acceptLoopEnded(acceptedAny: Bool) {
+    /// nothing is spaced by `acceptRetry`, which spans cycles. A loop that a release or
+    /// teardown cancelled (its close ends the accept) is not current and restarts nothing.
+    private func acceptLoopEnded(acceptedAny: Bool, loop: UInt64) {
+        guard loop == acceptLoop else { return }
         acceptTask = nil
         if acceptedAny { acceptPacer.reset() }
         guard let delay = acceptPacer.failed() else {

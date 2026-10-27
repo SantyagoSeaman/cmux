@@ -51,13 +51,17 @@ public actor MobileIrxHost {
     var identity: IrxIdentity?
     var admission: V2InboundAdmissionAuthority?
     var controlService: V2ControlService?
-    var supervisor: IrxEndpointSupervisor?
+    var supervisor: (any MobileHostEndpoint)?
     var registry: IrxServerSessionRegistry?
     var cachedState: V2CachedState?
     var controlTask: Task<Void, Never>?
     var endpointTask: Task<Void, Never>?
+    /// Names the current bind; a release or teardown moves it on, so a bind that returns after one changes nothing.
+    var endpointBind: UInt64 = 0
     var endpointRefreshPending = false
     var acceptTask: Task<Void, Never>?
+    /// Names the current accept loop; a release or teardown moves it on, so the loop it cancelled cannot restart.
+    var acceptLoop: UInt64 = 0
     var expiryTimer: DemandTimer?
     /// Spacing of endpoint activation attempts; reset once the endpoint is ready.
     var endpointPacer = RetryPacer(MobileIrxHost.endpointRetry)
@@ -71,8 +75,10 @@ public actor MobileIrxHost {
     let endpointOnDemand: Bool
     /// Whether the Mobile Pairing page is open, with the service's revision of that fact (hops may arrive out of order).
     var pairing: (open: Bool, revision: UInt64)
-    /// Keeps the endpoint while a minted attach ticket is live: the phone that holds it dials this Mac.
-    var ticketHold: DemandTimer?
+    /// Keeps the endpoint until the last minted attach ticket expires: the phone that holds it dials this Mac.
+    var ticketHold: TicketHold?
+    /// Time on `clock` since this listener was made: the ticket holds' deadlines.
+    let uptime: @Sendable () -> Duration
     /// Bumped by every `start()` and `stop()`. A provisioning run checks it
     /// after each await and abandons itself once stale, so a stop that lands
     /// mid-provisioning cannot be undone by the start resuming afterwards.
@@ -80,6 +86,12 @@ public actor MobileIrxHost {
 
     /// Thrown inside `provision` when a newer `start()`/`stop()` took over.
     struct Superseded: Error {}
+
+    /// The live ticket hold: its timer and the uptime its longest ticket expires at.
+    struct TicketHold {
+        let timer: DemandTimer
+        let until: Duration
+    }
 
     public init(configuration: MobileHostConfiguration, auth: any MobileHostAuth, work: BackgroundWork,
                 makeBackend: @escaping @Sendable () async throws -> any MobileCompatBackend,
@@ -95,6 +107,7 @@ public actor MobileIrxHost {
         self.auth = auth
         self.makeBackend = makeBackend
         self.clock = clock
+        uptime = Self.stopwatch(clock)
         journal = IrxJournal(subsystem: "com.cmuxterm.app.next", category: "irx-host",
                              journalFileURL: URL(fileURLWithPath: "/tmp/cmux-next-irx-journal-\(configuration.tag).jsonl"))
     }
@@ -122,6 +135,12 @@ public actor MobileIrxHost {
             await teardown()
             if run == lifetime { phase = .failed(String(describing: error)) }
         }
+    }
+
+    /// Time elapsed on `clock` since this call (an injected clock's instants compare only within its own type).
+    static func stopwatch<C: Clock>(_ clock: C) -> @Sendable () -> Duration where C.Duration == Swift.Duration {
+        let start = clock.now
+        return { start.duration(to: clock.now) }
     }
 
     /// The current phase, then each change, until the caller stops iterating.
@@ -202,21 +221,14 @@ public actor MobileIrxHost {
         try ensureCurrent(run)
         // From here to `service.start()` nothing suspends, so the resources
         // below belong to this run; a later `stop()` tears them down.
-        backend = made
-        self.identity = identity
-        self.admission = admission
-        macDeviceID = deviceID
-        registry = IrxServerSessionRegistry(journal: journal)
-        supervisor = IrxEndpointSupervisor(
+        controlService = service
+        let endpoint = SupervisedEndpoint(supervisor: IrxEndpointSupervisor(
             configuration: .init(identity: identity, pathMode: .automatic,
                                  preferredBindAddress: "0.0.0.0:\(configuration.preferredPort)",
                                  initialRemoteBiStreams: 1, initialRemoteUniStreams: 0, additionalALPNs: []),
-            journal: journal)
-        cachedState = restored ?? V2CachedState(identity: tuple)
-        controlService = service
-        phase = .waitingForRelay
-        // A returning Mac listens from its cache while the control plane connects.
-        requestEndpointReady()
+            journal: journal))
+        adopt(backend: made, identity: identity, admission: admission, deviceID: deviceID, endpoint: endpoint,
+              cache: restored ?? V2CachedState(identity: tuple))
         controlTask = Task { [weak self] in
             for await snapshot in await service.events() {
                 guard let self, !Task.isCancelled else { return }
@@ -232,6 +244,21 @@ public actor MobileIrxHost {
             throw Superseded()
         }
         journal.record("next-host", "control-started", ["cached": String(restored != nil)])
+    }
+
+    /// Takes a provisioned run's parts (nothing here suspends) and binds the endpoint when it is wanted:
+    /// a returning Mac listens from its cache while the control plane connects.
+    func adopt(backend: any MobileCompatBackend, identity: IrxIdentity, admission: V2InboundAdmissionAuthority,
+               deviceID: String, endpoint: any MobileHostEndpoint, cache: V2CachedState) {
+        self.backend = backend
+        self.identity = identity
+        self.admission = admission
+        macDeviceID = deviceID
+        registry = IrxServerSessionRegistry(journal: journal)
+        supervisor = endpoint
+        cachedState = cache
+        phase = .waitingForRelay
+        requestEndpointReady()
     }
 
     private func apply(_ snapshot: V2ControlSnapshot) async {
@@ -257,13 +284,9 @@ public actor MobileIrxHost {
 
     func teardown() async {
         controlTask?.cancel(); controlTask = nil
-        endpointTask?.cancel(); endpointTask = nil
-        acceptTask?.cancel(); acceptTask = nil
+        cancelEndpointWork()
         expiryTimer?.cancel(); expiryTimer = nil
-        acceptRestart?.cancel(); acceptRestart = nil
-        ticketHold?.cancel(); ticketHold = nil
-        endpointPacer.reset()
-        acceptPacer.reset()
+        ticketHold?.timer.cancel(); ticketHold = nil
         admission?.invalidate()
         await registry?.closeAll(code: .hostShutdown)
         await supervisor?.deactivate()
