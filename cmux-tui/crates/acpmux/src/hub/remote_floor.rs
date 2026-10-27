@@ -29,17 +29,16 @@
 use super::*;
 
 /// The remote floor's marks on a session.
-#[derive(Default)]
 pub(crate) struct FloorState {
     /// The last turn was a Web turn: an agent request between turns is
     /// held to the floor.
     pub(super) last_turn_web: AtomicBool,
     /// The Web turn the floor cancelled: every later request in it is
     /// cancelled, also after a local restore of an asking mode.
-    pub(super) floor_cancelled_turn: StdMutex<Option<String>>,
+    pub(super) floor_cancelled_turn: RankedMutex<Option<String>>,
     /// A mode the harness reported while it declared no modes; the asking
     /// check reads it. Cleared when the agent exits.
-    pub(super) undeclared_mode: StdMutex<Option<String>>,
+    pub(super) undeclared_mode: RankedMutex<Option<String>>,
     /// The agent process holds a lasting grant a client gave it ("allow
     /// always"): Web control ends until the agent exits (`web_control.rs`).
     pub(super) harness_grant: AtomicBool,
@@ -47,6 +46,26 @@ pub(crate) struct FloorState {
     /// in the sandbox (it started before the sandbox existed): Web control
     /// ends until the agent exits (`remote_sandbox.rs`).
     pub(super) unsandboxed: AtomicBool,
+}
+
+impl Default for FloorState {
+    fn default() -> Self {
+        Self {
+            last_turn_web: AtomicBool::new(false),
+            floor_cancelled_turn: RankedMutex::new(
+                LockRank::SubState,
+                "session.floor.floor_cancelled_turn",
+                None,
+            ),
+            undeclared_mode: RankedMutex::new(
+                LockRank::SubState,
+                "session.floor.undeclared_mode",
+                None,
+            ),
+            harness_grant: AtomicBool::new(false),
+            unsandboxed: AtomicBool::new(false),
+        }
+    }
 }
 
 impl Hub {

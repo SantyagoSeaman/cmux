@@ -34,10 +34,10 @@
 //! often the value is used, not what a command it runs may do with it.
 
 use super::{Hub, Session, SessionStatus};
+use crate::lock_rank::{LockRank, RankedMutex};
 use crate::rpc::RpcError;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::oneshot;
@@ -52,10 +52,18 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MASK: &str = "••••••";
 
-#[derive(Default)]
 pub(crate) struct Secrets {
-    pending: StdMutex<HashMap<String, Pending>>,
-    held: StdMutex<HashMap<String, Held>>,
+    pending: RankedMutex<HashMap<String, Pending>>,
+    held: RankedMutex<HashMap<String, Held>>,
+}
+
+impl Default for Secrets {
+    fn default() -> Self {
+        Self {
+            pending: RankedMutex::new(LockRank::SubState, "secrets.pending", HashMap::new()),
+            held: RankedMutex::new(LockRank::SubState, "secrets.held", HashMap::new()),
+        }
+    }
 }
 
 struct Pending {

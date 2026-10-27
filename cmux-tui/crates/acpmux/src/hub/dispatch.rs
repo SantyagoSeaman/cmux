@@ -1,12 +1,20 @@
 use super::*;
 use std::collections::BTreeMap;
-use std::sync::Mutex as StdMutex;
 
-#[derive(Default)]
 pub(crate) struct Briefs {
-    rows: StdMutex<BTreeMap<String, Value>>,
+    rows: RankedMutex<BTreeMap<String, Value>>,
     path: Option<std::path::PathBuf>,
     load_failed: bool,
+}
+
+fn ranked_rows(rows: BTreeMap<String, Value>) -> RankedMutex<BTreeMap<String, Value>> {
+    RankedMutex::new(LockRank::SubState, "hub.briefs", rows)
+}
+
+impl Default for Briefs {
+    fn default() -> Self {
+        Self { rows: ranked_rows(BTreeMap::new()), path: None, load_failed: false }
+    }
 }
 
 impl Briefs {
@@ -27,7 +35,7 @@ impl Briefs {
                 (BTreeMap::new(), true)
             }
         };
-        Self { rows: StdMutex::new(rows), path: Some(path), load_failed }
+        Self { rows: ranked_rows(rows), path: Some(path), load_failed }
     }
 
     pub(crate) fn load_failed(&self) -> bool {
@@ -146,8 +154,7 @@ mod tests {
 
     #[test]
     fn brief_identity_keeps_non_claude_harness_pair() {
-        let briefs =
-            Briefs { rows: StdMutex::new(BTreeMap::new()), path: None, load_failed: false };
+        let briefs = Briefs::default();
         let row = briefs.put(json!({
             "title": "opencode to pi",
             "harness": "pi",

@@ -826,7 +826,7 @@ impl Hub {
                     } else {
                         SessionStatus::Ready
                     };
-                    hub.set_status(&s, next);
+                    hub.set_status_releasing(&s, next, state);
                 }
             }
             let _ = c.respond(agent_request_id, Ok(permission_answer(outcome))).await;

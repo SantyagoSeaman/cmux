@@ -33,11 +33,12 @@
 //! - A wait in progress is not persisted: a daemon restart during it drops the attempt.
 
 use super::{Control, Hub, PromptOptions, Session, SessionStatus, TurnInfo};
+use crate::lock_rank::{LockRank, RankedGuard, RankedMutex};
 use crate::rpc::RpcError;
 use crate::store::EventRecord;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Waits before attempts 1, 2, 3 and 4, in milliseconds.
@@ -106,11 +107,16 @@ enum Mark {
 }
 
 /// Each chat's [`Mark`].
-#[derive(Default)]
-pub(crate) struct Pending(Mutex<HashMap<String, Mark>>);
+pub(crate) struct Pending(RankedMutex<HashMap<String, Mark>>);
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self(RankedMutex::new(LockRank::AutoResumes, "hub.auto_resumes", HashMap::new()))
+    }
+}
 
 impl Pending {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Mark>> {
+    fn lock(&self) -> RankedGuard<'_, HashMap<String, Mark>> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

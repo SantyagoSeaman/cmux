@@ -154,13 +154,22 @@ impl PairGuard {
 }
 
 /// Every pair the daemon has seen messages between.
-#[derive(Default)]
 pub(crate) struct AgentPairs {
-    guard: StdMutex<PairGuard>,
-    state: StdMutex<PairsState>,
+    guard: RankedMutex<PairGuard>,
+    state: RankedMutex<PairsState>,
     /// The last held message's pair-wide order (Unix microseconds, made unique): restored
     /// pauses merge both receivers' held messages by it.
     order: AtomicU64,
+}
+
+impl Default for AgentPairs {
+    fn default() -> Self {
+        Self {
+            guard: RankedMutex::new(LockRank::SubState, "agent_pairs.guard", PairGuard::default()),
+            state: RankedMutex::new(LockRank::SubState, "agent_pairs.state", PairsState::default()),
+            order: AtomicU64::default(),
+        }
+    }
 }
 
 type PairKey = (String, String);
@@ -390,7 +399,7 @@ impl Hub {
         *self.agent_pairs.guard.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn pairs_state(&self) -> std::sync::MutexGuard<'_, PairsState> {
+    fn pairs_state(&self) -> RankedGuard<'_, PairsState> {
         self.agent_pairs.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 

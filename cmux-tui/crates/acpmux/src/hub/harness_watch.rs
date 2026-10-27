@@ -39,18 +39,18 @@ pub(super) const MAX_BURST: Duration = Duration::from_secs(2);
 /// The hub's profile hot-reload state: the live watcher and the change feed
 /// that `_acpmux/watch` connections forward.
 pub(crate) struct HarnessWatchState {
-    watcher: StdMutex<Option<Arc<HarnessWatcher>>>,
+    watcher: RankedMutex<Option<Arc<HarnessWatcher>>>,
     changes: broadcast::Sender<Value>,
     /// The task that runs the reloads the watcher thread signals.
-    reloader: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    reloader: RankedMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Default for HarnessWatchState {
     fn default() -> Self {
         Self {
-            watcher: StdMutex::new(None),
+            watcher: RankedMutex::new(LockRank::SubState, "harness_watch.watcher", None),
             changes: broadcast::channel(64).0,
-            reloader: StdMutex::new(None),
+            reloader: RankedMutex::new(LockRank::SubState, "harness_watch.reloader", None),
         }
     }
 }
@@ -68,13 +68,13 @@ impl Drop for HarnessWatchState {
 /// Keeps the watcher alive; dropping it stops the events and its thread.
 pub(crate) struct HarnessWatcher {
     #[cfg(not(target_os = "macos"))]
-    watcher: StdMutex<notify::RecommendedWatcher>,
-    watched: StdMutex<Vec<PathBuf>>,
+    watcher: RankedMutex<notify::RecommendedWatcher>,
+    watched: RankedMutex<Vec<PathBuf>>,
     /// The kqueue watch (macOS) on the watched folders, the files in the
     /// source folders and cmux.json, made again on each refresh; its events
     /// reach the event thread as rescans (`events`).
     #[cfg(target_os = "macos")]
-    kernel: StdMutex<Option<crate::agent_host::record_watch::DirWatch>>,
+    kernel: RankedMutex<Option<crate::agent_host::record_watch::DirWatch>>,
     #[cfg(target_os = "macos")]
     events: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
 }
@@ -117,10 +117,14 @@ impl Hub {
         };
         let watch = Arc::new(HarnessWatcher {
             #[cfg(not(target_os = "macos"))]
-            watcher: StdMutex::new(watcher),
-            watched: StdMutex::new(Vec::new()),
+            watcher: RankedMutex::new(LockRank::SubState, "harness_watcher.watcher", watcher),
+            watched: RankedMutex::new(
+                LockRank::SubStateOuter,
+                "harness_watcher.watched",
+                Vec::new(),
+            ),
             #[cfg(target_os = "macos")]
-            kernel: StdMutex::new(None),
+            kernel: RankedMutex::new(LockRank::SubState, "harness_watcher.kernel", None),
             #[cfg(target_os = "macos")]
             events: tx,
         });

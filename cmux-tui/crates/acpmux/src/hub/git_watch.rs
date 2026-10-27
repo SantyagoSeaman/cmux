@@ -32,12 +32,21 @@ use crate::git_state::{GitState, head_dir};
 
 /// The hub's git watch: the task's wake-up, the task, and the branch each
 /// session's folder had at its last read.
-#[derive(Default)]
 pub(crate) struct GitWatchState {
-    signal: StdMutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
-    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    signal: RankedMutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
+    task: RankedMutex<Option<tokio::task::JoinHandle<()>>>,
     /// By session id; `None` inside is a detached HEAD or no repository.
-    now: StdMutex<HashMap<String, Option<String>>>,
+    now: RankedMutex<HashMap<String, Option<String>>>,
+}
+
+impl Default for GitWatchState {
+    fn default() -> Self {
+        Self {
+            signal: RankedMutex::new(LockRank::SubState, "git_watch.signal", None),
+            task: RankedMutex::new(LockRank::SubState, "git_watch.task", None),
+            now: RankedMutex::new(LockRank::SubState, "git_watch.now", HashMap::new()),
+        }
+    }
 }
 
 impl Drop for GitWatchState {

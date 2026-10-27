@@ -40,9 +40,14 @@ pub struct Approver {
 }
 
 /// The enrolled approvers and the Mac they approve for.
-#[derive(Default)]
 pub struct ApproverSet {
-    inner: StdMutex<(String, Vec<Approver>)>,
+    inner: RankedMutex<(String, Vec<Approver>)>,
+}
+
+impl Default for ApproverSet {
+    fn default() -> Self {
+        Self { inner: RankedMutex::new(LockRank::SubState, "person.approvers", Default::default()) }
+    }
 }
 
 impl ApproverSet {

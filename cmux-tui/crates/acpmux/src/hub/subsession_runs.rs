@@ -27,13 +27,26 @@ pub const WORKSPACES_FILE: &str = "subsession-workspaces.json";
 
 /// Which children hold a run slot or wait for one, per parent; the workspace limits; and the
 /// signal a waiting turn looks again on.
-#[derive(Default)]
 pub struct Runs {
-    state: StdMutex<RunState>,
+    state: RankedMutex<RunState>,
     /// Fired when a slot frees or a limit may have changed.
     changed: Notify,
     /// Loaded from [`WORKSPACES_FILE`] at first use.
-    workspaces: StdMutex<Option<BTreeMap<String, u32>>>,
+    workspaces: RankedMutex<Option<BTreeMap<String, u32>>>,
+}
+
+impl Default for Runs {
+    fn default() -> Self {
+        Self {
+            state: RankedMutex::new(
+                LockRank::SubState,
+                "subsession_runs.state",
+                RunState::default(),
+            ),
+            changed: Notify::new(),
+            workspaces: RankedMutex::new(LockRank::SubState, "subsession_runs.workspaces", None),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -44,7 +57,7 @@ struct RunState {
 }
 
 impl Runs {
-    fn lock(&self) -> std::sync::MutexGuard<'_, RunState> {
+    fn lock(&self) -> RankedGuard<'_, RunState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 

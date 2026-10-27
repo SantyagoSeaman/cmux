@@ -23,7 +23,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -37,15 +36,24 @@ pub(super) const DECLINE_MEMORY: Duration = Duration::from_secs(10 * 60);
 pub const TAG_PREFIX: &str = "trust.pending:";
 
 /// What the hub remembers about trust waits.
-#[derive(Default)]
 pub(crate) struct Waits {
     /// Not now, by folder: refused again without a card until it expires.
-    declined: StdMutex<HashMap<String, Instant>>,
+    declined: RankedMutex<HashMap<String, Instant>>,
     /// Fired when a folder's trust may have changed (`acp.trust.set`, a Trust on a card).
     changed: Notify,
     /// Starts waiting under each (session, tag): two starts with one name share the tag, which
     /// goes when the last of them ends.
-    tagged: StdMutex<HashMap<(String, String), usize>>,
+    tagged: RankedMutex<HashMap<(String, String), usize>>,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            declined: RankedMutex::new(LockRank::SubState, "trust_waits.declined", HashMap::new()),
+            changed: Notify::new(),
+            tagged: RankedMutex::new(LockRank::SubState, "trust_waits.tagged", HashMap::new()),
+        }
+    }
 }
 
 impl Waits {

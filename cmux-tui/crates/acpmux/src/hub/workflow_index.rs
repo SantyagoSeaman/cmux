@@ -17,10 +17,10 @@
 //! answers is built from the copy.
 
 use super::Hub;
+use crate::lock_rank::{LockRank, RankedMutex};
 use crate::rpc::RpcError;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex as StdMutex;
 
 /// Ended workflows listed after the running ones.
 const ENDED_KEPT: usize = 50;
@@ -45,9 +45,15 @@ struct Rows {
 }
 
 /// The workflows of this daemon's chats (`Hub::workflow_index`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WorkflowIndex {
-    rows: StdMutex<Rows>,
+    rows: RankedMutex<Rows>,
+}
+
+impl Default for WorkflowIndex {
+    fn default() -> Self {
+        Self { rows: RankedMutex::new(LockRank::SubState, "hub.workflow_index", Rows::default()) }
+    }
 }
 
 /// The fields of a workflow's progress the index keeps, as the subagent model names them.

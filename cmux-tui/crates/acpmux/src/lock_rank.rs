@@ -4,7 +4,8 @@
 //! DCHECK builds, that a thread takes locks only in their declared order;
 //! cmux-tui-core's `lock_rank.rs` does the same for the mux and surface
 //! locks. This module ranks the long-lived std locks of
-//! [`Hub`](crate::hub::Hub) and [`Session`](crate::hub::Session).
+//! [`Hub`](crate::hub::Hub) and [`Session`](crate::hub::Session), and of the
+//! parts they own (`hub/`'s services, the pool, the watchers, the floor).
 //!
 //! The order, outer first, is [`LockRank`]'s. A thread may block on a ranked
 //! lock only when its rank is after every rank the thread already holds. A
@@ -19,6 +20,14 @@
 //! `.await` and the thread that took a lock is the one that releases it. The
 //! tokio locks (`Session::child`, `spawn_lock`, `turn_lock`) wait
 //! asynchronously and are not ranked.
+//!
+//! Also not ranked: the meta and config writers' queues (`hub/meta_writer.rs`,
+//! `hub/config_writer.rs`), which a `Condvar` waits on and so need a std guard;
+//! the process-wide worktree care state (`hub/worktree_care.rs`, a static, not
+//! the hub's); and the locks of the layers below the hub (the mailbox, the
+//! store's log writer, a peer link, pairing, the catalog, harness health, the
+//! chat index), whose guards stay inside their own modules and call no hub
+//! code, so they are always taken innermost.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{LockResult, Mutex, MutexGuard, PoisonError, TryLockError, TryLockResult};
@@ -26,6 +35,10 @@ use std::sync::{LockResult, Mutex, MutexGuard, PoisonError, TryLockError, TryLoc
 /// Rank of a ranked lock. A thread acquires ranks in ascending order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LockRank {
+    /// A pooled entry's tap slot (`hub/pool/held.rs`): its held lines replay
+    /// through the session tap under it, and the tap logs and takes any
+    /// session lock.
+    PooledTap,
     /// `Hub::sessions`, the session registry: a lookup reads a session's
     /// `meta` under it, a create makes the session (`clock`).
     Sessions,
@@ -59,9 +72,24 @@ pub enum LockRank {
     SessionMeta,
     /// `Hub::known_models`: a probe pick reads `Hub::probe_only`.
     KnownModels,
-    /// Every other hub and session lock: it takes no ranked lock but the clock
-    /// while held.
+    /// `Hub::auto_resumes`: a turn's end takes `Session::turn` under it, in one
+    /// step with Stop's check (`hub/auto_resume.rs`).
+    AutoResumes,
+    /// Every other lock of the hub and a session itself: it takes no ranked
+    /// lock but sub-state and the clock while held.
     Leaf,
+    /// A sub-state lock that takes one [`Self::SubState`] lock of its own part
+    /// while held: the pool's entries (a cap pass marks the oversize keys), a
+    /// profile or settings watcher's folder list (its notify watcher or kernel
+    /// watch changes), the outbox's deliveries (a save reads the file path).
+    SubStateOuter,
+    /// The sub-state the hub and a session own through their parts: the
+    /// services' maps (secrets, offers, outbox, the subsession index and runs,
+    /// trust waits, agent pairs, briefs, the workflow index, the person gate),
+    /// the pool's other tables, the watchers' handles, the floor marks and a
+    /// queued prompt's join slot. It takes no ranked lock but the clock while
+    /// held, so any other rank may be held when it is taken.
+    SubState,
     /// `Hub::clock`: read under any other lock (`Hub::clock_now`).
     Clock,
 }
@@ -194,6 +222,13 @@ impl<T> RankedMutex<T> {
         (LockRank::Leaf, "")
     }
 
+    /// The value through an exclusive borrow: no other thread can hold the lock, so no rank is
+    /// taken.
+    #[inline]
+    pub fn get_mut(&mut self) -> LockResult<&mut T> {
+        self.inner.get_mut()
+    }
+
     #[track_caller]
     #[inline]
     pub fn lock(&self) -> LockResult<RankedGuard<'_, T>> {
@@ -221,6 +256,12 @@ impl<T> RankedMutex<T> {
                 })))
             }
         }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for RankedMutex<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
     }
 }
 

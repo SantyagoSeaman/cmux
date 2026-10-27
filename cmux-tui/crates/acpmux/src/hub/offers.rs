@@ -28,12 +28,13 @@
 //!   plain text, and nothing runs before the person accepts.
 
 use super::{Hub, Session};
+use crate::lock_rank::{LockRank, RankedMutex};
 use crate::rpc::RpcError;
 use crate::store::EventRecord;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 pub(super) const MAX_TITLE_CHARS: usize = 80;
 pub(super) const MAX_PROMPT_CHARS: usize = 20_000;
@@ -44,11 +45,19 @@ const MAX_GROUP_BYTES: usize = 64;
 
 /// Each chat's open offers (id to when it was made, Unix ms), read from its
 /// records at its first offer call.
-#[derive(Default)]
 pub(crate) struct Offers {
-    open: StdMutex<HashMap<String, HashMap<String, u64>>>,
+    open: RankedMutex<HashMap<String, HashMap<String, u64>>>,
     /// Chats whose suggested-task result this daemon sends or sent (`offer_results.rs`).
-    pub(super) results: StdMutex<HashSet<String>>,
+    pub(super) results: RankedMutex<HashSet<String>>,
+}
+
+impl Default for Offers {
+    fn default() -> Self {
+        Self {
+            open: RankedMutex::new(LockRank::SubState, "offers.open", HashMap::new()),
+            results: RankedMutex::new(LockRank::SubState, "offers.results", HashSet::new()),
+        }
+    }
 }
 
 impl Offers {

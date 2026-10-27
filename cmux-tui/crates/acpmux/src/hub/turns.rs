@@ -754,15 +754,15 @@ impl Hub {
             // waiting on nothing.
             let state = session.permissions.lock().unwrap_or_else(|e| e.into_inner());
             let asking = !state.pending.is_empty() || self.secrets.waiting_in(&session.id);
-            self.set_status(
+            self.set_status_releasing(
                 session,
                 match (alive, asking) {
                     (false, _) => SessionStatus::Disconnected,
                     (true, true) => SessionStatus::Waiting,
                     (true, false) => SessionStatus::Ready,
                 },
+                state,
             );
-            drop(state);
         }
         self.save_meta(session);
         self.send_offer_result(session);

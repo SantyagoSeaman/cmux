@@ -63,6 +63,11 @@ pub(super) struct Joined {
     pub(super) answer: tokio::sync::watch::Receiver<Option<Answer>>,
 }
 
+/// A queued prompt's empty [`Joined`] slot (`QueuedPrompt::joined`).
+pub(super) fn joined_slot() -> Arc<RankedMutex<Option<Joined>>> {
+    Arc::new(RankedMutex::new(LockRank::SubState, "queued_prompt.joined", None))
+}
+
 /// One message in a turn of agent messages.
 pub(super) struct Part {
     pub(super) prompt_id: String,
@@ -365,12 +370,15 @@ impl Hub {
 /// entries they left, which go back if it fails.
 pub(super) struct DigestTurn {
     pub(super) answer: tokio::sync::watch::Sender<Option<Answer>>,
-    taken: StdMutex<Vec<QueuedPrompt>>,
+    taken: RankedMutex<Vec<QueuedPrompt>>,
 }
 
 impl Default for DigestTurn {
     fn default() -> Self {
-        Self { answer: tokio::sync::watch::channel(None).0, taken: StdMutex::new(Vec::new()) }
+        Self {
+            answer: tokio::sync::watch::channel(None).0,
+            taken: RankedMutex::new(LockRank::SubState, "digest_turn.taken", Vec::new()),
+        }
     }
 }
 

@@ -203,7 +203,7 @@ impl Record {
     }
 }
 
-type KeyLocks = StdMutex<HashMap<String, Arc<Mutex<()>>>>;
+type KeyLocks = RankedMutex<HashMap<String, Arc<Mutex<()>>>>;
 
 /// One handoff key held for a mutation. Dropping it releases the key and
 /// removes its entry when nobody else waits for it.
@@ -229,7 +229,7 @@ impl Drop for KeyGuard<'_> {
 /// Every handoff record, with its file when the store is on disk.
 pub(crate) struct Handoffs {
     dir: Option<PathBuf>,
-    records: StdMutex<HashMap<String, Record>>,
+    records: RankedMutex<HashMap<String, Record>>,
     /// Async locks per `key:<handoffKey>` (prepare) and `id:<handoffId>`
     /// (draft, start, discard), so retries of one handoff never create two
     /// targets or send twice while a slow harness holds up no other handoff.
@@ -257,7 +257,11 @@ impl Handoffs {
                 }
             }
         }
-        Self { dir, records: StdMutex::new(records), locks: StdMutex::new(HashMap::new()) }
+        Self {
+            dir,
+            records: RankedMutex::new(LockRank::SubState, "handoffs.records", records),
+            locks: RankedMutex::new(LockRank::SubState, "handoffs.locks", HashMap::new()),
+        }
     }
 
     async fn lock(&self, key: String) -> KeyGuard<'_> {

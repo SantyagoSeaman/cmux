@@ -4,8 +4,9 @@
 use super::policy::Pool;
 use crate::agent_host::HostRecord;
 use crate::clock::Clock;
+use crate::lock_rank::RankedMutex;
 use std::future::Future;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -47,7 +48,7 @@ pub fn tree_rss_bytes(root: u32) -> u64 {
 /// (no timer runs for an empty pool), when `stopped` resolves, or when
 /// `clock` reports the owner gone (None).
 pub(crate) async fn run_reaper<T>(
-    pool: &StdMutex<Pool<T>>,
+    pool: &RankedMutex<Pool<T>>,
     wake: &Notify,
     stopped: impl Future<Output = ()>,
     mut clock: impl FnMut() -> Option<Arc<dyn Clock>>,

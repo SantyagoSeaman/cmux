@@ -44,7 +44,7 @@ pub struct QueuedPrompt {
     pub(super) sent_now: bool,
     /// Set when it went in with an earlier agent message's turn (`digest.rs`): its waiting task
     /// answers with that turn, or waits again when that turn failed (`requeue_joined`).
-    pub(super) joined: Arc<StdMutex<Option<super::digest::Joined>>>,
+    pub(super) joined: Arc<RankedMutex<Option<super::digest::Joined>>>,
     /// Put back once after a failed turn of agent messages (`requeue_joined`): not again.
     pub(super) requeued: bool,
     /// Times a hold let it go by itself (`digest.rs` `retry_held_agent_messages`): the next
@@ -304,9 +304,9 @@ impl Hub {
         p: &Slot<'_>,
         position: u64,
         turn_id: &str,
-    ) -> (Arc<Notify>, Arc<StdMutex<Option<super::digest::Joined>>>) {
+    ) -> (Arc<Notify>, Arc<RankedMutex<Option<super::digest::Joined>>>) {
         let withdraw = Arc::new(Notify::new());
-        let joined = Arc::new(StdMutex::new(None));
+        let joined = super::digest::joined_slot();
         let mut queue = session.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // The sender's prompts under its key leave under the lock that puts this one in
         // (`supersede.rs`), with the ledger pinned first as `remove_queued_because` pins it.
@@ -863,7 +863,7 @@ impl Hub {
                 steer: false,
                 held: held.iter().any(|id| id.as_str() == Some(&prompt_id)),
                 sent_now: false,
-                joined: Arc::new(StdMutex::new(None)),
+                joined: super::digest::joined_slot(),
                 requeued: e.msg.get("requeued") == Some(&Value::Bool(true)),
                 retries: 0,
             });

@@ -577,7 +577,7 @@ impl Hub {
                 },
             );
             self.append(session,"mux","permission_request",json!({"permissionId":permission_id,"decisionNonce":decision_nonce,"personInstance":self.person.instance(),"request":request,"groupId":grouping.as_ref().map(|(id,_)|id),"turnId":turn_id,"agentRequestId":agent_request_id,"remoteFloor":floored}));
-            self.set_status(session, SessionStatus::Waiting);
+            self.set_status_releasing(session, SessionStatus::Waiting, state);
             (rx, prev, grouping, permission_id)
         };
         // Joined its group (or none): the group's timer need not wait for it.
@@ -622,7 +622,7 @@ impl Hub {
             && session.status() == SessionStatus::Waiting
             && !self.secrets.waiting_in(&session.id)
         {
-            self.set_status(session, status_after_ask(session, prev));
+            self.set_status_releasing(session, status_after_ask(session, prev), state);
         }
     }
 

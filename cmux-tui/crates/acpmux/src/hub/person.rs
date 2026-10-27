@@ -356,26 +356,43 @@ pub enum PersonVerdict {
 }
 
 /// This launch's person key, once the app gave it.
-#[derive(Default)]
 pub struct PersonGate {
-    key: StdMutex<Option<String>>,
+    key: RankedMutex<Option<String>>,
     /// Set by `--person-key-fd`: a running unsigned daemon takes no other.
     from_spawn: AtomicBool,
     /// This daemon run's id, which a decision proof binds.
     instance: std::sync::OnceLock<String>,
     /// Decision nonces that counted once, with when.
-    spent: StdMutex<std::collections::VecDeque<(String, std::time::Instant)>>,
+    spent: RankedMutex<std::collections::VecDeque<(String, std::time::Instant)>>,
     /// The person's phones that may allow with a signature (`approvers.rs`).
     pub approvers: super::approvers::ApproverSet,
     /// The folders of the workspaces the person's app lists now
     /// (`_acpmux/workspace_roots_set`, memory only): a Web session may start
     /// there too (`remote_guard::web_roots`, which drops `/`, home and its
     /// ancestors and resolves symlinks).
-    pub workspace_roots: StdMutex<Vec<String>>,
+    pub workspace_roots: RankedMutex<Vec<String>>,
     /// The agent and model the person's app picked last for a new chat
     /// (`_acpmux/new_chat_picks_set`, memory only), shown in
     /// `_acpmux/harnesses` as `lastPicks`.
-    pub new_chat_picks: StdMutex<Option<Value>>,
+    pub new_chat_picks: RankedMutex<Option<Value>>,
+}
+
+impl Default for PersonGate {
+    fn default() -> Self {
+        Self {
+            key: RankedMutex::new(LockRank::SubState, "person.key", None),
+            from_spawn: AtomicBool::new(false),
+            instance: std::sync::OnceLock::new(),
+            spent: RankedMutex::new(LockRank::SubState, "person.spent", Default::default()),
+            approvers: super::approvers::ApproverSet::default(),
+            workspace_roots: RankedMutex::new(
+                LockRank::SubState,
+                "person.workspace_roots",
+                Vec::new(),
+            ),
+            new_chat_picks: RankedMutex::new(LockRank::SubState, "person.new_chat_picks", None),
+        }
+    }
 }
 
 /// At most this many folders in the new-chat picks (the app keeps 50).

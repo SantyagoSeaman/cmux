@@ -10,10 +10,10 @@
 //! files with no account field count by presence (a logout removes them). Values are
 //! hashed in memory and never stored or logged.
 
+use crate::lock_rank::{LockRank, RankedMutex};
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::SystemTime;
 
 /// Env keys that carry credentials or point a harness at another login.
@@ -75,9 +75,14 @@ const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Reads stay off the switch path when nothing changed: a file is parsed
 /// again only when its size or modification time moved.
-#[derive(Default)]
 pub struct AuthCache {
-    parsed: Mutex<BTreeMap<PathBuf, (u64, Option<SystemTime>, u64)>>,
+    parsed: RankedMutex<BTreeMap<PathBuf, (u64, Option<SystemTime>, u64)>>,
+}
+
+impl Default for AuthCache {
+    fn default() -> Self {
+        Self { parsed: RankedMutex::new(LockRank::SubState, "pool.auth", BTreeMap::new()) }
+    }
 }
 
 impl AuthCache {

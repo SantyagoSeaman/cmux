@@ -16,9 +16,9 @@
 //! agent's step ends), so the forwarding daemon passes the peer's `_acpmux/prompt_accepted` on to
 //! the connection that sent the prompt as soon as it arrives ([`PeerAccepts`]).
 
+use crate::lock_rank::{LockRank, RankedMutex};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -92,12 +92,25 @@ impl Delivery {
 }
 
 /// The deliveries, saved at `path` when the store is on disk.
-#[derive(Default)]
 pub struct Outbox {
-    deliveries: StdMutex<BTreeMap<String, Delivery>>,
-    path: StdMutex<Option<PathBuf>>,
+    deliveries: RankedMutex<BTreeMap<String, Delivery>>,
+    path: RankedMutex<Option<PathBuf>>,
     /// Fired on every change: a `send_status` that waits wakes.
     pub changed: Notify,
+}
+
+impl Default for Outbox {
+    fn default() -> Self {
+        Self {
+            deliveries: RankedMutex::new(
+                LockRank::SubStateOuter,
+                "outbox.deliveries",
+                BTreeMap::new(),
+            ),
+            path: RankedMutex::new(LockRank::SubState, "outbox.path", None),
+            changed: Notify::new(),
+        }
+    }
 }
 
 impl Outbox {
@@ -167,10 +180,18 @@ type AcceptHook = Box<dyn FnOnce(Value) + Send>;
 
 /// Prompts forwarded to a peer that wait for the peer's acceptance, by peer and prompt id. Two
 /// forwards of one id (a retry while the first still waits) each get theirs.
-#[derive(Default)]
 pub struct PeerAccepts {
-    hooks: StdMutex<HashMap<(String, String), Vec<(u64, AcceptHook)>>>,
+    hooks: RankedMutex<HashMap<(String, String), Vec<(u64, AcceptHook)>>>,
     next: std::sync::atomic::AtomicU64,
+}
+
+impl Default for PeerAccepts {
+    fn default() -> Self {
+        Self {
+            hooks: RankedMutex::new(LockRank::SubState, "peer_accepts.hooks", HashMap::new()),
+            next: std::sync::atomic::AtomicU64::default(),
+        }
+    }
 }
 
 impl PeerAccepts {

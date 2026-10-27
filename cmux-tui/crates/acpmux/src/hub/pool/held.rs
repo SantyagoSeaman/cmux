@@ -21,8 +21,9 @@ fn is_stderr_note(msg: &Message) -> bool {
 
 /// A tap that holds every line until the entry is taken. Held lines count
 /// as stored: they reach the session log, in order, when it is taken.
-pub(super) fn holding_tap() -> (Tap, Arc<StdMutex<TapSlot>>) {
-    let slot = Arc::new(StdMutex::new(TapSlot::Held(Vec::new())));
+pub(super) fn holding_tap() -> (Tap, Arc<RankedMutex<TapSlot>>) {
+    let slot =
+        Arc::new(RankedMutex::new(LockRank::PooledTap, "pooled.tap", TapSlot::Held(Vec::new())));
     let s = slot.clone();
     let tap: Tap = Arc::new(move |dir, msg, host_seq| {
         let mut guard = s.lock().unwrap_or_else(|e| e.into_inner());

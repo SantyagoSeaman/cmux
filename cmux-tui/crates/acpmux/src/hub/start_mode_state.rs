@@ -113,8 +113,13 @@ impl StartModeState {
 }
 
 /// The state, loaded from `start-mode.json` at first use.
-#[derive(Default)]
-pub(crate) struct StartModeCell(StdMutex<Option<StartModeState>>);
+pub(crate) struct StartModeCell(RankedMutex<Option<StartModeState>>);
+
+impl Default for StartModeCell {
+    fn default() -> Self {
+        Self(RankedMutex::new(LockRank::SubState, "hub.start_mode_state", None))
+    }
+}
 
 /// Where the state is kept: beside config.json, if the daemon has one.
 pub(super) fn state_file(cfg: &Config) -> Option<PathBuf> {

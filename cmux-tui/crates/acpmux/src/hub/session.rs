@@ -205,6 +205,110 @@ impl Session {
         self.meta.lock().unwrap().status
     }
 }
+
+impl Hub {
+    /// A session for `meta`, each of its locks at its rank (`crate::lock_rank`).
+    pub(super) fn make_session(&self, mut meta: SessionMeta) -> Arc<Session> {
+        let (inbound_tx, inbound_rx) = mpsc::channel(1024);
+        // A Claude chat saved without `steering` (an older build) still steers once adopted.
+        meta.steering |= crate::claude_stdio::steers_by_info(meta.agent_info.as_ref());
+        let steering = meta.steering;
+        // Until it starts, an adopted chat goes by the agent it last ran (its saved `agentInfo`).
+        let backgrounds_work = crate::claude_stdio::steers_by_info(meta.agent_info.as_ref());
+        Arc::new(Session {
+            id: meta.id.clone(),
+            seq: AtomicU64::new(meta.last_seq),
+            meta: RankedMutex::new(LockRank::SessionMeta, "session.meta", meta),
+            child: Mutex::new(None),
+            spawn_lock: Mutex::new(()),
+            append_lock: RankedMutex::new(LockRank::SessionAppend, "session.append_lock", ()),
+            loading: AtomicBool::new(false),
+            caught_up: AtomicBool::new(true),
+            turn_lock: Mutex::new(()),
+            turn: RankedMutex::new(LockRank::Leaf, "session.turn", None),
+            queued: AtomicU64::new(0),
+            queue: RankedMutex::new(LockRank::SessionQueue, "session.queue", Vec::new()),
+            queue_moved: Notify::new(),
+            moving: RankedMutex::new(LockRank::SessionMoving, "session.moving", None),
+            restored: RankedMutex::new(LockRank::Leaf, "session.restored", Vec::new()),
+            stream: RankedMutex::new(LockRank::Leaf, "session.stream", StreamState::default()),
+            permissions: RankedMutex::new(
+                LockRank::SessionPermissions,
+                "session.permissions",
+                permission_groups::PermissionState::default(),
+            ),
+            permission_epoch: AtomicU64::new(0),
+            input_since: AtomicU64::new(0),
+            asks_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            asks_landed: Notify::new(),
+            rehydrate: AtomicBool::new(false),
+            forum_retell: AtomicBool::new(false),
+            forum_retold: RankedMutex::new(
+                LockRank::Leaf,
+                "session.forum_retold",
+                Default::default(),
+            ),
+            forum_telling: RankedMutex::new(
+                LockRank::Leaf,
+                "session.forum_telling",
+                Default::default(),
+            ),
+            launched_with_tools: std::sync::atomic::AtomicU8::new(0),
+            route_switch: AtomicBool::new(false),
+            inbound_tx,
+            inbound_rx: Mutex::new(Some(inbound_rx)),
+            steering: AtomicBool::new(steering),
+            backgrounds_work: AtomicBool::new(backgrounds_work),
+            steer_now: RankedMutex::new(LockRank::Leaf, "session.steer_now", Default::default()),
+            steer_end: tokio::sync::watch::channel(None).0,
+            fork_from: RankedMutex::new(LockRank::Leaf, "session.fork_from", None),
+            applied: RankedMutex::new(LockRank::Leaf, "session.applied", Applied::default()),
+            purged: Arc::new(AtomicBool::new(false)),
+            watch_end: Notify::new(),
+            replaced: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            state_seq: AtomicU64::new(0),
+            attached: std::sync::atomic::AtomicUsize::new(0),
+            hidden: std::sync::atomic::AtomicUsize::new(0),
+            stderr_tail: RankedMutex::new(
+                LockRank::Leaf,
+                "session.stderr_tail",
+                std::collections::VecDeque::new(),
+            ),
+            prompts: RankedMutex::new(
+                LockRank::SessionPrompts,
+                "session.prompts",
+                std::collections::VecDeque::new(),
+            ),
+            append_errors: AtomicU64::new(0),
+            last_progress: AtomicU64::new(0),
+            heard: AtomicU64::new(0),
+            heard_at: std::sync::atomic::AtomicI64::new(0),
+            stalled_recheck: AtomicU64::new(0),
+            open_tools: RankedMutex::new(LockRank::Leaf, "session.open_tools", Default::default()),
+            stalled_counted: RankedMutex::new(LockRank::Leaf, "session.stalled_counted", None),
+            stalled_gen: AtomicU64::new(0),
+            last_model_at: AtomicU64::new(0),
+            silent_turn: RankedMutex::new(LockRank::SessionSilentTurn, "session.silent_turn", None),
+            last_active: AtomicU64::new(self.clock_now()),
+            web_control_ended: AtomicBool::new(false),
+            floor: Default::default(),
+            subagents: RankedMutex::new(LockRank::Leaf, "session.subagents", Default::default()),
+            processes: RankedMutex::new(
+                LockRank::SessionProcesses,
+                "session.processes",
+                Default::default(),
+            ),
+            pr_creates: RankedMutex::new(LockRank::Leaf, "session.pr_creates", Default::default()),
+            composers: RankedMutex::new(
+                LockRank::SessionComposers,
+                "session.composers",
+                Default::default(),
+            ),
+        })
+    }
+}
+
 /// Tags that have not expired, as a flat map.
 pub fn live_tags(m: &SessionMeta) -> Value {
     let now = now_ms();

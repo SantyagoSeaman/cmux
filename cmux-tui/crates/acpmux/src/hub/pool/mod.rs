@@ -77,9 +77,9 @@ pub type RssProbe = Arc<dyn Fn(u32) -> u64 + Send + Sync>;
 
 /// The pool on the hub.
 pub(crate) struct PoolState {
-    pool: StdMutex<Pool<Pooled>>,
+    pool: RankedMutex<Pool<Pooled>>,
     /// Claimed by `session/new`, taken by `ensure_child`, by session id.
-    claimed: StdMutex<HashMap<String, Pooled>>,
+    claimed: RankedMutex<HashMap<String, Pooled>>,
     wake: Arc<Notify>,
     reaper: AtomicBool,
     stopping: AtomicBool,
@@ -90,13 +90,13 @@ pub(crate) struct PoolState {
     auth: auth::AuthCache,
     /// Per cwd: the (harness, preset) of the newest new session there and
     /// of the one before it (the last-used role).
-    recent: StdMutex<HashMap<PathBuf, (Spec, Option<Spec>)>>,
-    rss: StdMutex<RssProbe>,
+    recent: RankedMutex<HashMap<PathBuf, (Spec, Option<Spec>)>>,
+    rss: RankedMutex<RssProbe>,
     /// Hosts started for entries not in the pool yet, by reserved id:
     /// `stop_pool` ends them too.
-    starting: StdMutex<HashMap<String, HostRecord>>,
+    starting: RankedMutex<HashMap<String, HostRecord>>,
     /// Keys whose session alone is over the RSS cap: never started again.
-    oversize: StdMutex<std::collections::HashSet<PoolKey>>,
+    oversize: RankedMutex<std::collections::HashSet<PoolKey>>,
 }
 
 type Spec = (String, Option<String>);
@@ -104,18 +104,22 @@ type Spec = (String, Option<String>);
 impl PoolState {
     pub(super) fn new() -> Self {
         Self {
-            pool: StdMutex::new(Pool::new(crate::config::PoolConfig::default().idle())),
-            claimed: StdMutex::new(HashMap::new()),
+            pool: RankedMutex::new(
+                LockRank::SubStateOuter,
+                "pool.pool",
+                Pool::new(crate::config::PoolConfig::default().idle()),
+            ),
+            claimed: RankedMutex::new(LockRank::SubState, "pool.claimed", HashMap::new()),
             wake: Arc::new(Notify::new()),
             reaper: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             stop: Notify::new(),
             hint_gen: AtomicU64::new(0),
             auth: auth::AuthCache::default(),
-            recent: StdMutex::new(HashMap::new()),
-            rss: StdMutex::new(Arc::new(tree_rss_bytes)),
-            starting: StdMutex::new(HashMap::new()),
-            oversize: StdMutex::new(Default::default()),
+            recent: RankedMutex::new(LockRank::SubState, "pool.recent", HashMap::new()),
+            rss: RankedMutex::new(LockRank::SubState, "pool.rss", Arc::new(tree_rss_bytes)),
+            starting: RankedMutex::new(LockRank::SubState, "pool.starting", HashMap::new()),
+            oversize: RankedMutex::new(LockRank::SubState, "pool.oversize", Default::default()),
         }
     }
 
@@ -140,7 +144,7 @@ pub(super) struct Pooled {
     init: Value,
     /// The harness's `session/new` answer (ACP harnesses).
     new_result: Option<Value>,
-    tap: Arc<StdMutex<TapSlot>>,
+    tap: Arc<RankedMutex<TapSlot>>,
     target: Option<oneshot::Sender<mpsc::Sender<Inbound>>>,
     rss: u64,
     parked: bool,
@@ -177,7 +181,7 @@ pub struct PrewarmRequest {
 
 /// A pool lock. A panic while one was held leaves plain data behind, so a
 /// poisoned lock is used as it is rather than taking the daemon down.
-pub(super) fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(m: &RankedMutex<T>) -> RankedGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 

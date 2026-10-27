@@ -176,9 +176,16 @@ fn setting(key: &str, max: u32) -> Option<u32> {
 }
 
 /// The open children of each parent, and the slots reserved by starts in flight.
-#[derive(Default)]
 pub struct Index {
-    state: StdMutex<IndexState>,
+    state: RankedMutex<IndexState>,
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Self {
+            state: RankedMutex::new(LockRank::SubState, "subsessions.index", IndexState::default()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -191,7 +198,7 @@ struct IndexState {
 }
 
 impl Index {
-    fn lock(&self) -> std::sync::MutexGuard<'_, IndexState> {
+    fn lock(&self) -> RankedGuard<'_, IndexState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 

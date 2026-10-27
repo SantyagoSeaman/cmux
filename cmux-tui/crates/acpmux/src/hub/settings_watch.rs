@@ -27,10 +27,18 @@ use super::harness_watch::{MAX_BURST, QUIET};
 
 /// The hub's settings watch: the live watcher and the task that reads the
 /// setting when the watcher thread signals.
-#[derive(Default)]
 pub(crate) struct SettingsWatchState {
-    watcher: StdMutex<Option<Arc<SettingsWatcher>>>,
-    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    watcher: RankedMutex<Option<Arc<SettingsWatcher>>>,
+    task: RankedMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl Default for SettingsWatchState {
+    fn default() -> Self {
+        Self {
+            watcher: RankedMutex::new(LockRank::SubState, "settings_watch.watcher", None),
+            task: RankedMutex::new(LockRank::SubState, "settings_watch.task", None),
+        }
+    }
 }
 
 impl Drop for SettingsWatchState {
@@ -43,8 +51,8 @@ impl Drop for SettingsWatchState {
 
 /// Keeps the watcher alive; dropping it stops the events and its thread.
 pub(crate) struct SettingsWatcher {
-    watcher: StdMutex<notify::RecommendedWatcher>,
-    watched: StdMutex<Vec<PathBuf>>,
+    watcher: RankedMutex<notify::RecommendedWatcher>,
+    watched: RankedMutex<Vec<PathBuf>>,
 }
 
 impl Hub {
@@ -67,8 +75,12 @@ impl Hub {
             }
         };
         let watch = Arc::new(SettingsWatcher {
-            watcher: StdMutex::new(watcher),
-            watched: StdMutex::new(Vec::new()),
+            watcher: RankedMutex::new(LockRank::SubState, "settings_watcher.watcher", watcher),
+            watched: RankedMutex::new(
+                LockRank::SubStateOuter,
+                "settings_watcher.watched",
+                Vec::new(),
+            ),
         });
         watch.refresh(&files);
         *self.settings_watch.watcher.lock().unwrap_or_else(|p| p.into_inner()) =
