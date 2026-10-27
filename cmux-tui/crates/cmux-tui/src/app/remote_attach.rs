@@ -15,6 +15,7 @@ use crate::app::surface_sync::{
     retire_missing_surface_attach,
 };
 use crate::app::{AppEvent, SessionEventSender};
+use crate::lock_rank::RankedMutex;
 use crate::session::{
     Session, SurfaceAttach, is_remote_surface_unavailable, is_remote_timeout,
     is_remote_transport_failure,
@@ -22,9 +23,9 @@ use crate::session::{
 
 pub(super) fn perform_surface_attach(
     session: &Session,
-    retired_surfaces: &Mutex<HashSet<SurfaceId>>,
-    attach_claims: &Mutex<HashMap<SurfaceId, SurfaceAttachClaimState>>,
-    attach_failures: &Mutex<HashMap<SurfaceId, SurfaceSyncFailureState>>,
+    retired_surfaces: &RankedMutex<HashSet<SurfaceId>>,
+    attach_claims: &RankedMutex<HashMap<SurfaceId, SurfaceAttachClaimState>>,
+    attach_failures: &RankedMutex<HashMap<SurfaceId, SurfaceSyncFailureState>>,
     id: SurfaceId,
     size: Option<(u16, u16)>,
     after_obsolete_check: impl FnOnce(),
@@ -148,10 +149,10 @@ pub(super) const REMOTE_ATTACH_QUEUE_CAPACITY: usize = 512;
 pub(super) struct RemoteSurfaceAttachJob {
     pub(super) claim: SurfaceAttachClaim,
     pub(super) session: Session,
-    pub(super) retired_surfaces: Arc<Mutex<HashSet<SurfaceId>>>,
-    pub(super) attach_claims: Arc<Mutex<HashMap<SurfaceId, SurfaceAttachClaimState>>>,
-    pub(super) attach_failures: Arc<Mutex<HashMap<SurfaceId, SurfaceSyncFailureState>>>,
-    pub(super) resize_failures: Arc<Mutex<HashMap<SurfaceId, SurfaceResizeFailure>>>,
+    pub(super) retired_surfaces: Arc<RankedMutex<HashSet<SurfaceId>>>,
+    pub(super) attach_claims: Arc<RankedMutex<HashMap<SurfaceId, SurfaceAttachClaimState>>>,
+    pub(super) attach_failures: Arc<RankedMutex<HashMap<SurfaceId, SurfaceSyncFailureState>>>,
+    pub(super) resize_failures: Arc<RankedMutex<HashMap<SurfaceId, SurfaceResizeFailure>>>,
     pub(super) events: SessionEventSender,
     pub(super) id: SurfaceId,
     #[cfg(test)]

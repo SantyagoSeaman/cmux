@@ -52,6 +52,8 @@ use serde_json::Value;
 use zeroize::Zeroize;
 
 #[cfg(unix)]
+use crate::lock_rank::{LockRank, RankedMutex};
+#[cfg(unix)]
 use crate::session::{
     RemoteMessageReader, RemoteMessageWriter, RemoteTransport, RemoteTransportAbort,
 };
@@ -356,19 +358,19 @@ struct ProviderEventHubState {
 
 #[cfg(unix)]
 struct ProviderClientInner {
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: RankedMutex<Box<dyn Write + Send>>,
     control_guard: ProviderIoGuard,
     streams: Arc<dyn MachineStreamConnector>,
-    pending: Mutex<HashMap<String, SyncSender<PendingResponse>>>,
-    events: Mutex<ProviderEventHubState>,
-    snapshot_subscribers: Mutex<Vec<SyncSender<u64>>>,
+    pending: RankedMutex<HashMap<String, SyncSender<PendingResponse>>>,
+    events: RankedMutex<ProviderEventHubState>,
+    snapshot_subscribers: RankedMutex<Vec<SyncSender<u64>>>,
     next_request_id: AtomicU64,
     live: AtomicBool,
     hello_started: AtomicBool,
     authenticated: AtomicBool,
-    token: Mutex<Option<BearerToken>>,
-    provider_capabilities: Mutex<Vec<String>>,
-    negotiated_client_capabilities: Mutex<Vec<String>>,
+    token: RankedMutex<Option<BearerToken>>,
+    provider_capabilities: RankedMutex<Vec<String>>,
+    negotiated_client_capabilities: RankedMutex<Vec<String>>,
 }
 
 #[cfg(unix)]
@@ -582,7 +584,8 @@ impl ProviderClientInner {
 #[cfg(unix)]
 impl Drop for ProviderClientInner {
     fn drop(&mut self) {
-        if let Ok(events) = self.events.get_mut() {
+        // The last reference is gone, so the lock is free.
+        if let Ok(mut events) = self.events.lock() {
             for subscriber in
                 events.subscribers.drain(..).filter_map(|subscriber| subscriber.upgrade())
             {
@@ -619,19 +622,39 @@ impl ProviderClient {
     ) -> ProviderResult<Self> {
         let ProviderIoParts { reader, writer, guard } = control.into_parts();
         let inner = Arc::new(ProviderClientInner {
-            writer: Mutex::new(writer),
+            writer: RankedMutex::new(LockRank::ProviderWriter, "machine_provider.writer", writer),
             control_guard: guard.clone(),
             streams,
-            pending: Mutex::new(HashMap::new()),
-            events: Mutex::new(ProviderEventHubState::default()),
-            snapshot_subscribers: Mutex::new(Vec::new()),
+            pending: RankedMutex::new(
+                LockRank::ProviderPending,
+                "machine_provider.pending",
+                HashMap::new(),
+            ),
+            events: RankedMutex::new(
+                LockRank::ProviderEvents,
+                "machine_provider.events",
+                ProviderEventHubState::default(),
+            ),
+            snapshot_subscribers: RankedMutex::new(
+                LockRank::ProviderSnapshotSubscribers,
+                "machine_provider.snapshot_subscribers",
+                Vec::new(),
+            ),
             next_request_id: AtomicU64::new(1),
             live: AtomicBool::new(true),
             hello_started: AtomicBool::new(false),
             authenticated: AtomicBool::new(false),
-            token: Mutex::new(None),
-            provider_capabilities: Mutex::new(Vec::new()),
-            negotiated_client_capabilities: Mutex::new(Vec::new()),
+            token: RankedMutex::new(LockRank::ProviderToken, "machine_provider.token", None),
+            provider_capabilities: RankedMutex::new(
+                LockRank::ProviderCapabilities,
+                "machine_provider.provider_capabilities",
+                Vec::new(),
+            ),
+            negotiated_client_capabilities: RankedMutex::new(
+                LockRank::ProviderClientCapabilities,
+                "machine_provider.negotiated_client_capabilities",
+                Vec::new(),
+            ),
         });
         let weak = Arc::downgrade(&inner);
         std::thread::Builder::new()

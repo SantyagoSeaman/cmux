@@ -3,12 +3,13 @@
 //! its slot when dropped.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cmux_tui_core::SurfaceId;
 
+use crate::lock_rank::RankedMutex;
 use crate::session::{Session, SidebarPluginSurface, SurfaceHandle};
 
 pub(super) struct RemoteRefreshClaim(pub(super) Arc<AtomicBool>);
@@ -20,13 +21,13 @@ impl Drop for RemoteRefreshClaim {
 }
 
 pub(super) struct SurfaceResizeClaim {
-    pub(super) claims: Arc<Mutex<HashMap<SurfaceId, SurfaceResizeClaimState>>>,
+    pub(super) claims: Arc<RankedMutex<HashMap<SurfaceId, SurfaceResizeClaimState>>>,
     pub(super) surface: SurfaceId,
     pub(super) token: u64,
 }
 
 pub(super) struct SurfaceAttachClaim {
-    pub(super) claims: Arc<Mutex<HashMap<SurfaceId, SurfaceAttachClaimState>>>,
+    pub(super) claims: Arc<RankedMutex<HashMap<SurfaceId, SurfaceAttachClaimState>>>,
     pub(super) surface: SurfaceId,
     pub(super) active: bool,
 }
@@ -64,7 +65,7 @@ pub(super) struct SurfaceAttachClaimState {
 
 #[cfg(test)]
 pub(super) type SurfaceAttachAfterObsoleteCheckHook =
-    Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+    Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
 #[derive(Clone, Copy)]
 pub(super) struct SurfaceResizeClaimState {
@@ -133,9 +134,9 @@ pub(super) enum SurfaceAttachOutcome {
 /// retryable synchronization failure.
 pub(super) fn retire_missing_surface_attach(
     session: &Session,
-    retired_surfaces: &Mutex<HashSet<SurfaceId>>,
-    attach_claims: &Mutex<HashMap<SurfaceId, SurfaceAttachClaimState>>,
-    attach_failures: &Mutex<HashMap<SurfaceId, SurfaceSyncFailureState>>,
+    retired_surfaces: &RankedMutex<HashSet<SurfaceId>>,
+    attach_claims: &RankedMutex<HashMap<SurfaceId, SurfaceAttachClaimState>>,
+    attach_failures: &RankedMutex<HashMap<SurfaceId, SurfaceSyncFailureState>>,
     id: SurfaceId,
 ) {
     {
@@ -164,7 +165,7 @@ pub(super) struct SidebarPluginSyncState {
 }
 
 pub(super) struct SidebarPluginSyncClaim {
-    pub(super) state: Arc<Mutex<SidebarPluginSyncState>>,
+    pub(super) state: Arc<RankedMutex<SidebarPluginSyncState>>,
     pub(super) desired: ((u16, u16), u64, u64),
     pub(super) applied: bool,
 }
@@ -210,7 +211,7 @@ impl Drop for SurfaceResizeClaim {
 }
 
 pub(super) fn record_surface_resize_dispatch_result(
-    ownership: &Mutex<HashMap<SurfaceId, SurfaceResizeOwnership>>,
+    ownership: &RankedMutex<HashMap<SurfaceId, SurfaceResizeOwnership>>,
     surface: SurfaceId,
     desired: (u16, u16),
     reservation_id: Option<u64>,

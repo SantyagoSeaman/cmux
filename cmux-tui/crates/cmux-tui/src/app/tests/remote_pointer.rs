@@ -89,11 +89,11 @@ fn failed_sidebar_plugin_status_schedules_passive_retry() {
 #[test]
 fn terminal_sidebar_failure_settles_passive_sync_claim() {
     let desired = ((24, 8), 0, 0);
-    let state = Arc::new(Mutex::new(SidebarPluginSyncState {
-        epoch: 0,
-        claimed: Some(desired),
-        applied: None,
-    }));
+    let state = Arc::new(crate::lock_rank::RankedMutex::new(
+        crate::lock_rank::LockRank::AppSidebarPluginSync,
+        "ordered_session.sidebar_plugin_sync",
+        SidebarPluginSyncState { epoch: 0, claimed: Some(desired), applied: None },
+    ));
     let mut claim = SidebarPluginSyncClaim { state: state.clone(), desired, applied: false };
     let status = SidebarPluginSurface {
         surface_id: None,

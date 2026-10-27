@@ -49,7 +49,10 @@ fn a_mirror_lock_held_while_waiting_for_the_surface_map_panics() {
     })));
     drop(term);
     assert!(
-        message.contains("acquiring SessionSurfaces while this thread holds SurfaceTerm"),
+        message.contains(
+            "acquiring remote_session.surfaces (SessionSurfaces) while this thread holds \
+             remote_surface.term (SurfaceTerm)"
+        ),
         "{message}"
     );
 }
@@ -66,7 +69,10 @@ fn retiring_a_surface_under_the_tree_cache_panics() {
     })));
     drop(tree);
     assert!(
-        message.contains("acquiring SessionRetiredSurfaces while this thread holds SessionTree"),
+        message.contains(
+            "acquiring remote_session.retired_surfaces (SessionRetiredSurfaces) while this \
+             thread holds remote_session.tree (SessionTree)"
+        ),
         "{message}"
     );
 }
@@ -83,7 +89,10 @@ fn two_mirrors_terminals_held_at_once_panic() {
     })));
     drop(held);
     assert!(
-        message.contains("acquiring SurfaceTerm while this thread holds SurfaceTerm"),
+        message.contains(
+            "acquiring remote_surface.term (SurfaceTerm) while this thread holds \
+             remote_surface.term (SurfaceTerm)"
+        ),
         "{message}"
     );
 }

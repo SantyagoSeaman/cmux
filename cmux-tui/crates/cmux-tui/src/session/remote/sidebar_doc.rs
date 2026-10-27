@@ -80,14 +80,26 @@ pub(crate) struct RemoteSidebarDoc {
 impl Default for RemoteSidebarDoc {
     fn default() -> Self {
         Self {
-            model: RankedMutex::new(LockRank::SidebarModel, SidebarDocModel::default()),
-            pending: RankedMutex::new(LockRank::SidebarPending, HashMap::new()),
-            stream: RankedMutex::new(LockRank::SidebarStream, None),
-            cursor: RankedMutex::new(LockRank::SidebarCursor, None),
+            model: RankedMutex::new(
+                LockRank::SidebarModel,
+                "remote_sidebar_doc.model",
+                SidebarDocModel::default(),
+            ),
+            pending: RankedMutex::new(
+                LockRank::SidebarPending,
+                "remote_sidebar_doc.pending",
+                HashMap::new(),
+            ),
+            stream: RankedMutex::new(LockRank::SidebarStream, "remote_sidebar_doc.stream", None),
+            cursor: RankedMutex::new(LockRank::SidebarCursor, "remote_sidebar_doc.cursor", None),
             loading: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
             stream_restarts: AtomicU64::new(0),
-            fallback_read_at: RankedMutex::new(LockRank::SidebarFallbackReadAt, None),
+            fallback_read_at: RankedMutex::new(
+                LockRank::SidebarFallbackReadAt,
+                "remote_sidebar_doc.fallback_read_at",
+                None,
+            ),
             unavailable: AtomicBool::new(false),
             next_id: AtomicU64::new(0),
         }
@@ -556,7 +568,10 @@ mod lock_order_tests {
         let payload = inverted.expect_err("the inversion is detected");
         let message = payload.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(
-            message.contains("acquiring SidebarStream while this thread holds SidebarModel"),
+            message.contains(
+                "acquiring remote_sidebar_doc.stream (SidebarStream) while this thread holds \
+                 remote_sidebar_doc.model (SidebarModel)"
+            ),
             "{message}"
         );
     }

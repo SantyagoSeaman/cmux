@@ -1290,7 +1290,11 @@ fn browser_resize_claim_survives_queue_and_input_barrier_until_drop() {
 
 #[test]
 fn browser_resize_ownership_tracks_only_accepted_dispatches() {
-    let ownership = Mutex::new(HashMap::new());
+    let ownership = crate::lock_rank::RankedMutex::new(
+        crate::lock_rank::LockRank::AppSurfaceResizeOwnership,
+        "ordered_session.surface_resize_ownership",
+        HashMap::new(),
+    );
 
     record_surface_resize_dispatch_result(&ownership, 7, (100, 30), None);
     assert!(ownership.lock().unwrap().is_empty());

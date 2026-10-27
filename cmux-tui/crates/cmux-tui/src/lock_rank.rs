@@ -1,43 +1,67 @@
-//! Debug-build lock ranks (lockdep style) for the remote session's locks.
+//! Lock ranks (lockdep style) for the TUI client's long-lived locks: this
+//! crate's rank family for the shared `cmux_lock_rank` crate, which holds
+//! [`RankedMutex`], the per-thread rank stack and the order check
+//! (Chromium's base/task/common/checked_lock.h).
 //!
-//! Chromium's `base/task/common/checked_lock.h` (CheckedLock) checks, in
-//! DCHECK builds, that a thread takes locks only in their declared order;
-//! cmux-tui-core's `lock_rank.rs` does the same for the mux and surface
-//! locks. This module ranks the long-lived std locks of `RemoteSession`, its
-//! `RemoteSidebarDoc` and each mirrored `RemoteSurface`: the client side of
-//! every attached TUI, taken by the UI thread, the session reader and the
-//! session workers at once.
+//! The family covers the app's `OrderedSession` (the attach executor,
+//! ambiguous creations and the surface attach, resize and sidebar plugin
+//! sync maps), the remote session (`RemoteSession`, its `RemoteSidebarDoc`
+//! and each mirrored `RemoteSurface`) and the machine provider hub
+//! (`ProviderClientInner`). The UI thread, the ordered session worker, the
+//! attach workers, the session reader and the provider reader take them at
+//! once. The order, outer first, is [`LockRank`]'s; each rank is one lock
+//! (one per mirror for the surface ranks), except [`LockRank::Leaf`].
 //!
-//! The order, outer first, is [`LockRank`]'s; each rank is one lock. A
-//! thread may block on a ranked lock only when its rank is after every rank
-//! the thread already holds. A blocking acquisition at a rank equal to or
-//! before a held rank panics in debug and test builds and names both ranks,
-//! so every test and debug build checks the order on each path it runs.
-//! `try_lock` cannot deadlock: it is recorded but not checked. In release
-//! builds the rank and the thread-local stack are compiled out;
-//! [`RankedMutex`] is then a plain [`Mutex`] (`cmux_threads::sync`, whose
-//! contended waits are timed in debug builds).
+//! A blocking acquisition at a rank equal to or before a held rank panics in
+//! debug and test builds and names both locks; `try_lock` is recorded, not
+//! checked. Release builds compile the rank, the name and the stack out.
+//! Debug builds time a contended wait and record a `lock-wait` site at the
+//! caller (`cmux_threads::lock_wait::note_timed_lock_wait`), as
+//! `cmux_threads::sync::Mutex` does.
 //!
-//! The interactive write queue (`InteractiveWriter`) waits on a `Condvar`
-//! with its lock and stays a plain `Mutex`; it takes no other lock while
-//! held. The stack is this crate's: an inversion between these locks and
-//! cmux-tui-core's ranked locks is not seen here. p10-stability-187 moves the
-//! check into the shared `cmux-lock-rank` crate.
+//! Locks a thread waits on with a `Condvar` (the interactive write queue,
+//! the attach executor's job queue, a provider event queue) stay unranked:
+//! the shared crate has no ranked condition variable.
 
-#![cfg_attr(not(test), deny(clippy::disallowed_types))]
+use std::panic::Location;
+use std::time::Duration;
 
-use std::ops::{Deref, DerefMut};
-use std::sync::{LockResult, MutexGuard, PoisonError, TryLockError, TryLockResult};
-
-use cmux_threads::sync::Mutex;
+/// A `Mutex` with a lock rank. The API mirrors `std::sync::Mutex`.
+pub(crate) type RankedMutex<T> = cmux_lock_rank::RankedMutex<LockRank, T>;
+/// A held [`RankedMutex`]. The lock is released before its rank.
+pub(crate) type RankedGuard<'a, T> = cmux_lock_rank::RankedGuard<'a, LockRank, T>;
 
 /// Rank of a ranked lock. A thread acquires ranks in ascending order.
 ///
-/// The order comes from the nesting the suite takes (a recording run over
-/// all of `nextest -p cmux-tui`) and a scan of every guard held across
-/// another lock.
+/// The app ranks come first: the app calls into the session with some of
+/// them held, and the session never calls back with its own held. The
+/// remote session order comes from the nesting the suite takes (a
+/// recording run over all of `nextest -p cmux-tui`) and a scan of every
+/// guard held across another lock. The provider hub locks take no other
+/// ranked lock while held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LockRank {
+    /// `OrderedSession::remote_surface_attaches`: a shutdown drops queued
+    /// attach jobs under it, and each job releases its attach claim.
+    AppSurfaceAttachExecutor,
+    /// `OrderedSession::ambiguous_creations`.
+    AppAmbiguousCreations,
+    /// `OrderedSession::retired_surfaces`: a retirement and an attach
+    /// preflight read the attach claims under it.
+    AppRetiredSurfaces,
+    /// `OrderedSession::surface_attach_claims`: the ordered attach records
+    /// its failure under it.
+    AppSurfaceAttachClaims,
+    /// `OrderedSession::surface_attach_failures`.
+    AppSurfaceAttachFailures,
+    /// `OrderedSession::surface_resize_ownership`.
+    AppSurfaceResizeOwnership,
+    /// `OrderedSession::surface_resize_failures`.
+    AppSurfaceResizeFailures,
+    /// `OrderedSession::surface_resize_claims`.
+    AppSurfaceResizeClaims,
+    /// `OrderedSession::sidebar_plugin_sync`.
+    AppSidebarPluginSync,
     /// `RemoteSession::tree_refresh`, held for a whole tree refresh: its
     /// requests (`pending`), the retired set, the tree cache and the
     /// browser sources.
@@ -106,161 +130,110 @@ pub(crate) enum LockRank {
     SurfaceReportedSize,
     /// `RemoteSurface::browser`.
     SurfaceBrowser,
-    /// The test-only hooks and markers: they take no ranked lock while held.
-    #[cfg(test)]
+    /// `ProviderClientInner::events`: publishing wakes each subscriber's
+    /// (unranked) event queue under it.
+    ProviderEvents,
+    /// `ProviderClientInner::snapshot_subscribers`.
+    ProviderSnapshotSubscribers,
+    /// `ProviderClientInner::pending`, the requests waiting for a response.
+    ProviderPending,
+    /// `ProviderClientInner::writer`, held for one control frame write.
+    ProviderWriter,
+    /// `ProviderClientInner::token`.
+    ProviderToken,
+    /// `ProviderClientInner::provider_capabilities`.
+    ProviderCapabilities,
+    /// `ProviderClientInner::negotiated_client_capabilities`.
+    ProviderClientCapabilities,
+    /// Locks that take no ranked lock while held (the test hooks and
+    /// markers); release builds pass it to the family's hooks.
     Leaf,
 }
 
-#[cfg(debug_assertions)]
-mod held {
+impl cmux_lock_rank::Rank for LockRank {
+    const ALL: &'static [Self] = &[
+        Self::AppSurfaceAttachExecutor,
+        Self::AppAmbiguousCreations,
+        Self::AppRetiredSurfaces,
+        Self::AppSurfaceAttachClaims,
+        Self::AppSurfaceAttachFailures,
+        Self::AppSurfaceResizeOwnership,
+        Self::AppSurfaceResizeFailures,
+        Self::AppSurfaceResizeClaims,
+        Self::AppSidebarPluginSync,
+        Self::SessionTreeRefresh,
+        Self::SessionCellPixelLifecycle,
+        Self::SessionFrameLogs,
+        Self::SessionRetiredSurfaces,
+        Self::SessionExitedSurfaces,
+        Self::SessionBrowserSources,
+        Self::SessionSurfaces,
+        Self::SessionTree,
+        Self::SessionSurfaceLeases,
+        Self::SessionSurfaceOverflowRecovery,
+        Self::SessionSubscriptionRecovery,
+        Self::SessionPrimedSubscription,
+        Self::SessionPending,
+        Self::SessionCapabilities,
+        Self::SessionSizeStates,
+        Self::SessionCellPixels,
+        Self::SidebarStream,
+        Self::SidebarModel,
+        Self::SidebarCursor,
+        Self::SidebarPending,
+        Self::SidebarFallbackReadAt,
+        Self::SurfaceGeometryLifecycle,
+        Self::SurfaceTerm,
+        Self::SurfaceMouseEncoders,
+        Self::SurfaceCursorProvenance,
+        Self::SurfaceCellPixels,
+        Self::SurfaceReportedSize,
+        Self::SurfaceBrowser,
+        Self::ProviderEvents,
+        Self::ProviderSnapshotSubscribers,
+        Self::ProviderPending,
+        Self::ProviderWriter,
+        Self::ProviderToken,
+        Self::ProviderCapabilities,
+        Self::ProviderClientCapabilities,
+        Self::Leaf,
+    ];
+    const ORDER: &'static str = "cmux_tui::lock_rank::LockRank's: ordered session (attach \
+         executor > ambiguous creations > retired > attach claims > attach failures > resize \
+         ownership > resize failures > resize claims > sidebar plugin sync) > remote session \
+         > sidebar doc > remote surface > machine provider hub > leaf";
+    const UNRANKED: Self = Self::Leaf;
+    type Wait = ();
+    type Hold = ();
+
+    #[inline]
+    fn ordinal(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    fn before_wait(self) {}
+
+    #[inline]
+    fn on_held(self, (): ()) {}
+
+    #[inline]
+    fn note_contended_wait(waited: Duration, site: &'static Location<'static>) {
+        cmux_threads::lock_wait::note_timed_lock_wait(waited, site);
+    }
+}
+
+#[cfg(test)]
+mod tests {
     use super::LockRank;
-    use std::cell::RefCell;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use cmux_lock_rank::Rank;
 
-    thread_local! {
-        /// The ranks this thread holds, with the id of each hold.
-        static HELD: RefCell<Vec<(LockRank, u64)>> = const { RefCell::new(Vec::new()) };
-    }
-
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-    #[track_caller]
-    pub(super) fn check(rank: LockRank) {
-        let violation = HELD.with(|held| {
-            held.borrow().iter().map(|&(held, _)| held).max().filter(|&held| held >= rank)
-        });
-        // Panic outside the closure so the location is the acquisition site.
-        if let Some(held) = violation {
-            // crash-allow: the debug and test lock-order assertion; release builds compile it out.
-            panic!(
-                "lock order violation: acquiring {rank:?} while this thread holds {held:?}; \
-                 the order is cmux_tui::lock_rank::LockRank's"
-            );
+    #[test]
+    fn every_rank_is_listed_in_order() {
+        for (ordinal, rank) in LockRank::ALL.iter().enumerate() {
+            assert_eq!(rank.ordinal(), ordinal, "{rank:?}");
         }
-    }
-
-    pub(super) fn push(rank: LockRank) -> u64 {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        HELD.with(|held| held.borrow_mut().push((rank, id)));
-        id
-    }
-
-    pub(super) fn pop(id: u64) {
-        // Guards may drop out of order, and during thread teardown.
-        let _ = HELD.try_with(|held| {
-            let mut held = held.borrow_mut();
-            if let Some(index) = held.iter().rposition(|&(_, held_id)| held_id == id) {
-                held.remove(index);
-            }
-        });
+        assert_eq!(LockRank::ALL.last(), Some(&LockRank::Leaf));
+        assert!(LockRank::ALL.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }
-
-/// One rank this thread holds; dropping it releases the rank.
-struct HeldRank {
-    #[cfg(debug_assertions)]
-    id: u64,
-}
-
-impl Drop for HeldRank {
-    #[inline]
-    fn drop(&mut self) {
-        #[cfg(debug_assertions)]
-        held::pop(self.id);
-    }
-}
-
-/// A [`Mutex`] with a lock rank. The API mirrors `std::sync::Mutex`; the
-/// guard holds a std `MutexGuard`.
-pub(crate) struct RankedMutex<T> {
-    inner: Mutex<T>,
-    #[cfg(debug_assertions)]
-    rank: LockRank,
-}
-
-impl<T> RankedMutex<T> {
-    pub(crate) const fn new(rank: LockRank, value: T) -> Self {
-        #[cfg(not(debug_assertions))]
-        let _ = rank;
-        Self {
-            inner: Mutex::new(value),
-            #[cfg(debug_assertions)]
-            rank,
-        }
-    }
-
-    /// Check that this lock's rank may be waited for now.
-    #[track_caller]
-    #[inline]
-    fn check(&self) {
-        #[cfg(debug_assertions)]
-        held::check(self.rank);
-    }
-
-    /// Record that this thread now holds this lock's rank.
-    #[inline]
-    fn record(&self) -> HeldRank {
-        #[cfg(debug_assertions)]
-        {
-            HeldRank { id: held::push(self.rank) }
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            HeldRank {}
-        }
-    }
-
-    #[track_caller]
-    #[inline]
-    pub(crate) fn lock(&self) -> LockResult<RankedGuard<'_, T>> {
-        self.check();
-        match self.inner.lock() {
-            Ok(guard) => Ok(RankedGuard { guard, _held: self.record() }),
-            Err(poison) => Err(PoisonError::new(RankedGuard {
-                guard: poison.into_inner(),
-                _held: self.record(),
-            })),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn try_lock(&self) -> TryLockResult<RankedGuard<'_, T>> {
-        match self.inner.try_lock() {
-            Ok(guard) => Ok(RankedGuard { guard, _held: self.record() }),
-            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
-            Err(TryLockError::Poisoned(poison)) => {
-                Err(TryLockError::Poisoned(PoisonError::new(RankedGuard {
-                    guard: poison.into_inner(),
-                    _held: self.record(),
-                })))
-            }
-        }
-    }
-}
-
-/// A held [`RankedMutex`]. The lock is released before its rank.
-#[must_use = "the lock is released when the guard drops"]
-pub(crate) struct RankedGuard<'a, T> {
-    guard: MutexGuard<'a, T>,
-    _held: HeldRank,
-}
-
-impl<T> Deref for RankedGuard<'_, T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        &self.guard
-    }
-}
-
-impl<T> DerefMut for RankedGuard<'_, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.guard
-    }
-}
-
-#[cfg(all(test, debug_assertions))]
-#[path = "lock_rank_tests.rs"]
-mod tests;

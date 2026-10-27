@@ -20,6 +20,7 @@ use crate::app::{
     SidebarPluginSyncState, SurfaceAttachClaimState, SurfaceResizeClaimState, SurfaceResizeFailure,
     SurfaceResizeOwnership, SurfaceSyncFailureState, participant_key,
 };
+use crate::lock_rank::{LockRank, RankedMutex};
 use crate::pty_input::PtyInputSender;
 use crate::session::{
     AgentInfo, AmbiguousCreation, Session, SurfaceHandle, SurfaceSizeState, TreeView,
@@ -74,19 +75,21 @@ pub struct OrderedSession {
     pub(super) client_refresh_queued: Arc<AtomicBool>,
     client_refresh_dirty: Arc<AtomicBool>,
     pub(super) client_refresh_generation: Arc<AtomicU64>,
-    pub(super) surface_resize_claims: Arc<Mutex<HashMap<SurfaceId, SurfaceResizeClaimState>>>,
+    pub(super) surface_resize_claims: Arc<RankedMutex<HashMap<SurfaceId, SurfaceResizeClaimState>>>,
     pub(super) surface_resize_claim_sequence: Arc<AtomicU64>,
-    pub(super) surface_resize_ownership: Arc<Mutex<HashMap<SurfaceId, SurfaceResizeOwnership>>>,
-    pub(super) surface_attach_claims: Arc<Mutex<HashMap<SurfaceId, SurfaceAttachClaimState>>>,
-    pub(super) surface_attach_failures: Arc<Mutex<HashMap<SurfaceId, SurfaceSyncFailureState>>>,
-    pub(super) remote_surface_attaches: Mutex<Option<RemoteSurfaceAttachExecutor>>,
-    pub(super) surface_resize_failures: Arc<Mutex<HashMap<SurfaceId, SurfaceResizeFailure>>>,
+    pub(super) surface_resize_ownership:
+        Arc<RankedMutex<HashMap<SurfaceId, SurfaceResizeOwnership>>>,
+    pub(super) surface_attach_claims: Arc<RankedMutex<HashMap<SurfaceId, SurfaceAttachClaimState>>>,
+    pub(super) surface_attach_failures:
+        Arc<RankedMutex<HashMap<SurfaceId, SurfaceSyncFailureState>>>,
+    pub(super) remote_surface_attaches: RankedMutex<Option<RemoteSurfaceAttachExecutor>>,
+    pub(super) surface_resize_failures: Arc<RankedMutex<HashMap<SurfaceId, SurfaceResizeFailure>>>,
     pub(super) config_generation: Arc<AtomicU64>,
-    pub(super) sidebar_plugin_sync: Arc<Mutex<SidebarPluginSyncState>>,
-    pub(super) retired_surfaces: Arc<Mutex<HashSet<SurfaceId>>>,
+    pub(super) sidebar_plugin_sync: Arc<RankedMutex<SidebarPluginSyncState>>,
+    pub(super) retired_surfaces: Arc<RankedMutex<HashSet<SurfaceId>>>,
     pub(super) layout_resize_owner: u64,
     pub(super) layout_resize_transaction: Arc<AtomicU64>,
-    pub(super) ambiguous_creations: Arc<Mutex<VecDeque<PendingAmbiguousCreation>>>,
+    pub(super) ambiguous_creations: Arc<RankedMutex<VecDeque<PendingAmbiguousCreation>>>,
     #[cfg(test)]
     pub(super) surface_attach_after_obsolete_check: SurfaceAttachAfterObsoleteCheckHook,
 }
@@ -132,19 +135,55 @@ impl OrderedSession {
             client_refresh_queued: Arc::new(AtomicBool::new(false)),
             client_refresh_dirty: Arc::new(AtomicBool::new(false)),
             client_refresh_generation: Arc::new(AtomicU64::new(0)),
-            surface_resize_claims: Arc::new(Mutex::new(HashMap::new())),
+            surface_resize_claims: Arc::new(RankedMutex::new(
+                LockRank::AppSurfaceResizeClaims,
+                "ordered_session.surface_resize_claims",
+                HashMap::new(),
+            )),
             surface_resize_claim_sequence: Arc::new(AtomicU64::new(0)),
-            surface_resize_ownership: Arc::new(Mutex::new(HashMap::new())),
-            surface_attach_claims: Arc::new(Mutex::new(HashMap::new())),
-            surface_attach_failures: Arc::new(Mutex::new(HashMap::new())),
-            remote_surface_attaches: Mutex::new(None),
-            surface_resize_failures: Arc::new(Mutex::new(HashMap::new())),
+            surface_resize_ownership: Arc::new(RankedMutex::new(
+                LockRank::AppSurfaceResizeOwnership,
+                "ordered_session.surface_resize_ownership",
+                HashMap::new(),
+            )),
+            surface_attach_claims: Arc::new(RankedMutex::new(
+                LockRank::AppSurfaceAttachClaims,
+                "ordered_session.surface_attach_claims",
+                HashMap::new(),
+            )),
+            surface_attach_failures: Arc::new(RankedMutex::new(
+                LockRank::AppSurfaceAttachFailures,
+                "ordered_session.surface_attach_failures",
+                HashMap::new(),
+            )),
+            remote_surface_attaches: RankedMutex::new(
+                LockRank::AppSurfaceAttachExecutor,
+                "ordered_session.remote_surface_attaches",
+                None,
+            ),
+            surface_resize_failures: Arc::new(RankedMutex::new(
+                LockRank::AppSurfaceResizeFailures,
+                "ordered_session.surface_resize_failures",
+                HashMap::new(),
+            )),
             config_generation: Arc::new(AtomicU64::new(0)),
-            sidebar_plugin_sync: Arc::new(Mutex::new(SidebarPluginSyncState::default())),
-            retired_surfaces: Arc::new(Mutex::new(HashSet::new())),
+            sidebar_plugin_sync: Arc::new(RankedMutex::new(
+                LockRank::AppSidebarPluginSync,
+                "ordered_session.sidebar_plugin_sync",
+                SidebarPluginSyncState::default(),
+            )),
+            retired_surfaces: Arc::new(RankedMutex::new(
+                LockRank::AppRetiredSurfaces,
+                "ordered_session.retired_surfaces",
+                HashSet::new(),
+            )),
             layout_resize_owner,
             layout_resize_transaction: Arc::new(AtomicU64::new(1)),
-            ambiguous_creations: Arc::new(Mutex::new(VecDeque::new())),
+            ambiguous_creations: Arc::new(RankedMutex::new(
+                LockRank::AppAmbiguousCreations,
+                "ordered_session.ambiguous_creations",
+                VecDeque::new(),
+            )),
             #[cfg(test)]
             surface_attach_after_obsolete_check: Arc::new(Mutex::new(None)),
         }
