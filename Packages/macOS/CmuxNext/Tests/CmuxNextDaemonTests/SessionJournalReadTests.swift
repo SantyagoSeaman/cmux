@@ -17,8 +17,9 @@ import Testing
         return transport
     }
 
-    private static func read(on transport: LineTransport, limit: Int = 20_000) -> Task<SessionJournalRead.Result, any Error> {
-        Task { try await SessionJournalRead(carrier: transport).read(kinds: ["agent.session"], cursor: nil, limit: limit, deadline: .seconds(20)) }
+    private static func read(on transport: LineTransport, limit: Int = 20_000,
+                             deadline: Duration = .seconds(20)) -> Task<SessionJournalRead.Result, any Error> {
+        Task { try await SessionJournalRead(carrier: transport).read(kinds: ["agent.session"], cursor: nil, limit: limit, deadline: deadline) }
     }
 
     /// The open request's id and stream id, after checking it is the bounded journal read.
@@ -41,6 +42,22 @@ import Testing
 
     private static func end(_ stream: String, _ reason: String) -> String {
         #"{"protocol":"cmux.protocol/2","type":"stream_end","stream_id":"\#(stream)","reason":"\#(reason)","cursor":{"generation":"gen-1","revision":"9"}}"#
+    }
+
+    private static func ok(_ id: String) -> String {
+        #"{"protocol":"cmux.protocol/2","type":"response","id":"\#(id)","ok":true,"result":{}}"#
+    }
+
+    /// Reads the next request, checks it is `stream.cancel` of `stream`, and returns its id.
+    private static func readCancel(_ daemon: FakeDaemon, of stream: String) throws -> String {
+        let cancel = try daemon.readRequest()
+        #expect(cancel["operation"] as? String == "stream.cancel")
+        #expect((cancel["params"] as? [String: Any])?["stream"] as? String == stream)
+        return try #require(cancel["id"] as? String)
+    }
+
+    private static func isTimedOut(_ error: DaemonError?) -> Bool {
+        if case .timedOut? = error { true } else { false }
     }
 
     private static func routes(_ transport: LineTransport) -> Int {
@@ -100,17 +117,79 @@ import Testing
         let open = try Self.readOpen(daemon)
         daemon.write([Self.ack(open.id, open.stream)] + (1...3).map { Self.item(open.stream, $0) })
 
-        let cancel = try daemon.readRequest()
-        #expect(cancel["operation"] as? String == "stream.cancel")
-        #expect((cancel["params"] as? [String: Any])?["stream"] as? String == open.stream)
-        let cancelID = try #require(cancel["id"] as? String)
-        daemon.write([Self.end(open.stream, "canceled"),
-                      #"{"protocol":"cmux.protocol/2","type":"response","id":"\#(cancelID)","ok":true,"result":{}}"#])
+        let cancelID = try Self.readCancel(daemon, of: open.stream)
+        daemon.write([Self.end(open.stream, "canceled"), Self.ok(cancelID)])
         let result = try await read.value
 
         #expect(result.records.count == 2)
         #expect(result.lastSequence == 2)
         #expect(!result.complete)
+        #expect(Self.routes(transport) == 0)
+        #expect(!transport.isClosed, "a confirmed cancel closed the connection")
+    }
+
+    @Test func aCancelThatEndsTheStreamOtherwiseClosesTheConnection() async throws {
+        let daemon = try FakeDaemon()
+        let transport = try Self.connect(daemon, events: ReplyEventOrderTests.Routed())
+        defer { transport.close() }
+
+        let read = Self.read(on: transport, limit: 1)
+        let open = try Self.readOpen(daemon)
+        daemon.write([Self.ack(open.id, open.stream), Self.item(open.stream, 1), Self.item(open.stream, 2)])
+        let cancelID = try Self.readCancel(daemon, of: open.stream)
+        daemon.write([Self.end(open.stream, "completed"), Self.ok(cancelID)])
+        _ = try await read.value
+
+        #expect(transport.isClosed, "a cancel answered by stream_end(completed) left the connection in use")
+    }
+
+    @Test func anOpenWithNoAckCancelsItsStream() async throws {
+        let daemon = try FakeDaemon()
+        let transport = try Self.connect(daemon, events: ReplyEventOrderTests.Routed())
+        defer { transport.close() }
+
+        let read = Self.read(on: transport, deadline: .seconds(1))
+        let open = try Self.readOpen(daemon)
+        let cancelID = try Self.readCancel(daemon, of: open.stream)
+        daemon.write([Self.ok(cancelID), Self.end(open.stream, "canceled")])
+
+        let error = await #expect(throws: DaemonError.self) { try await read.value }
+        #expect(Self.isTimedOut(error), "the caller did not see the open's own error")
+        #expect(Self.routes(transport) == 0)
+        #expect(!transport.isClosed, "a confirmed cancel closed the connection")
+    }
+
+    @Test func anAckForAnotherStreamIsNotAnOpen() async throws {
+        let daemon = try FakeDaemon()
+        let transport = try Self.connect(daemon, events: ReplyEventOrderTests.Routed())
+        defer { transport.close() }
+
+        let read = Self.read(on: transport)
+        let open = try Self.readOpen(daemon)
+        daemon.write([Self.ack(open.id, "stream_someoneelse")])
+        let cancelID = try Self.readCancel(daemon, of: open.stream)
+        daemon.write([Self.end(open.stream, "canceled"), Self.ok(cancelID)])
+
+        let error = await #expect(throws: DaemonError.self) { try await read.value }
+        if case .malformedResponse? = error {} else { Issue.record("expected malformedResponse, got \(String(describing: error))") }
+        #expect(Self.routes(transport) == 0)
+        #expect(!transport.isClosed)
+    }
+
+    @Test func anUnconfirmedCancelClosesTheConnection() async throws {
+        let daemon = try FakeDaemon()
+        let transport = try Self.connect(daemon, events: ReplyEventOrderTests.Routed())
+        defer { transport.close() }
+
+        let read = Self.read(on: transport, deadline: .seconds(1))
+        let open = try Self.readOpen(daemon)
+        // The cancel is answered, but its stream_end never comes.
+        let cancelID = try Self.readCancel(daemon, of: open.stream)
+        daemon.write([Self.ok(cancelID)])
+
+        let error = await #expect(throws: DaemonError.self) { try await read.value }
+        #expect(Self.isTimedOut(error))
+        #expect(transport.isClosed, "a cancel with no stream_end left the connection in use")
         #expect(Self.routes(transport) == 0)
     }
 
@@ -125,6 +204,13 @@ import Testing
 
         await #expect(throws: DaemonError.self) { try await read.value }
         #expect(Self.routes(transport) == 0)
+        // An ok:false open is conclusive: no stream.cancel follows it, so the next request is this ping.
+        let ping = Task { try await transport.request(cmd: "ping", timeout: .seconds(20)) { Data(#"{"id":\#($0),"cmd":"ping"}"#.utf8) } }
+        let next = try daemon.readRequest()
+        #expect(next["cmd"] as? String == "ping", "a refused open sent \(next)")
+        let pingID = try #require((next["id"] as? NSNumber)?.uint64Value)
+        daemon.write([#"{"id":\#(pingID),"ok":true,"data":{}}"#])
+        _ = try await ping.value
     }
 
     @Test func aClosedConnectionEndsTheReadWithWhatItHas() async throws {

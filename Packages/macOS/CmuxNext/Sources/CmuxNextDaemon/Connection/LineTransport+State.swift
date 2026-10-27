@@ -21,6 +21,8 @@ extension LineTransport {
         /// Client-minted streams routed to their own sink (``LineTransport/routeStream(_:to:)``), until
         /// their `stream_end` or the close.
         var streamSinks: [String: StreamSink] = [:]
+        /// Routed streams a `stream.cancel` is releasing: the one claim that keeps a second cancel off the wire.
+        var cancelingStreams: Set<String> = []
         /// Gets the lines of every other stream (`stream_item`, `stream_end`) not on the control sequence.
         var streamHandler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?
 

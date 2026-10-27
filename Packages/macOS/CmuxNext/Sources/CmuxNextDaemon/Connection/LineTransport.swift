@@ -74,8 +74,8 @@ final class LineTransport: Sendable {
     private let hangWatched: HangWatchedLane?
     /// The one timer of every reply deadline on this connection, armed for the earliest (``DeadlineHeap``).
     private let deadlineTimer: DemandTimer
-    /// Time since the connection opened, on the clock ``deadlineTimer`` sleeps on.
-    private let elapsed: @Sendable () -> Duration
+    /// What ``deadlineTimer`` and a stream cancel's end wait sleep on, and the time since the connection opened on it.
+    let clock: any Clock<Duration>, elapsed: @Sendable () -> Duration
     /// Where each request's `daemon.request` slice goes (LineTransport+RequestTrace.swift), the top bits of its
     /// async id (``traceConnectionBits(scope:)``) and its flow's seed (``requestFlowSeed(pid:)``).
     let trace: TraceRuntime, traceConnection: UInt64, traceFlowSeed: UInt64
@@ -92,6 +92,7 @@ final class LineTransport: Sendable {
         self.trace = trace
         traceConnection = Self.traceConnectionBits(scope: trace.nextAsyncScope())
         traceFlowSeed = Self.requestFlowSeed(pid: getpid())
+        self.clock = clock
         deadlineTimer = DemandTimer(owner: "LineTransport.deadline", clock: clock)
         elapsed = Self.elapsedReader(clock)
         let recorder = stats?.recorder()
@@ -171,13 +172,6 @@ final class LineTransport: Sendable {
     var isClosed: Bool { state.withLock { $0.closed != nil } }
     /// The writer queue's class (``DaemonWireStats/Role/writerQoS``; tests).
     var writerQoS: DispatchQoS { writer.queueQoS }
-    /// Gets the lines of every stream that is neither on the control sequence nor routed to its own sink.
-    func setStreamHandler(_ handler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?) { state.withLock { $0.streamHandler = handler } }
-
-    /// Counts `streamID`'s lines as stream-0 events until its `stream_end`;
-    /// call before the request that opens it, `endControlSequence` if that fails.
-    func routeOnControlSequence(streamID: String) { _ = state.withLock { $0.controlStreams.insert(streamID) } }
-    func endControlSequence(streamID: String) { _ = state.withLock { $0.controlStreams.remove(streamID) } }
 
     /// Sends one command and returns the raw `ok:true` response line.
     /// `body` receives the allocated id and returns the encoded JSON object
@@ -335,14 +329,14 @@ final class LineTransport: Sendable {
         }
     }
 
-    private func failAll(_ reason: TransportCloseReason) {
+    /// Fails every pending request and stream with `reason` (the first reason wins); the socket stays open.
+    func failAll(_ reason: TransportCloseReason) {
         let (unanswered, sinks) = state.withLock { state -> ([PendingRequest], [StreamSink]) in
             if state.closed == nil { state.closed = reason }
             state.deadlines.removeAll()
             state.armedAt = nil
-            let sinks = Array(state.streamSinks.values)
-            state.streamSinks.removeAll()
-            return (state.pending.removeAllInSendOrder(), sinks)
+            defer { state.streamSinks.removeAll() }
+            return (state.pending.removeAllInSendOrder(), Array(state.streamSinks.values))
         }
         deadlineTimer.cancel()
         // A stream the connection closed under never gets its `stream_end`.
