@@ -101,7 +101,7 @@
     "cmux-pane-protocol": 1,
     "cmux-server": 1,
     "cmux-tui": 1,
-    "cmux-tui-core": 4
+    "cmux-tui-core": 3
    },
    "unwrap": {
     "acpmux": 7
