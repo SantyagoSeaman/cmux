@@ -534,6 +534,7 @@ mod unix {
     mod host_session;
     pub(crate) mod host_signals;
     mod host_start;
+    mod new_hosts;
     mod pty_custody;
     mod pty_lock;
     pub(crate) mod session_cleanup;

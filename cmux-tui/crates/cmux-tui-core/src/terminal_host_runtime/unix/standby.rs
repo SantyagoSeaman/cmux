@@ -3,6 +3,7 @@
 #[cfg(test)]
 use cmux_process::Command;
 
+use super::new_hosts::TerminalModel;
 use super::*;
 
 /// A terminal-host process started before its terminal exists (R81: a
@@ -18,7 +19,14 @@ pub(crate) struct StandbyTerminalHost {
 }
 
 impl StandbyTerminalHost {
+    /// Starts a host process for a new terminal, or a spare for the next
+    /// one: only in the hosts model ([`TerminalModel::admit_new_host`]).
     pub(crate) fn spawn() -> anyhow::Result<Self> {
+        Self::spawn_in(TerminalModel::current())
+    }
+
+    pub(super) fn spawn_in(model: TerminalModel) -> anyhow::Result<Self> {
+        model.admit_new_host()?;
         // Exec the daemon's own running build (open inode on Linux): after an
         // in-place binary upgrade, resolving the executable path yields
         // "<path> (deleted)" and exec fails, which broke every new tab/split

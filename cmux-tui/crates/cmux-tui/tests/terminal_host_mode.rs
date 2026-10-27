@@ -128,3 +128,8 @@ fn hidden_terminal_host_closes_deliberately_inherited_non_stdio_pipe() {
     assert!(reached_eof, "terminal host retained an unrelated inherited descriptor");
     assert!(host_was_alive, "EOF came only from the terminal host exiting");
 }
+
+/// Which model a daemon's new terminals run on (p01-process-138).
+#[cfg(unix)]
+#[path = "terminal_host_mode/model.rs"]
+mod model;
