@@ -611,3 +611,261 @@ fn resource_large_workspace_mutations_are_targeted_and_query_bounded() {
     assert_eq!(registry.workspaces.last().unwrap().public_id, target);
     assert_eq!(registry.workspaces.last().unwrap().name, "Renamed");
 }
+
+/// Admit then reply for effect receipts (F10, p05-ipc-125): the reply
+/// carries the receipt decided at prepare, the writer applies it later.
+mod admission {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    use cmux_threads::sync::mpsc::{SyncSender, sync_channel};
+
+    use super::*;
+    use crate::journal_ingress::{AdmitSend, EffectSend, PendingRegistryReceipt};
+    use crate::workspace_registry::{RegistryIntent, RegistryIntentSink, RegistryReceipt};
+
+    type Answer = SyncSender<Result<RegistryReceipt, String>>;
+
+    /// A stand-in journal writer: admitted intents wait in `held` until
+    /// [`apply_held`] commits them; anything sent to wait for its receipt
+    /// is handed back to commit locally.
+    #[derive(Default)]
+    struct HeldWriter {
+        held: Mutex<Vec<(RegistryIntent, Answer)>>,
+    }
+
+    impl RegistryIntentSink for HeldWriter {
+        fn accepts(&self) -> bool {
+            true
+        }
+
+        fn send(
+            &self,
+            intent: RegistryIntent,
+            _site: &'static std::panic::Location<'static>,
+        ) -> EffectSend {
+            EffectSend::NotQueued(Box::new(intent))
+        }
+
+        fn admit(
+            &self,
+            intent: RegistryIntent,
+            _site: &'static std::panic::Location<'static>,
+        ) -> AdmitSend {
+            let (answer, receipt) = sync_channel(1);
+            self.held.lock().unwrap().push((intent, answer));
+            AdmitSend::Admitted(PendingRegistryReceipt::for_test(receipt))
+        }
+    }
+
+    fn admitting_mux() -> (Arc<Mux>, Arc<HeldWriter>) {
+        let mux = test_mux();
+        let writer = Arc::new(HeldWriter::default());
+        mux.registry_connection.install_intent_sink(writer.clone());
+        mux.registry_connection.set_admit_then_reply_for_test(true);
+        (mux, writer)
+    }
+
+    /// Commit the held intents in one batch, as the journal writer does
+    /// (it takes the connection without the read barrier), then answer.
+    fn apply_held(mux: &Mux, writer: &HeldWriter) -> usize {
+        let held = std::mem::take(&mut *writer.held.lock().unwrap());
+        let db = mux
+            .registry_connection
+            .get_until(Instant::now() + Duration::from_secs(10))
+            .expect("the writer takes the connection");
+        let tx = db.unchecked_transaction().unwrap();
+        let answers = held
+            .into_iter()
+            .map(|(intent, answer)| (intent.apply_in_savepoint(&tx).expect("the batch"), answer))
+            .collect::<Vec<_>>();
+        tx.commit().unwrap();
+        drop(db);
+        let applied = answers.len();
+        for (receipt, answer) in answers {
+            answer.send(receipt).unwrap();
+        }
+        applied
+    }
+
+    fn head(mux: &Mux) -> u64 {
+        mux.workspace_registry.lock().unwrap().resource_revision().unwrap()
+    }
+
+    fn success() -> ResourceEffectOutcome {
+        ResourceEffectOutcome::Success(serde_json::json!({"id":"notice"}))
+    }
+
+    /// Red first: with the site committing through the writer, nothing is
+    /// admitted and the store holds the commit before the reply.
+    #[test]
+    fn an_effect_commit_replies_with_its_prepared_receipt_before_the_writer_applies_it() {
+        let (mux, writer) = admitting_mux();
+        let fingerprint = begin_test_resource_effect(&mux, "admitted-effect", "test.notify");
+        let before = head(&mux);
+        let deltas = serde_json::json!([{"kind":"upsert"}]);
+
+        let revision = mux
+            .commit_resource_effect(
+                "admitted-effect",
+                "test.notify",
+                &fingerprint,
+                &success(),
+                Some(&deltas),
+            )
+            .unwrap();
+
+        assert_eq!(revision, before + 1, "the prepare-time receipt");
+        assert_eq!(mux.with_state(|state| state.resource_revision), before + 1);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!((stats.admitted, stats.unresolved), (1, 1), "the writer has not applied it");
+        assert_eq!(apply_held(&mux, &writer), 1);
+        assert_eq!(
+            mux.lookup_resource_effect("admitted-effect", "test.notify", &fingerprint).unwrap(),
+            Some(ResourceEffectPreparation::Committed { outcome: success(), revision: before + 1 }),
+            "read-your-writes after the writer"
+        );
+        assert_eq!(head(&mux), before + 1);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!(
+            (stats.journal_degraded, stats.receipt_mismatches, stats.unresolved),
+            (0, 0, 0),
+            "the writer committed exactly the reply"
+        );
+    }
+
+    /// A receipt-only outcome (no public deltas) keeps the resource revision.
+    #[test]
+    fn a_receipt_only_effect_commit_is_admitted_at_the_current_revision() {
+        let (mux, writer) = admitting_mux();
+        let fingerprint = begin_test_resource_effect(&mux, "receipt-only", "terminal.input");
+        let before = head(&mux);
+
+        let revision = mux
+            .commit_resource_effect(
+                "receipt-only",
+                "terminal.input",
+                &fingerprint,
+                &success(),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(revision, before);
+        assert_eq!(apply_held(&mux, &writer), 1);
+        assert_eq!(head(&mux), before);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!((stats.admitted, stats.journal_degraded), (1, 0));
+    }
+
+    /// The projected patch path replies with the patch commit the writer
+    /// later stores, and installs its revision before the writer runs.
+    #[test]
+    fn a_projected_effect_replies_with_its_prepared_patch_commit() {
+        let (mux, writer) = admitting_mux();
+        let surface =
+            mux.new_browser_tab("about:blank#admit".into(), None, Some((80, 24))).unwrap();
+        // The tab's own projection was admitted too: the writer applies it.
+        let setup = apply_held(&mux, &writer);
+        let before = head(&mux);
+        let fingerprint = begin_test_resource_effect(&mux, "admitted-projection", "test.project");
+        let result = serde_json::json!({"projected":true});
+
+        let commit = mux
+            .commit_full_resource_effect_projection(
+                "admitted-projection",
+                "test.project",
+                &fingerprint,
+                result.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            (commit.revision, &commit.result, commit.replayed),
+            (before + 1, &result, false)
+        );
+        assert_eq!(mux.with_state(|state| state.resource_revision), before + 1);
+        assert_eq!(mux.registry_connection.admit_stats().unresolved, 1);
+        assert_eq!(apply_held(&mux, &writer), 1);
+        let registry = mux.workspace_registry.lock().unwrap();
+        assert_eq!(registry.resource_events_after(before).unwrap().batches.len(), 1);
+        drop(registry);
+        assert_eq!(head(&mux), before + 1);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!(
+            (stats.admitted, stats.journal_degraded, stats.unresolved),
+            (setup as u64 + 1, 0, 0)
+        );
+        surface.kill();
+    }
+
+    /// Idempotent receipts: committing an effect the store already holds
+    /// with the same outcome replays its receipt and writes nothing, with
+    /// admit then reply on or off. Red first: the old path refused it
+    /// ("cannot commit from state committed").
+    #[test]
+    fn a_retried_effect_commit_replays_its_receipt_and_writes_nothing() {
+        for admit in [false, true] {
+            let mux = test_mux();
+            mux.registry_connection.set_admit_then_reply_for_test(admit);
+            let fingerprint = begin_test_resource_effect(&mux, "retried-effect", "test.notify");
+            let deltas = serde_json::json!([{"kind":"upsert"}]);
+            let commit = || {
+                mux.commit_resource_effect(
+                    "retried-effect",
+                    "test.notify",
+                    &fingerprint,
+                    &success(),
+                    Some(&deltas),
+                )
+            };
+            let first = commit().unwrap();
+            let retried = commit().unwrap_or_else(|error| panic!("admit {admit}: {error:#}"));
+            assert_eq!(retried, first, "admit {admit}: the stored receipt");
+            assert_eq!(head(&mux), first, "admit {admit}: no second revision");
+            let stats = mux.registry_connection.admit_stats();
+            assert_eq!(stats.admitted, 0, "admit {admit}: nothing to write");
+
+            let changed = ResourceEffectOutcome::Success(serde_json::json!({"id":"other"}));
+            let error = mux
+                .commit_resource_effect(
+                    "retried-effect",
+                    "test.notify",
+                    &fingerprint,
+                    &changed,
+                    None,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("cannot commit from state \"committed\""),
+                "admit {admit}: a different outcome is refused: {error:#}"
+            );
+        }
+    }
+
+    /// What the writer's apply would refuse is refused at prepare: nothing
+    /// is admitted, so no reply claims a commit the journal never holds.
+    #[test]
+    fn an_effect_the_writer_would_refuse_is_refused_before_admission() {
+        let (mux, writer) = admitting_mux();
+        let fingerprint = begin_test_resource_effect(&mux, "indeterminate-effect", "test.notify");
+        mux.mark_resource_effect_indeterminate("indeterminate-effect").unwrap();
+
+        let error = mux
+            .commit_resource_effect(
+                "indeterminate-effect",
+                "test.notify",
+                &fingerprint,
+                &success(),
+                None,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cannot commit from state"), "{error:#}");
+        let missing = mux
+            .commit_resource_effect("missing-effect", "test.notify", &fingerprint, &success(), None)
+            .unwrap_err();
+        assert!(format!("{missing:#}").contains("is missing"), "{missing:#}");
+        assert_eq!(mux.registry_connection.admit_stats().admitted, 0);
+        assert!(writer.held.lock().unwrap().is_empty());
+    }
+}
