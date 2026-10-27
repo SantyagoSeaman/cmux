@@ -396,6 +396,40 @@ impl RegistryConnection {
         self.connection.is_owned_by_current_thread()
     }
 
+    /// [`Self::get_at`] past the admitted-intent read barrier, for a read no
+    /// unanswered admitted intent can change: the caller holds the workspace
+    /// registry and tracks every unanswered admission
+    /// (`effect_store::admitted_effects`).
+    #[track_caller]
+    pub(super) fn get_unbarriered_at(
+        &self,
+        site: &'static Location<'static>,
+    ) -> RegistryConnectionGuard<'_> {
+        self.debug_assert_lock_order();
+        let wait = self.acquire_rank();
+        let reentry = self.connection.is_owned_by_current_thread();
+        let timed = RequestPathHold::note_acquire(reentry, site);
+        let guard = if reentry {
+            Gated::reentered(self.connection.lock(), &*self.gate)
+        } else {
+            let (guard, ticket) =
+                self.admit(site, || self.connection.try_lock(), || self.connection.lock());
+            Gated::new(guard, &*self.gate, ticket)
+        };
+        RegistryConnectionGuard {
+            _boost: OwnerBoost::hold(&*self.boost),
+            guard,
+            _rank: wait.held(),
+            _request_path: RequestPathHold::held(timed),
+        }
+    }
+
+    /// Turn admit then reply (`admitted_reply`) on or off for a test.
+    #[cfg(test)]
+    pub(crate) fn set_admit_then_reply_for_test(&self, enabled: bool) {
+        self.admit.set_enabled_for_test(enabled);
+    }
+
     /// The name of the thread that last took the connection lock.
     #[cfg(test)]
     pub(crate) fn last_holder(&self) -> Option<String> {

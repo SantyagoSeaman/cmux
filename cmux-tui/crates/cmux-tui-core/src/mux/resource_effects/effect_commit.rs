@@ -50,13 +50,15 @@ impl Mux {
         self.registry_connection.install_intent_sink(Arc::new(MuxIntentSink(Arc::downgrade(self))));
     }
 
-    /// Admit a prepared effect intent and finish it under `registry` with
-    /// the receipt decided at prepare (admit then reply, F10, p05-ipc-125):
-    /// the journal writer applies it later, in admit order. With
-    /// `admitThenReply` off, or when it cannot admit, it commits and waits
-    /// for the writer's receipt (`WorkspaceRegistry::admit_registry_intent`).
-    /// A replayed receipt (the store already holds this outcome) admits
-    /// nothing and is not finished again.
+    /// Commit a prepared effect intent and finish it under `registry`
+    /// (`WorkspaceRegistry::admit_effect_commit`): an outcome is admitted
+    /// with the receipt decided at prepare (admit then reply, F10,
+    /// p05-ipc-125) and the journal writer applies it later, in admit order;
+    /// a patch, an outcome prepared while the store misses an untracked
+    /// admission, or any intent with `admitThenReply` off commits and waits
+    /// for the writer's receipt. A replayed receipt (the store or an earlier
+    /// admission already holds this outcome) writes nothing and is not
+    /// finished again.
     #[track_caller]
     pub(crate) fn admit_effect_intent(
         &self,
@@ -64,18 +66,9 @@ impl Mux {
         intent: EffectCommitIntent,
         finish: EffectCommitFinish,
     ) -> anyhow::Result<EffectCommitReceipt> {
-        let prepared = registry.prepared_effect_receipt(&intent)?;
-        if prepared.replayed() {
-            return Ok(prepared);
-        }
-        let admitted = registry.admit_registry_intent(
-            RegistryIntent::Effect(intent),
-            RegistryReceipt::Effect(prepared),
-            || {},
-            None,
-        );
-        let receipt = match admitted {
-            Ok(admission) => admission.into_receipt().into_effect()?,
+        let receipt = match registry.admit_effect_commit(intent) {
+            Ok(receipt) if receipt.replayed() => return Ok(receipt),
+            Ok(receipt) => receipt,
             Err(error) => {
                 // An indeterminate receipt: the writer can still commit after
                 // this request gives up. Wake journal subscribers, who read

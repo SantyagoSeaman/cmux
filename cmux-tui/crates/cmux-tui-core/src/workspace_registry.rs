@@ -809,6 +809,9 @@ pub struct WorkspaceRegistry {
     resource_effect_pepper: ResourceEffectPepper,
     /// The topology state the resource journal states (see `public_fold`).
     public_fold: Option<public_fold::PublicTopologyFold>,
+    /// Effect receipts admitted before the writer applies them
+    /// (`effect_store::admitted_effects`).
+    admitted_effects: effect_store::AdmittedEffects,
     /// Projection and commit spans for `server-stats`; the mux keeps a clone.
     resource_projection_stats: std::sync::Arc<crate::diagnostics::ResourceProjectionStats>,
     #[cfg(test)]
@@ -2919,6 +2922,7 @@ impl WorkspaceRegistry {
             session_id,
             resource_effect_pepper,
             public_fold: None,
+            admitted_effects: effect_store::AdmittedEffects::default(),
             resource_projection_stats: std::sync::Arc::default(),
             #[cfg(test)]
             resource_patch_failures_remaining: Cell::new(0),

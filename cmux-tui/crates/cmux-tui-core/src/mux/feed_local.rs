@@ -138,8 +138,9 @@ impl Mux {
             Some(deltas),
             write,
         )?;
-        // Admitted with its prepare-time receipt (effect_commit.rs) under the
-        // registry and the feed lock: the writer takes neither.
+        // Admitted with its prepare-time receipt, or committed through the
+        // writer (effect_commit.rs), under the registry and the feed lock:
+        // the writer takes neither.
         let revision = match self.admit_effect_intent(&mut registry, intent, finish) {
             // A retry of a committed notification: its item, ring and event
             // went out with the first commit.

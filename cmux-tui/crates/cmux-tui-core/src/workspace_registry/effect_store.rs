@@ -8,10 +8,12 @@ use crate::diagnostics::CommitSpans;
 use crate::resource::ResourceError;
 use serde_json::json;
 
+mod admitted_effects;
 mod creation_record;
 mod effect_intent;
 mod input_receipts;
 mod receipt_presence;
+pub(crate) use admitted_effects::AdmittedEffects;
 use creation_record::read_creation_record;
 pub(crate) use effect_intent::{EffectCommitFinish, EffectCommitIntent, EffectCommitReceipt};
 use input_receipts::{prune_resource_input_receipts, record_resource_input_receipt_completion};

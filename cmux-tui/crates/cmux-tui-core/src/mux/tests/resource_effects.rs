@@ -615,23 +615,58 @@ fn resource_large_workspace_mutations_are_targeted_and_query_bounded() {
 /// Admit then reply for effect receipts (F10, p05-ipc-125): the reply
 /// carries the receipt decided at prepare, the writer applies it later.
 mod admission {
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex};
     use std::time::Instant;
 
     use cmux_threads::sync::mpsc::{SyncSender, sync_channel};
 
     use super::*;
     use crate::journal_ingress::{AdmitSend, EffectSend, PendingRegistryReceipt};
-    use crate::workspace_registry::{RegistryIntent, RegistryIntentSink, RegistryReceipt};
+    use crate::request_path::{BlockingKind, RequestPathMode, RequestPathScope, RequestPathStats};
+    use crate::workspace_registry::{
+        EffectCommitReceipt, RegistryIntent, RegistryIntentSink, RegistryReceipt,
+    };
 
     type Answer = SyncSender<Result<RegistryReceipt, String>>;
 
+    /// What the stand-in writer does with an intent sent to wait for its
+    /// receipt.
+    #[derive(Clone, Copy, Default)]
+    enum Sends {
+        /// Hand it back to commit locally.
+        #[default]
+        Local,
+        /// Queue it behind the held intents, as on the journal writer's
+        /// lane, and wait until [`apply_held`] answers it.
+        Queue,
+        /// Answer with the error of a writer whose apply refused it.
+        Refuse,
+    }
+
     /// A stand-in journal writer: admitted intents wait in `held` until
-    /// [`apply_held`] commits them; anything sent to wait for its receipt
-    /// is handed back to commit locally.
+    /// [`apply_held`] commits them.
     #[derive(Default)]
     struct HeldWriter {
         held: Mutex<Vec<(RegistryIntent, Answer)>>,
+        pushed: Condvar,
+        sends: Sends,
+    }
+
+    impl HeldWriter {
+        fn hold(&self, intent: RegistryIntent, answer: Answer) {
+            self.held.lock().unwrap().push((intent, answer));
+            self.pushed.notify_all();
+        }
+
+        /// Block until the writer holds `count` intents.
+        fn wait_for_held(&self, count: usize) {
+            let held = self.held.lock().unwrap();
+            let (_held, waited) = self
+                .pushed
+                .wait_timeout_while(held, Duration::from_secs(10), |held| held.len() < count)
+                .unwrap();
+            assert!(!waited.timed_out(), "the writer never held {count} intents");
+        }
     }
 
     impl RegistryIntentSink for HeldWriter {
@@ -644,7 +679,21 @@ mod admission {
             intent: RegistryIntent,
             _site: &'static std::panic::Location<'static>,
         ) -> EffectSend {
-            EffectSend::NotQueued(Box::new(intent))
+            match self.sends {
+                Sends::Local => EffectSend::NotQueued(Box::new(intent)),
+                Sends::Refuse => {
+                    EffectSend::Sent(Err(anyhow::anyhow!("the writer's apply refused it")))
+                }
+                Sends::Queue => {
+                    let (answer, receipt) = sync_channel(1);
+                    self.hold(intent, answer);
+                    let answered = receipt
+                        .recv_timeout(Duration::from_secs(10))
+                        .map_err(|_| anyhow::anyhow!("the held writer never answered"))
+                        .and_then(|answer| answer.map_err(anyhow::Error::msg));
+                    EffectSend::Sent(answered)
+                }
+            }
         }
 
         fn admit(
@@ -653,14 +702,18 @@ mod admission {
             _site: &'static std::panic::Location<'static>,
         ) -> AdmitSend {
             let (answer, receipt) = sync_channel(1);
-            self.held.lock().unwrap().push((intent, answer));
+            self.hold(intent, answer);
             AdmitSend::Admitted(PendingRegistryReceipt::for_test(receipt))
         }
     }
 
     fn admitting_mux() -> (Arc<Mux>, Arc<HeldWriter>) {
+        admitting_mux_with(Sends::Local)
+    }
+
+    fn admitting_mux_with(sends: Sends) -> (Arc<Mux>, Arc<HeldWriter>) {
         let mux = test_mux();
-        let writer = Arc::new(HeldWriter::default());
+        let writer = Arc::new(HeldWriter { sends, ..HeldWriter::default() });
         mux.registry_connection.install_intent_sink(writer.clone());
         mux.registry_connection.set_admit_then_reply_for_test(true);
         (mux, writer)
@@ -696,6 +749,14 @@ mod admission {
         ResourceEffectOutcome::Success(serde_json::json!({"id":"notice"}))
     }
 
+    fn upsert() -> Value {
+        serde_json::json!([{"kind":"upsert"}])
+    }
+
+    fn commit_with_deltas(mux: &Mux, key: &str, fingerprint: &Value) -> anyhow::Result<u64> {
+        mux.commit_resource_effect(key, "test.notify", fingerprint, &success(), Some(&upsert()))
+    }
+
     /// Red first: with the site committing through the writer, nothing is
     /// admitted and the store holds the commit before the reply.
     #[test]
@@ -703,17 +764,8 @@ mod admission {
         let (mux, writer) = admitting_mux();
         let fingerprint = begin_test_resource_effect(&mux, "admitted-effect", "test.notify");
         let before = head(&mux);
-        let deltas = serde_json::json!([{"kind":"upsert"}]);
 
-        let revision = mux
-            .commit_resource_effect(
-                "admitted-effect",
-                "test.notify",
-                &fingerprint,
-                &success(),
-                Some(&deltas),
-            )
-            .unwrap();
+        let revision = commit_with_deltas(&mux, "admitted-effect", &fingerprint).unwrap();
 
         assert_eq!(revision, before + 1, "the prepare-time receipt");
         assert_eq!(mux.with_state(|state| state.resource_revision), before + 1);
@@ -758,22 +810,150 @@ mod admission {
         assert_eq!((stats.admitted, stats.journal_degraded), (1, 0));
     }
 
-    /// The projected patch path replies with the patch commit the writer
-    /// later stores, and installs its revision before the writer runs.
+    /// Effect commits back to back while the writer has applied none: the
+    /// second takes the head from the first's admission, so neither waits
+    /// for the writer (no read barrier wait, no request-path journal wait)
+    /// and the writer commits exactly both replies.
     #[test]
-    fn a_projected_effect_replies_with_its_prepared_patch_commit() {
+    fn back_to_back_effect_commits_reply_without_waiting_for_the_writer() {
+        let (mux, writer) = admitting_mux();
+        let first = begin_test_resource_effect(&mux, "burst-1", "test.notify");
+        let second = begin_test_resource_effect(&mux, "burst-2", "test.notify");
+        let before = head(&mux);
+
+        let request_path = RequestPathStats::new(RequestPathMode::RECORD);
+        let scope = RequestPathScope::enter(&request_path);
+        let replies = [
+            commit_with_deltas(&mux, "burst-1", &first).unwrap(),
+            commit_with_deltas(&mux, "burst-2", &second).unwrap(),
+        ];
+        drop(scope);
+
+        assert_eq!(replies, [before + 1, before + 2]);
+        assert_eq!(request_path.count(BlockingKind::JournalWait), 0);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!(
+            (stats.admitted, stats.unresolved, stats.read_barrier_waits),
+            (2, 2, 0),
+            "both admitted, neither applied, no barrier wait"
+        );
+        let effects = mux.workspace_registry.lock().unwrap().admitted_effect_stats();
+        assert_eq!((effects.tracked_prepares, effects.barrier_prepares), (1, 0));
+        assert_eq!(apply_held(&mux, &writer), 2);
+        assert_eq!(head(&mux), before + 2);
+        for (key, fingerprint, revision) in
+            [("burst-1", &first, before + 1), ("burst-2", &second, before + 2)]
+        {
+            assert_eq!(
+                mux.lookup_resource_effect(key, "test.notify", fingerprint).unwrap(),
+                Some(ResourceEffectPreparation::Committed { outcome: success(), revision })
+            );
+        }
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!((stats.journal_degraded, stats.receipt_mismatches), (0, 0));
+    }
+
+    /// A retry of an effect admitted but not applied yet replays the
+    /// admitted receipt: one apply, the same revision, nothing degraded.
+    /// Red before the tracked admissions: the store still said `executing`,
+    /// so the retry was admitted again and the writer refused it.
+    #[test]
+    fn a_retry_of_an_admitted_unapplied_effect_replays_its_admitted_receipt() {
+        let (mux, writer) = admitting_mux();
+        let fingerprint = begin_test_resource_effect(&mux, "retry-unapplied", "test.notify");
+        let before = head(&mux);
+
+        let first = commit_with_deltas(&mux, "retry-unapplied", &fingerprint).unwrap();
+        let retried = commit_with_deltas(&mux, "retry-unapplied", &fingerprint).unwrap();
+        let changed = ResourceEffectOutcome::Success(serde_json::json!({"id":"other"}));
+        let refused = mux
+            .commit_resource_effect("retry-unapplied", "test.notify", &fingerprint, &changed, None)
+            .unwrap_err();
+
+        assert_eq!((first, retried), (before + 1, before + 1));
+        assert!(
+            format!("{refused:#}").contains("cannot commit from state \"committed\""),
+            "{refused:#}"
+        );
+        assert_eq!(mux.registry_connection.admit_stats().admitted, 1);
+        assert_eq!(apply_held(&mux, &writer), 1, "one apply");
+        assert_eq!(head(&mux), before + 1);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!((stats.journal_degraded, stats.unresolved), (0, 0));
+    }
+
+    /// Behind another site's admission (p05-ipc-121..124) that the effect
+    /// admissions do not track, the head is read behind the barrier. When
+    /// the barrier gives up before the writer answers, the effect commits
+    /// behind that admission on the writer's lane and replies with the
+    /// writer's receipt: never an admitted reply that repeats its revision.
+    #[test]
+    fn an_effect_behind_an_untracked_admission_commits_behind_it_when_the_barrier_gives_up() {
+        let (mux, writer) = admitting_mux_with(Sends::Queue);
+        let untracked = begin_test_resource_effect(&mux, "untracked", "test.notify");
+        let fingerprint = begin_test_resource_effect(&mux, "behind-untracked", "test.notify");
+        let before = head(&mux);
+        {
+            let mut registry = mux.workspace_registry.lock().unwrap();
+            let (intent, _finish) = registry
+                .prepare_effect_outcome_intent(
+                    "untracked",
+                    "test.notify",
+                    &untracked,
+                    &success(),
+                    Some(&upsert()),
+                )
+                .unwrap();
+            let admission = registry
+                .admit_registry_intent(
+                    RegistryIntent::Effect(intent),
+                    RegistryReceipt::Effect(EffectCommitReceipt::Outcome {
+                        revision: before + 1,
+                        replayed: false,
+                    }),
+                    || {},
+                    None,
+                )
+                .unwrap();
+            assert_eq!(admission.sequence(), Some(1));
+        }
+        // The writer applies once the effect is queued behind the admission.
+        let applier = {
+            let mux = mux.clone();
+            std::thread::spawn(move || {
+                writer.wait_for_held(2);
+                apply_held(&mux, &writer)
+            })
+        };
+
+        let revision = commit_with_deltas(&mux, "behind-untracked", &fingerprint).unwrap();
+
+        assert_eq!(applier.join().unwrap(), 2);
+        assert_eq!(revision, before + 2, "the writer's receipt, behind the untracked admission");
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!((stats.admitted, stats.read_barrier_timeouts), (1, 1));
+        let effects = mux.workspace_registry.lock().unwrap().admitted_effect_stats();
+        assert_eq!((effects.barrier_prepares, effects.waited_unsettled), (1, 1));
+        assert_eq!(head(&mux), before + 2);
+        let stats = mux.registry_connection.admit_stats();
+        assert_eq!((stats.journal_degraded, stats.receipt_mismatches, stats.unresolved), (0, 0, 0));
+    }
+
+    /// A projected patch commits through the writer and replies with its
+    /// receipt: the writer's patch apply has refusals prepare cannot run.
+    #[test]
+    fn a_projected_effect_commits_through_the_writer() {
         let (mux, writer) = admitting_mux();
         let surface =
             mux.new_browser_tab("about:blank#admit".into(), None, Some((80, 24))).unwrap();
-        // The tab's own projection was admitted too: the writer applies it.
-        let setup = apply_held(&mux, &writer);
+        assert!(writer.held.lock().unwrap().is_empty(), "the tab's projection was not admitted");
         let before = head(&mux);
-        let fingerprint = begin_test_resource_effect(&mux, "admitted-projection", "test.project");
+        let fingerprint = begin_test_resource_effect(&mux, "waited-projection", "test.project");
         let result = serde_json::json!({"projected":true});
 
         let commit = mux
             .commit_full_resource_effect_projection(
-                "admitted-projection",
+                "waited-projection",
                 "test.project",
                 &fingerprint,
                 result.clone(),
@@ -784,19 +964,36 @@ mod admission {
             (commit.revision, &commit.result, commit.replayed),
             (before + 1, &result, false)
         );
+        assert_eq!(head(&mux), before + 1, "the store holds it before the reply");
         assert_eq!(mux.with_state(|state| state.resource_revision), before + 1);
-        assert_eq!(mux.registry_connection.admit_stats().unresolved, 1);
-        assert_eq!(apply_held(&mux, &writer), 1);
-        let registry = mux.workspace_registry.lock().unwrap();
-        assert_eq!(registry.resource_events_after(before).unwrap().batches.len(), 1);
-        drop(registry);
-        assert_eq!(head(&mux), before + 1);
-        let stats = mux.registry_connection.admit_stats();
-        assert_eq!(
-            (stats.admitted, stats.journal_degraded, stats.unresolved),
-            (setup as u64 + 1, 0, 0)
-        );
+        assert_eq!(mux.registry_connection.admit_stats().admitted, 0);
+        let effects = mux.workspace_registry.lock().unwrap().admitted_effect_stats();
+        assert!(effects.waited_patch >= 1, "{effects:?}");
         surface.kill();
+    }
+
+    /// A patch the writer refuses comes back as an error through the
+    /// projection path, as before admit then reply: it is never admitted,
+    /// so no reply claims a patch the store never holds.
+    #[test]
+    fn a_projected_patch_the_writer_refuses_is_an_error_and_never_admitted() {
+        let (mux, _writer) = admitting_mux_with(Sends::Refuse);
+        let fingerprint = begin_test_resource_effect(&mux, "refused-projection", "test.project");
+        let before = head(&mux);
+
+        let error = mux
+            .commit_full_resource_effect_projection(
+                "refused-projection",
+                "test.project",
+                &fingerprint,
+                serde_json::json!({"projected":true}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("the writer's apply refused it"), "{error:#}");
+        assert_eq!(mux.registry_connection.admit_stats().admitted, 0);
+        assert_eq!(head(&mux), before);
+        assert_eq!(mux.with_state(|state| state.resource_revision), before);
     }
 
     /// Idempotent receipts: committing an effect the store already holds
@@ -809,18 +1006,9 @@ mod admission {
             let mux = test_mux();
             mux.registry_connection.set_admit_then_reply_for_test(admit);
             let fingerprint = begin_test_resource_effect(&mux, "retried-effect", "test.notify");
-            let deltas = serde_json::json!([{"kind":"upsert"}]);
-            let commit = || {
-                mux.commit_resource_effect(
-                    "retried-effect",
-                    "test.notify",
-                    &fingerprint,
-                    &success(),
-                    Some(&deltas),
-                )
-            };
-            let first = commit().unwrap();
-            let retried = commit().unwrap_or_else(|error| panic!("admit {admit}: {error:#}"));
+            let first = commit_with_deltas(&mux, "retried-effect", &fingerprint).unwrap();
+            let retried = commit_with_deltas(&mux, "retried-effect", &fingerprint)
+                .unwrap_or_else(|error| panic!("admit {admit}: {error:#}"));
             assert_eq!(retried, first, "admit {admit}: the stored receipt");
             assert_eq!(head(&mux), first, "admit {admit}: no second revision");
             let stats = mux.registry_connection.admit_stats();
