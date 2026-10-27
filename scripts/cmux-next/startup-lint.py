@@ -5,9 +5,12 @@ Done check 8(4) of the startup program: every Q2 launch call (a start/follow/wir
 same names as the section 6 Q2 regex) in `CmuxNextApp/Startup/*.swift` and in `AppServices.init` runs as a
 `startup.post(...)` task, so the scheduler orders, measures and defers it (Chrome's
 `AfterStartupTaskUtils::PostTask`, chrome/browser/after_startup_task_utils.cc: launch work is posted, never run
-inline). A call is a hit when its closest enclosing call is not `<...>startup.post(...)` and its callee is not in
+inline). A call is posted when its closest enclosing call is a scheduler post: `<...>startup.post(...)`, a posting
+helper `T.post(on: <...>startup, ...)`, or a value built and posted in the same expression,
+`X(...).post(on: <...>startup)` (`LaunchServicePosts`, `LaunchFirstOpenWarmups`). A scheduler is any name that is
+`startup` or ends in `Startup` (`order.startup`, `launchStartup?`). Any other call is a hit unless its callee is in
 ALLOWLIST. "Closest enclosing call" is literal: `startup.post(...) { Task { x.start() } }` is a hit, because the
-Task, not the post, runs the call.
+Task, not the post, runs the call; so is a call in a factory whose value is posted elsewhere.
 
 The pinned ast-grep (scripts/cmux-next/lint-tools.lock, the pre-push gate's copy) parses the Swift, so comments
 and strings never match and multi-line calls count once. This is an agent tool, not a CI step or a gate check.
@@ -39,8 +42,9 @@ Q2_NAMES = (r"^(start|follow|wire|load|install|prewarm|register[A-Za-z]*|activat
             r"|startChromiumRuntime|observe[A-Za-z]*|warmWhenIdle|bindRegistryActions|startDaemonSync|watchScope"
             r"|writeManagedStatus|applyManagedFeaturesNow)$")
 
-# A scheduler post: `startup.post(`, `order.startup.post(`, `self?.startup.post(`.
-POST_RECEIVER = r"(^|\.)startup$"
+# A scheduler: `startup`, `order.startup`, `launchStartup` (AppServices), `self.launchStartup`. Tree-sitter puts an
+# optional chain's `?` in its own target node, so `launchStartup?.post` matches on `launchStartup`.
+SCHEDULER = r"(^|\.)(startup|[a-z][A-Za-z0-9_]*Startup)$"
 
 # Callees (whitespace removed, as printed) that may run outside a post, each with the reason. A new entry needs
 # its row in plans/cmux-next/startup-DESIGN.md saying why the launch needs it inline and what it costs.
@@ -77,19 +81,34 @@ def _q2_callee() -> dict:
     }
 
 
+# `<target>.post`, the callee of a post call.
+POST_SUFFIX = {"field": "suffix", "has": {"field": "suffix", "regex": r"^post$"}}
+
+# A call whose own arguments include `on: <scheduler>`.
+ON_SCHEDULER = {
+    "has": {"kind": "call_suffix", "has": {"kind": "value_arguments", "has": {
+        "kind": "value_argument",
+        "all": [{"has": {"field": "name", "regex": r"^on$"}}, {"has": {"field": "value", "regex": SCHEDULER}}],
+    }}}
+}
+
+
 def _closest_call_is_post() -> dict:
     # The nearest call_suffix above the callee (arguments or trailing closure of the closest enclosing call; a
-    # call the callee only chains on, `a.b().start()`, has it in its callee, not its suffix) belongs to a post.
-    post_callee = {
-        "kind": "navigation_expression",
-        "has": {"field": "suffix", "has": {"field": "suffix", "regex": r"^post$"}},
-        "all": [{"has": {"field": "target", "regex": POST_RECEIVER}}],
-    }
+    # call the callee only chains on, `a.b().start()`, has it in its callee, not its suffix) belongs to a call that
+    # posts: `startup.post(...)`, `T.post(on: startup, ...)`, or `X(...)` in `X(...).post(on: startup)`.
+    posting_call = {"any": [
+        {"has": {"kind": "navigation_expression", "has": POST_SUFFIX,
+                 "all": [{"has": {"field": "target", "regex": SCHEDULER}}]}},
+        {"all": [{"has": {"kind": "navigation_expression", "has": POST_SUFFIX}}, ON_SCHEDULER]},
+        {"inside": {"kind": "navigation_expression", "field": "target", "has": POST_SUFFIX,
+                    "inside": {"kind": "call_expression", "all": [ON_SCHEDULER]}}},
+    ]}
     return {
         "inside": {
             "kind": "call_suffix",
             "stopBy": {"kind": "call_suffix"},
-            "inside": {"kind": "call_expression", "has": post_callee},
+            "inside": {"kind": "call_expression", "all": [posting_call]},
         }
     }
 
