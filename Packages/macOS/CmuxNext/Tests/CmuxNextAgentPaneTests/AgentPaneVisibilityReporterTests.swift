@@ -25,11 +25,21 @@ struct AgentPaneVisibilityReporterTests {
             frames: AgentPaneHiddenPacingTests.Ticks(), fallback: AgentPaneHiddenPacingTests.Deadline(),
             nextTurn: { _ in }, isHidden: { [unowned self] in self.hidden })
         var reporter: AgentPaneVisibilityReporter?
+        /// Connections whose first frame went (the reporter heard it), and who waits for the next.
+        var firstFrames = 0
+        var firstFrameWaiter: CheckedContinuation<Void, Never>?
 
         init(hidden: Bool, session: String?) {
             self.hidden = hidden
             model = AgentPaneModel(host: NoHost(), sessionId: session, transport: transport)
             reporter = AgentPaneVisibilityReporter(model: model, pacer: pacer)
+            let reported = transport.onFirstFrameSent
+            transport.onFirstFrameSent = { [unowned self] in
+                reported?()
+                self.firstFrames += 1
+                self.firstFrameWaiter?.resume()
+                self.firstFrameWaiter = nil
+            }
         }
 
         /// The probe's node flipped to `hidden`.
@@ -44,11 +54,12 @@ struct AgentPaneVisibilityReporterTests {
             return (id, try #require(transport.socket))
         }
 
-        /// Sends the page's first frame on `connection` and waits until `wire` has it.
-        func sendFirst(_ connection: Int, on wire: Wire) async {
-            let before = wire.frames.count
+        /// Sends the page's first frame on `connection` and waits until the reporter heard it went.
+        func sendFirst(_ connection: Int) async {
+            let expected = firstFrames + 1
             _ = await transport.send(connection: connection, frames: [AgentPaneVisibilityReporterTests.initialize])
-            _ = await wire.sent(count: before + 1)
+            guard firstFrames < expected else { return }
+            await withCheckedContinuation { firstFrameWaiter = $0 }
         }
 
         /// The visibility frames `wire` got, once every state handed to its `socket` went.
@@ -70,7 +81,7 @@ struct AgentPaneVisibilityReporterTests {
         rig.flip(hidden: true)
         #expect(wire.frames.isEmpty, "a visibility frame went before the page's first frame")
 
-        await rig.sendFirst(id, on: wire)
+        await rig.sendFirst(id)
         #expect(await rig.edges(wire, socket) == ["s:false"])
     }
 
@@ -79,7 +90,7 @@ struct AgentPaneVisibilityReporterTests {
         let rig = Rig(hidden: false, session: "s")
         let wire = Wire()
         let (id, socket) = try await rig.open(wire)
-        await rig.sendFirst(id, on: wire)
+        await rig.sendFirst(id)
         #expect(await rig.edges(wire, socket) == ["s:true"])
 
         rig.flip(hidden: true)
@@ -94,7 +105,7 @@ struct AgentPaneVisibilityReporterTests {
         let rig = Rig(hidden: false, session: "s")
         let first = Wire()
         let (id, socket) = try await rig.open(first)
-        await rig.sendFirst(id, on: first)
+        await rig.sendFirst(id)
         rig.flip(hidden: true)
         #expect(await rig.edges(first, socket) == ["s:true", "s:false"])
 
@@ -105,7 +116,7 @@ struct AgentPaneVisibilityReporterTests {
         let second = Wire()
         let (next, nextSocket) = try await rig.open(second)
         #expect(second.frames.isEmpty)
-        await rig.sendFirst(next, on: second)
+        await rig.sendFirst(next)
         #expect(await rig.edges(second, nextSocket) == ["s:true"])
     }
 
@@ -114,7 +125,7 @@ struct AgentPaneVisibilityReporterTests {
         let rig = Rig(hidden: false, session: "a")
         let wire = Wire()
         let (id, socket) = try await rig.open(wire)
-        await rig.sendFirst(id, on: wire)
+        await rig.sendFirst(id)
         rig.model.adoptSession("b")
         #expect(await rig.edges(wire, socket) == ["a:true", "a:false", "b:true"])
 
@@ -129,7 +140,7 @@ struct AgentPaneVisibilityReporterTests {
         let rig = Rig(hidden: false, session: nil)
         let wire = Wire()
         let (id, socket) = try await rig.open(wire)
-        await rig.sendFirst(id, on: wire)
+        await rig.sendFirst(id)
         rig.flip(hidden: true)
         #expect(await rig.edges(wire, socket).isEmpty)
 
