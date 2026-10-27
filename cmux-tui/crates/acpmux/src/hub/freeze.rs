@@ -190,8 +190,18 @@ pub(crate) struct FreezeState {
     /// without its child lock, and what `frozen` reports. A gate that a write
     /// continued stays until the next show or count; it reads not frozen.
     frozen: StdMutex<HashMap<String, Arc<HarnessGate>>>,
-    /// Energy Saver edges, for the hub's life (`watch_energy`).
-    energy: std::sync::OnceLock<cmux_wake::EnergyWatch>,
+    /// Energy Saver edges and the task that hears them, for the hub's life
+    /// (`watch_energy`).
+    energy: std::sync::OnceLock<(cmux_wake::EnergyWatch, EnergyTask)>,
+}
+
+/// The Energy Saver edge task: it ends with the hub.
+struct EnergyTask(tokio::task::JoinHandle<()>);
+
+impl Drop for EnergyTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Default for FreezeState {
@@ -357,12 +367,8 @@ impl Hub {
     pub(super) fn watch_energy(self: &Arc<Self>) {
         let edge = Arc::new(Notify::new());
         let notify = edge.clone();
-        let watch = self.maintenance.energy().watch(move || notify.notify_one());
-        if self.freeze.energy.set(watch).is_err() {
-            return;
-        }
         let hub = Arc::downgrade(self);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             loop {
                 edge.notified().await;
                 let Some(hub) = hub.upgrade() else { return };
@@ -370,6 +376,10 @@ impl Hub {
                 hub.pool_saver_edge().await;
             }
         });
+        let watch = self.maintenance.energy().watch(move || notify.notify_one());
+        if let Err((_, task)) = self.freeze.energy.set((watch, EnergyTask(task))) {
+            task.0.abort();
+        }
     }
 }
 
