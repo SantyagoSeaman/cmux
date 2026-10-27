@@ -13,7 +13,15 @@ import Foundation
 /// mailbox overflows and it ends the stream with `overflow` instead of the
 /// app buffering without limit; the view reattaches from a fresh replay.
 /// Replays never block (a 10 MiB replay must not wedge the attach
-/// handshake). Consecutive plain output chunks are merged on the way out.
+/// handshake). Consecutive plain output chunks are merged on the way out, so a
+/// consumer that fell behind takes up to `mergeLimit` bytes in one step:
+/// decoded JSON chunks by a copy, attach-frame output (``TerminalOutputSpan``)
+/// that continues in the PTY stream by range when the slices lie next to each
+/// other in one read buffer, else by one copy. A consumer that keeps up finds
+/// one span queued and gets it as a slice of its read buffer, never copied.
+/// Blink coalesces queued input only while its main thread is behind the same
+/// way (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc).
+/// Nothing merges across a grid replacement or any other event.
 final class TerminalEventQueue: Sendable {
     let highWater: Int
     let lowWater: Int
@@ -30,8 +38,29 @@ final class TerminalEventQueue: Sendable {
     // connection's dedicated reader thread (LineTransport) waits on it, never the main thread or a pool thread.
     private let readerWake = DispatchSemaphore(value: 0)
 
+    /// One queued item: an event, or live output still in its read buffer (attach frames).
+    private enum Item {
+        case event(TerminalChannelEvent)
+        case span(TerminalOutputSpan)
+
+        /// The event the consumer gets.
+        var event: TerminalChannelEvent {
+            switch self {
+            case .event(let event): event
+            case .span(let span): .output(span.bytes.data, colors: nil)
+            }
+        }
+
+        var outputSize: Int {
+            switch self {
+            case .event(let event): TerminalEventQueue.outputSize(event)
+            case .span(let span): span.bytes.count
+            }
+        }
+    }
+
     private struct State {
-        var items: [TerminalChannelEvent] = []
+        var items: [Item] = []
         var head = 0
         var outputBytes = 0
         var waiter: OnceContinuation<TerminalChannelEvent?, OnceContinuationError>?
@@ -54,11 +83,36 @@ final class TerminalEventQueue: Sendable {
 
         /// Next event, merging consecutive plain output chunks up to `mergeLimit`; nil when none is queued.
         mutating func popMerged(mergeLimit: Int, recorder: DaemonWireStats.Recorder?) -> TerminalChannelEvent? {
-            guard var event = items[checked: head] else { return nil }
+            guard let item = items[checked: head] else { return nil }
             head += 1
-            if case .output(var data, nil) = event {
+            let event: TerminalChannelEvent
+            switch item {
+            case .span(let first):
+                var joined: TerminalOutputSpan? = first  // the merged bytes while they are one slice of one buffer
+                var copied = Data()  // the merged bytes once they are not
+                var end = first.end
+                var count = first.bytes.count
+                while count < mergeLimit, case .span(let next)? = items[checked: head], next.offset == end {
+                    if let wider = joined?.joined(with: next) {
+                        joined = wider
+                    } else {
+                        if let run = joined.take() { copied.append(run.bytes.data) }
+                        copied.append(next.bytes.data)
+                    }
+                    end = next.end
+                    count += next.bytes.count
+                    head += 1
+                }
+                if let joined {
+                    event = .output(joined.bytes.data, colors: nil)  // one wider slice, no copy
+                } else {
+                    recorder?.outputCopied(copied.count)  // a merge that writes every byte of the result
+                    event = .output(copied, colors: nil)
+                }
+                outputBytes -= count
+            case .event(.output(var data, nil)):
                 var merged = false
-                while data.count < mergeLimit, case .output(let more, nil)? = items[checked: head] {
+                while data.count < mergeLimit, case .event(.output(let more, nil))? = items[checked: head] {
                     data.append(more)
                     head += 1
                     merged = true
@@ -67,8 +121,9 @@ final class TerminalEventQueue: Sendable {
                 if merged { recorder?.outputCopied(data.count) }
                 event = .output(data, colors: nil)
                 outputBytes -= data.count
-            } else {
-                outputBytes -= TerminalEventQueue.outputSize(event)
+            case .event(let other):
+                event = other
+                outputBytes -= TerminalEventQueue.outputSize(other)
             }
             if head > 256, head * 2 > items.count {
                 items.removeFirst(head)
@@ -94,14 +149,24 @@ final class TerminalEventQueue: Sendable {
 
     /// Reader thread. May block while the consumer is behind.
     func push(_ event: TerminalChannelEvent) {
+        enqueue(.event(event))
+    }
+
+    /// Reader thread. Live output of an attach frame, still in its read buffer; it reaches the consumer as a
+    /// slice of that buffer. May block while the consumer is behind, as pushing an event does.
+    func push(_ span: TerminalOutputSpan) {
+        enqueue(.span(span))
+    }
+
+    private func enqueue(_ item: Item) {
         let (waiter, blocked) = state.withLock { state -> (OnceContinuation<TerminalChannelEvent?, OnceContinuationError>?, Bool) in
             guard !state.finished else { return (nil, false) }
             if let waiter = state.waiter.take() { return (waiter, false) }
-            state.items.append(event)
-            state.outputBytes += Self.outputSize(event)
+            state.items.append(item)
+            state.outputBytes += item.outputSize
             return (nil, state.parkReader(above: highWater))
         }
-        waiter?.resume(returning: event)
+        waiter?.resume(returning: item.event)
         guard blocked else { return }
         onReaderBlocked?()
         var parked = blocked
@@ -119,7 +184,7 @@ final class TerminalEventQueue: Sendable {
         let waiter = state.withLock { state -> OnceContinuation<TerminalChannelEvent?, OnceContinuationError>? in
             guard !state.finished else { return nil }
             if let waiter = state.waiter.take() { return waiter }
-            state.items.append(event)
+            state.items.append(.event(event))
             state.outputBytes += Self.outputSize(event)
             return nil
         }
@@ -134,7 +199,7 @@ final class TerminalEventQueue: Sendable {
             state.finished = true
             let release = state.releaseReader()
             if let waiter = state.waiter.take() { return (waiter, release) }
-            if let last { state.items.append(last) }
+            if let last { state.items.append(.event(last)) }
             return (nil, release)
         }
         if release { readerWake.signal() }
