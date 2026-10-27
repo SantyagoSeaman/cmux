@@ -226,11 +226,13 @@ impl Mux {
         };
         if fresh {
             let id = browser_id.as_str();
-            let write = |tx: &Transaction<'_>| insert_key(tx, key, id, &fingerprint);
+            let (owned_key, owned_id) = (key.to_string(), id.to_string());
+            let write: crate::workspace_registry::OwnedTransactionWrite =
+                Box::new(move |tx| insert_key(tx, &owned_key, &owned_id, &fingerprint));
             let mut registry =
                 self.workspace_registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.put_frontend_browser(id, &record, Some(&write))?;
-            self.reload_presentation(&registry)?;
+            registry.put_frontend_browser_owned(id, &record, write)?;
+            self.note_frontend_browser_put(&registry, id, record);
         }
         // A failed keyed creation keeps its rows, so a retry resumes it.
         create(&browser_id).map(KeyedFrontendBrowser::Created)

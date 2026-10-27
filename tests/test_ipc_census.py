@@ -532,6 +532,64 @@ class RecordCheckTests(Fixture):
         self.assertIn("raw 1:", err)
 
 
+class TransactionQueueTests(Fixture):
+    """Q13 (p05-ipc-135): keys name the function, and once a queue has a plan every site needs a
+    task (plans) or a reason (allowlist)."""
+
+    STORE = f"{CORE}/workspace_registry/store.rs"
+
+    def setUp(self):
+        super().setUp()
+        self.write(self.STORE, """
+            impl Registry {
+                fn put(&mut self) {
+                    let tx = db.unchecked_transaction()?;
+                }
+                fn migrate(connection: &Connection) {
+                    let tx = connection.unchecked_transaction()?;
+                }
+            }
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn shape() {
+                    let tx = connection.transaction().unwrap();
+                }
+            }
+        """)
+
+    def test_keys_name_the_function_and_mark_tests(self):
+        self.assertEqual(self.sites("Q13"), [
+            ("store.rs", 3, "put: unchecked_transaction"),
+            ("store.rs", 6, "migrate: unchecked_transaction"),
+            ("store.rs", 13, "test shape: transaction"),
+        ])
+
+    def test_a_planned_queue_needs_a_task_or_a_reason_for_every_site(self):
+        plan = {"queue": "Q13", "file": self.STORE, "key": "put: unchecked_transaction",
+                "task": "p05-ipc-401", "change": "through the writer"}
+        census = self.census({"plans": [plan]})
+        unplanned = [p for p in census_module.plan_problems(census) if "no task" in p]
+        self.assertEqual(len(unplanned), 2)
+        allow = [
+            {"queue": "Q13", "file": self.STORE, "key": "migrate: unchecked_transaction", "reason": "open time"},
+            {"queue": "Q13", "file": self.STORE, "key": "test shape: transaction", "reason": "test"},
+        ]
+        census = self.census({"plans": [plan], "allowlist": allow})
+        self.assertEqual(census_module.plan_problems(census), [])
+        self.assertEqual(census.site_json("Q13", census.result("Q13").hits[0])["task"], "p05-ipc-401")
+
+    def test_a_bad_or_stale_plan_is_refused(self):
+        plans = [
+            {"queue": "Q13", "file": self.STORE, "key": "put: unchecked_transaction", "task": "later", "change": " "},
+            {"queue": "Q13", "file": self.STORE, "key": "gone: unchecked_transaction", "task": "p05-ipc-401", "change": "x"},
+        ]
+        problems = census_module.plan_problems(self.census({"plans": plans}))
+        self.assertTrue(any("needs a task id" in p for p in problems), problems)
+        self.assertTrue(any("needs one change" in p for p in problems), problems)
+        self.assertTrue(any("matches no site" in p for p in problems), problems)
+
+
 class CallersTests(Fixture):
     def test_callers_lists_files_that_use_a_directorys_request_types(self):
         self.write(f"{APP}/CmuxNextDaemon/Requests/Tabs/NewTab.swift", """

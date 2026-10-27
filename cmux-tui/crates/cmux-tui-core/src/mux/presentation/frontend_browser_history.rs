@@ -7,6 +7,21 @@
 use super::*;
 
 impl Mux {
+    /// Install a frontend browser record that `registry` just put with no
+    /// extra rows (`put_frontend_browser`), without reading the store back:
+    /// the snapshot row is that record, and a fresh browser id is never
+    /// tombstoned. The caller holds the registry lock, as for
+    /// [`Self::reload_presentation`].
+    pub(crate) fn note_frontend_browser_put(
+        &self,
+        _registry: &WorkspaceRegistry,
+        browser_id: &str,
+        record: FrontendBrowserRecord,
+    ) {
+        let mut presentation = self.presentation.lock().recover_poison();
+        Arc::make_mut(&mut presentation).frontend_browsers.insert(browser_id.to_string(), record);
+    }
+
     /// Record the URL, title, or favicon a frontend-rendered browser
     /// reports. `favicon_url: Some(None)` clears the favicon.
     #[track_caller]
@@ -156,6 +171,42 @@ impl Mux {
 mod tests {
     use super::super::tests::PresentationTestSession;
     use super::*;
+
+    /// p05-ipc-135: a new frontend browser tab (plain and keyed) installs
+    /// its record without reading the store back; the in-memory snapshot
+    /// equals the store's.
+    #[test]
+    fn new_frontend_browser_tabs_keep_the_snapshot_equal_to_the_store() {
+        let session = PresentationTestSession::new("frontend-browser-put-snapshot");
+        let mux = session.open();
+        let terminal = mux.new_workspace(None, None).unwrap().id;
+        let pane = mux.with_state(|state| state.pane_of(terminal)).unwrap();
+        let record = |url: &str| FrontendBrowserRecord {
+            engine: "webkit".into(),
+            url: url.into(),
+            title: Some("Page".into()),
+            favicon_url: None,
+            profile_id: None,
+            owner: None,
+        };
+        mux.new_frontend_browser_tab(Some(pane), record("https://a.test/"), None).unwrap();
+        let keyed = mux
+            .new_frontend_browser_tab_keyed_as(
+                &Actor::Daemon,
+                Some(pane),
+                record("https://b.test/"),
+                None,
+                "snapshot-key",
+                FrontendTabPlacement::default(),
+            )
+            .unwrap();
+        assert!(!keyed.replayed);
+        let stored = mux.workspace_registry.lock().unwrap().presentation_snapshot().unwrap();
+        let live = mux.presentation_snapshot();
+        assert_eq!(live.frontend_browsers.len(), 2);
+        assert_eq!(live.frontend_browsers, stored.frontend_browsers);
+        assert!(mux.has_frontend_browser_key("snapshot-key").unwrap());
+    }
 
     #[test]
     fn cmux_next_frontend_browser_history_is_kept_out_of_the_tree() {

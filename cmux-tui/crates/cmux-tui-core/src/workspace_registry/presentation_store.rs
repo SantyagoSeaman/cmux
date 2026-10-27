@@ -42,7 +42,9 @@ pub(crate) use saved_tab_groups::{
 
 mod frontend_browser_history;
 mod frontend_browser_profiles;
+mod presentation_intent;
 pub(crate) use frontend_browser_profiles::clear_frontend_browser_profile;
+pub(crate) use presentation_intent::{PresentationCommitIntent, PresentationReceipt};
 mod icon;
 pub use icon::{
     IconAssetKind, is_sha256_hex, parse_icon_asset, validate_icon_value,
@@ -933,6 +935,17 @@ pub(crate) fn write_workspace_presentation(
 }
 
 impl WorkspaceRegistry {
+    /// Commit a presentation write: through the journal writer when it runs
+    /// (the request thread opens no SQLite transaction), else locally.
+    #[track_caller]
+    fn commit_presentation(
+        &mut self,
+        intent: PresentationCommitIntent,
+    ) -> anyhow::Result<PresentationReceipt> {
+        self.commit_registry_intent(super::RegistryIntent::Presentation(intent))?
+            .into_presentation()
+    }
+
     /// Create a group at `index` (default: last). Creating an id that
     /// already exists with the same name is an idempotent retry and returns
     /// the stored group with `false`.
@@ -950,38 +963,12 @@ impl WorkspaceRegistry {
         if let Some(color) = color {
             validate_presentation_color(color)?;
         }
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        if let Some(existing) = read_group(&tx, id)? {
-            anyhow::ensure!(
-                existing.name == name,
-                "workspace group {id} already exists with a different name"
-            );
-            return Ok((existing, false));
+        let intent =
+            PresentationCommitIntent::create_workspace_group(id, name, color, collapsed, index);
+        match self.commit_presentation(intent)? {
+            PresentationReceipt::GroupCreated(group, created) => Ok((group, created)),
+            other => Err(other.mismatch("create-workspace-group").into()),
         }
-        let mut order = read_groups(&tx)?.into_iter().map(|group| group.id).collect::<Vec<_>>();
-        let index = index.unwrap_or(order.len()).min(order.len());
-        tx.execute(
-            "INSERT INTO workspace_groups(group_id, name, color, position, collapsed)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![id, name, color, i64::try_from(order.len())?, i64::from(collapsed)],
-        )?;
-        order.insert(index, id.to_string());
-        write_group_order(&tx, &order)?;
-        let group = WorkspaceGroupRecord {
-            id: id.to_string(),
-            name: name.to_string(),
-            color: color.map(str::to_string),
-            collapsed,
-        };
-        append_presentation_record(
-            &tx,
-            "workspace.group.created",
-            vec![group_subject(id)],
-            &json!({"group": group, "index": index}),
-        )?;
-        tx.commit()?;
-        Ok((group, true))
     }
 
     /// Rename, recolor, or collapse a group. `color: Some(None)` clears it.
@@ -1000,68 +987,21 @@ impl WorkspaceRegistry {
         if let Some(Some(color)) = color {
             validate_presentation_color(color)?;
         }
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let mut group =
-            read_group(&tx, id)?.ok_or_else(|| anyhow::anyhow!("unknown workspace group {id}"))?;
-        if let Some(name) = name {
-            group.name = name.to_string();
+        let intent = PresentationCommitIntent::update_workspace_group(id, name, color, collapsed);
+        match self.commit_presentation(intent)? {
+            PresentationReceipt::GroupUpdated(group) => Ok(group),
+            other => Err(other.mismatch("update-workspace-group").into()),
         }
-        if let Some(color) = color {
-            group.color = color.map(str::to_string);
-        }
-        if let Some(collapsed) = collapsed {
-            group.collapsed = collapsed;
-        }
-        tx.execute(
-            "UPDATE workspace_groups SET name = ?2, color = ?3, collapsed = ?4 WHERE group_id = ?1",
-            params![id, group.name, group.color, i64::from(group.collapsed)],
-        )?;
-        append_presentation_record(
-            &tx,
-            "workspace.group.updated",
-            vec![group_subject(id)],
-            &json!({"group": group}),
-        )?;
-        tx.commit()?;
-        Ok(group)
     }
 
     /// Delete a group. Its workspaces stay in place and become ungrouped; their keys are returned.
     #[track_caller]
     pub fn delete_workspace_group(&mut self, id: &str) -> anyhow::Result<Vec<String>> {
         validate_workspace_group_id(id)?;
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        anyhow::ensure!(read_group(&tx, id)?.is_some(), "unknown workspace group {id}");
-        let members = {
-            let mut statement = tx.prepare(
-                "SELECT workspace_key FROM workspace_presentation WHERE group_id = ?1
-                 ORDER BY workspace_key",
-            )?;
-            statement
-                .query_map([id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        tx.execute("DELETE FROM workspace_groups WHERE group_id = ?1", [id])?;
-        tx.execute("UPDATE workspace_presentation SET group_id = NULL WHERE group_id = ?1", [id])?;
-        tx.execute(
-            "DELETE FROM workspace_presentation
-             WHERE group_id IS NULL AND color IS NULL AND icon IS NULL AND title IS NULL
-               AND pinned = 0 AND marked_unread = 0 AND description IS NULL
-               AND task_status IS NULL",
-            [],
-        )?;
-        let order = read_groups(&tx)?.into_iter().map(|group| group.id).collect::<Vec<_>>();
-        write_group_order(&tx, &order)?;
-        append_presentation_record(
-            &tx,
-            "workspace.group.deleted",
-            vec![group_subject(id)],
-            &json!({"group_id": id, "ungrouped_workspace_keys": members}),
-        )?;
-        tx.commit()?;
-        Ok(members)
+        match self.commit_presentation(PresentationCommitIntent::delete_workspace_group(id))? {
+            PresentationReceipt::GroupDeleted(members) => Ok(members),
+            other => Err(other.mismatch("delete-workspace-group").into()),
+        }
     }
 
     /// Move a group to a zero-based insertion index among groups, with the
@@ -1069,86 +1009,17 @@ impl WorkspaceRegistry {
     #[track_caller]
     pub fn move_workspace_group(&mut self, id: &str, index: usize) -> anyhow::Result<usize> {
         validate_workspace_group_id(id)?;
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let mut order = read_groups(&tx)?.into_iter().map(|group| group.id).collect::<Vec<_>>();
-        let old_index = order
-            .iter()
-            .position(|candidate| candidate == id)
-            .ok_or_else(|| anyhow::anyhow!("unknown workspace group {id}"))?;
-        let new_index = if index > old_index { index.saturating_sub(1) } else { index }
-            .min(order.len().saturating_sub(1));
-        if new_index != old_index {
-            let moved = order.remove(old_index);
-            order.insert(new_index, moved);
-            write_group_order(&tx, &order)?;
-            append_presentation_record(
-                &tx,
-                "workspace.group.moved",
-                vec![group_subject(id)],
-                &json!({"group_id": id, "index": new_index}),
-            )?;
+        match self.commit_presentation(PresentationCommitIntent::move_workspace_group(id, index))? {
+            PresentationReceipt::GroupMoved(index) => Ok(index),
+            other => Err(other.mismatch("move-workspace-group").into()),
         }
-        tx.commit()?;
-        Ok(new_index)
-    }
-
-    /// Store a tab placement's pinned flag, keyed by its public tab id.
-    /// Rows of closed tabs are pruned on the way. Returns whether the flag changed.
-    #[track_caller]
-    pub fn set_tab_pinned(&mut self, tab_id: &str, pinned: bool) -> anyhow::Result<bool> {
-        anyhow::ensure!(
-            tab_id.starts_with("tab_") && tab_id.len() <= 64,
-            "bad request: invalid tab id {tab_id}"
-        );
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let live = tx
-            .query_row(
-                "SELECT 1 FROM resource_tabs WHERE public_id = ?1 AND deleted_revision IS NULL",
-                [tab_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        anyhow::ensure!(live, "unknown tab {tab_id}");
-        let current = tx
-            .query_row("SELECT pinned FROM tab_presentation WHERE tab_id = ?1", [tab_id], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()?
-            .is_some_and(|value| value != 0);
-        tx.execute(
-            "DELETE FROM tab_presentation WHERE tab_id NOT IN (
-               SELECT public_id FROM resource_tabs WHERE deleted_revision IS NULL
-             )",
-            [],
-        )?;
-        if current == pinned {
-            tx.commit()?;
-            return Ok(false);
-        }
-        if pinned {
-            tx.execute(
-                "INSERT INTO tab_presentation(tab_id, pinned) VALUES(?1, 1)
-                 ON CONFLICT(tab_id) DO UPDATE SET pinned = 1",
-                [tab_id],
-            )?;
-        } else {
-            tx.execute("DELETE FROM tab_presentation WHERE tab_id = ?1", [tab_id])?;
-        }
-        append_presentation_record(
-            &tx,
-            "tab.presentation.updated",
-            vec![JournalSubject { kind: "tab".into(), id: tab_id.to_string() }],
-            &json!({"tab_id": tab_id, "pinned": pinned}),
-        )?;
-        tx.commit()?;
-        Ok(true)
     }
 
     /// Register a frontend-rendered browser before its tab commits, so the
-    /// daemon never bootstraps a CDP target for it. The browser id must be fresh.
+    /// daemon never bootstraps a CDP target for it. The browser id must be
+    /// fresh. Without `extra` it commits through the journal writer; a
+    /// borrowed `extra` cannot leave this thread, so it commits locally
+    /// ([`Self::put_frontend_browser_owned`] sends owned extra rows).
     #[track_caller]
     pub fn put_frontend_browser(
         &mut self,
@@ -1158,38 +1029,39 @@ impl WorkspaceRegistry {
     ) -> anyhow::Result<()> {
         validate_browser_public_id(browser_id)?;
         record.validate()?;
+        let intent = PresentationCommitIntent::put_frontend_browser(browser_id, record, None);
+        let Some(extra) = extra else {
+            return match self.commit_presentation(intent)? {
+                PresentationReceipt::FrontendBrowserPut => Ok(()),
+                other => Err(other.mismatch("put-frontend-browser").into()),
+            };
+        };
         let db = self.connection.get();
         let tx = db.unchecked_transaction()?;
-        let exists = tx
-            .query_row("SELECT 1 FROM resource_browsers WHERE public_id = ?1", [browser_id], |_| {
-                Ok(())
-            })
-            .optional()?
-            .is_some();
-        anyhow::ensure!(!exists, "browser {browser_id} already exists");
-        tx.execute(
-            "INSERT INTO frontend_browser_tabs(
-               browser_id, engine, url, title, favicon_url, profile_id, owner
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                browser_id,
-                record.engine,
-                record.url,
-                record.title,
-                record.favicon_url,
-                record.profile_id,
-                record.owner
-            ],
-        )?;
-        append_presentation_record(
-            &tx,
-            "browser.frontend.registered",
-            vec![browser_subject(browser_id)],
-            &json!({"browser_id": browser_id, "browser": record}),
-        )?;
-        extra.map_or(Ok(()), |extra| extra(&tx))?;
+        intent.apply_with(&tx, Some(extra))?;
         tx.commit()?;
+        drop(db);
+        self.connection.write_path_stats().request_effect_committed();
         Ok(())
+    }
+
+    /// [`Self::put_frontend_browser`] with owned extra rows, written in the
+    /// same writer SAVEPOINT as the record.
+    #[track_caller]
+    pub(crate) fn put_frontend_browser_owned(
+        &mut self,
+        browser_id: &str,
+        record: &FrontendBrowserRecord,
+        extra: super::OwnedTransactionWrite,
+    ) -> anyhow::Result<()> {
+        validate_browser_public_id(browser_id)?;
+        record.validate()?;
+        let intent =
+            PresentationCommitIntent::put_frontend_browser(browser_id, record, Some(extra));
+        match self.commit_presentation(intent)? {
+            PresentationReceipt::FrontendBrowserPut => Ok(()),
+            other => Err(other.mismatch("put-frontend-browser").into()),
+        }
     }
 
     /// Update a frontend browser's location, presentation, or browser
@@ -1206,43 +1078,17 @@ impl WorkspaceRegistry {
         profile_id: Option<Option<&str>>,
     ) -> anyhow::Result<(FrontendBrowserRecord, bool)> {
         validate_browser_public_id(browser_id)?;
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let before = read_frontend_browser(&tx, browser_id)?
-            .ok_or_else(|| anyhow::anyhow!("browser {browser_id} is not frontend-rendered"))?;
-        let mut record = before.clone();
-        if let Some(url) = url {
-            record.url = url.to_string();
+        let intent = PresentationCommitIntent::update_frontend_browser(
+            browser_id,
+            url,
+            title,
+            favicon_url,
+            profile_id,
+        );
+        match self.commit_presentation(intent)? {
+            PresentationReceipt::FrontendBrowserUpdated(record, changed) => Ok((record, changed)),
+            other => Err(other.mismatch("update-frontend-browser").into()),
         }
-        if let Some(title) = title {
-            record.title = Some(title.to_string());
-        }
-        if let Some(favicon_url) = favicon_url {
-            record.favicon_url = favicon_url.map(str::to_string);
-        }
-        if let Some(profile_id) = profile_id {
-            record.profile_id = profile_id
-                .map(|profile_id| resolve_browser_profile_id_in(&tx, profile_id))
-                .transpose()?;
-        }
-        record.validate()?;
-        if record == before {
-            tx.commit()?;
-            return Ok((record, false));
-        }
-        tx.execute(
-            "UPDATE frontend_browser_tabs SET url = ?2, title = ?3, favicon_url = ?4, profile_id = ?5
-             WHERE browser_id = ?1",
-            params![browser_id, record.url, record.title, record.favicon_url, record.profile_id],
-        )?;
-        append_presentation_record(
-            &tx,
-            "browser.frontend.updated",
-            vec![browser_subject(browser_id)],
-            &json!({"browser_id": browser_id, "browser": record}),
-        )?;
-        tx.commit()?;
-        Ok((record, true))
     }
 
     /// Notification ids acknowledged as read on the shared console. A
@@ -1255,36 +1101,5 @@ impl WorkspaceRegistry {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<HashSet<_>, _>>()?;
         Ok(ids)
-    }
-
-    /// Replace every tab group and membership (metadata-only changes that leave tab order alone).
-    #[track_caller]
-    pub fn replace_tab_groups(&mut self, state: &TabGroupState) -> anyhow::Result<()> {
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        write_tab_group_state(&tx, state)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Create or replace a saved tab group, keeping its bar position and
-    /// room (new records go last).
-    #[track_caller]
-    pub fn put_saved_tab_group(&mut self, record: &SavedTabGroupRecord) -> anyhow::Result<()> {
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        put_saved_tab_group_in(&tx, record)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Delete a saved tab group. Returns whether it existed.
-    #[track_caller]
-    pub fn delete_saved_tab_group(&mut self, saved_id: &str) -> anyhow::Result<bool> {
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let removed = delete_saved_tab_group_in(&tx, saved_id)?;
-        tx.commit()?;
-        Ok(removed)
     }
 }

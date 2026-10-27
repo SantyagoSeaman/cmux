@@ -874,7 +874,7 @@ impl Mux {
         {
             let mut registry = self.workspace_registry.lock().recover_poison();
             registry.put_frontend_browser(browser_id.as_str(), &record, None)?;
-            self.reload_presentation(&registry)?;
+            self.note_frontend_browser_put(&registry, browser_id.as_str(), record.clone());
         }
         let fields = frontend_browser_fields(&browser_id, placement);
         match self.new_browser_tab_with_fields_as(actor, record.url.clone(), pane, size, fields) {

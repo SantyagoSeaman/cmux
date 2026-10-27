@@ -32,6 +32,9 @@ Refinements over the raw queries (each is stated on its queue):
       cannot follow is `<unresolved>`, never dropped.
   Q12 a decoder case that delegates to a name set (`case _ where T.eventNames.contains(name)`)
       decodes that set's literals; a set the census cannot read is a site.
+  Q13 stays its raw query; a site's key names its function (`FUNCTION: TOKEN`, with `test `
+      in front inside a test item), so ipc-targets.json can give one function a reason
+      (`allowlist`) or a task (`plans`, p05-ipc-135).
   Q17 one item per lock definition (rank and lock name), not per mention.
   Q18 `ipc5_ops` in ipc-targets.json names the IPC-5 ops; sites without `op=` stay, and an empty
       list keeps every sqlite site (`--check` refuses it once Q9 has data).
@@ -49,7 +52,8 @@ Usage:
   ipc-census.py --callers DIR         call-site files of the Swift request types declared in DIR
   ipc-census.py --record              write the counts to ipc-targets.json
   ipc-census.py --check               fail on a queue above its recorded count, a bad allowlist
-                                      entry or a bad ipc5_ops list
+                                      or plans entry, a site of a planned queue with neither a
+                                      task nor a reason, or a bad ipc5_ops list
 
 Stdlib only; reads tracked files of the working tree (`git ls-files`), like `git grep`.
 """
@@ -576,6 +580,24 @@ class Census:
             if entry.get("queue") == queue and entry.get("file") == hit.file and entry.get("key", hit.key) == hit.key:
                 return True
         return False
+
+    # Plans: entries `{queue, file, key?, task, change}`; a key-less entry covers the file. Once
+    # a queue has one, each of its sites outside the allowlist needs a plan (`--check`).
+    def plans(self) -> list[dict]:
+        return list(self.targets.get("plans", []))
+
+    def plan_for(self, queue: str, hit: Hit) -> dict | None:
+        for entry in self.plans():
+            if entry.get("queue") == queue and entry.get("file") == hit.file and entry.get("key", hit.key) == hit.key:
+                return entry
+        return None
+
+    def site_json(self, queue: str, hit: Hit) -> dict:
+        item = hit.as_json()
+        plan = self.plan_for(queue, hit)
+        if plan is not None:
+            item["task"] = plan.get("task")
+        return item
 
     def result(self, queue: str) -> Result:
         if queue not in self._results:
@@ -1204,8 +1226,14 @@ class Census:
     def q13(self) -> Result:
         pattern = r"unchecked_transaction\(|\.transaction\(\)"
 
+        # `FUNCTION: TOKEN` (`test FUNCTION: TOKEN` inside a test item), so an allowlist reason or
+        # a plan's task can name one function of a store file.
         def key(path, number, line):
-            return re.search(pattern, line).group(0).lstrip(".").rstrip("()")
+            token = re.search(pattern, line).group(0).lstrip(".").rstrip("()")
+            blanked = self.repo.blanked(path)
+            inside = enclosing_function(rust_functions(blanked), line_offset(blanked, number))
+            scope = "test " if self.repo.in_rust_test(path, number) else ""
+            return f"{scope}{inside[0] if inside else '<module>'}: {token}"
 
         return self.exact("Q13", "request-side SQLite transactions", pattern, (CORE, *RUST_NOT_TESTS), key, group=lambda path: path)
 
@@ -1444,6 +1472,39 @@ def breakdown_line(explained: dict) -> str:
     return " ".join(parts) + f" = found {explained['found']}"
 
 
+TASK_ID = re.compile(r"p\d\d-[a-z]+(?:-[a-z]+)*-\d{3}")
+
+
+def plan_problems(census: Census) -> list[str]:
+    """A plan needs a task id and a change and must match a site; once a queue has a plan,
+    every site of it outside the allowlist needs one (a task, or an allowlist reason)."""
+    problems = []
+    planned = []
+    for index, entry in enumerate(census.plans()):
+        queue = entry.get("queue")
+        label = f"plans[{index}] {queue} {entry.get('file')} {entry.get('key', '')}".rstrip()
+        if queue not in QUEUE_IDS:
+            problems.append(f"{label}: unknown queue")
+            continue
+        planned.append(queue)
+        if not isinstance(entry.get("task"), str) or not TASK_ID.fullmatch(entry["task"]):
+            problems.append(f"{label}: needs a task id like p05-ipc-401")
+        if not isinstance(entry.get("change"), str) or not entry["change"].strip():
+            problems.append(f"{label}: needs one change")
+        if not any(
+            hit.file == entry.get("file") and entry.get("key", hit.key) == hit.key
+            for hit in census.result(queue).hits
+        ):
+            problems.append(f"{label}: matches no site outside the allowlist (stale; remove it)")
+    for queue in sorted(set(planned)):
+        problems += [
+            f"{queue} {hit.file}:{hit.line} {hit.key}: no task (plans) and no reason (allowlist)"
+            for hit in census.result(queue).hits
+            if census.plan_for(queue, hit) is None
+        ]
+    return problems
+
+
 def check(census: Census) -> list[str]:
     problems = []
     for index, entry in enumerate(census.allowlist()):
@@ -1459,6 +1520,7 @@ def check(census: Census) -> list[str]:
         ]
         if not matches:
             problems.append(f"{label}: matches no site (stale; remove it)")
+    problems += plan_problems(census)
     problems += census.ipc5_op_problems()
     recorded = census.targets.get("base", {}).get("queues", {})
     for queue in QUEUE_IDS:
@@ -1506,7 +1568,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(explained, indent=1))
             return 0
         if args.queue:
-            shown = {queue: [hit.as_json() for hit in census.result(queue).hits] for queue in args.queue}
+            shown = {queue: [census.site_json(queue, hit) for hit in census.result(queue).hits] for queue in args.queue}
             for queue in args.queue:
                 result = census.result(queue)
                 raw = f"; raw {result.raw_count}: {result.raw}" if result.raw is not None else ""

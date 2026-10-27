@@ -43,6 +43,7 @@ pub(crate) enum RegistryIntent {
     Effect(EffectCommitIntent),
     Terminal(TerminalCommitIntent),
     Workspace(WorkspaceCommitIntent),
+    Presentation(presentation_store::PresentationCommitIntent),
 }
 
 /// The writer's (or a local transaction's) answer for one intent.
@@ -51,6 +52,7 @@ pub(crate) enum RegistryReceipt {
     Effect(EffectCommitReceipt),
     Terminal(TerminalRegistryCommit),
     Workspace(WorkspaceCommitReceipt),
+    Presentation(presentation_store::PresentationReceipt),
 }
 
 /// Where requests send registry intents: the journal writer, installed by
@@ -86,6 +88,7 @@ impl RegistryIntent {
             Self::Effect(intent) => intent.estimated_bytes(),
             Self::Terminal(intent) => intent.estimated_bytes(),
             Self::Workspace(intent) => intent.estimated_bytes(),
+            Self::Presentation(intent) => intent.estimated_bytes(),
         }
     }
 
@@ -95,6 +98,7 @@ impl RegistryIntent {
             Self::Effect(intent) => RegistryReceipt::Effect(intent.apply(transaction)?),
             Self::Terminal(intent) => RegistryReceipt::Terminal(intent.apply(transaction)?),
             Self::Workspace(intent) => RegistryReceipt::Workspace(intent.apply(transaction, None)?),
+            Self::Presentation(intent) => RegistryReceipt::Presentation(intent.apply(transaction)?),
         })
     }
 
@@ -132,7 +136,7 @@ impl RegistryReceipt {
     pub(crate) fn resource_revision(&self) -> Option<u64> {
         match self {
             Self::Effect(receipt) => Some(receipt.revision()),
-            Self::Terminal(_) => None,
+            Self::Terminal(_) | Self::Presentation(_) => None,
             Self::Workspace(receipt) => receipt.resource_revision,
         }
     }
@@ -155,6 +159,15 @@ impl RegistryReceipt {
         match self {
             Self::Workspace(receipt) => Ok(receipt),
             _ => anyhow::bail!("registry receipt is not a workspace registry commit"),
+        }
+    }
+
+    pub(crate) fn into_presentation(
+        self,
+    ) -> anyhow::Result<presentation_store::PresentationReceipt> {
+        match self {
+            Self::Presentation(receipt) => Ok(receipt),
+            _ => anyhow::bail!("registry receipt is not a presentation commit"),
         }
     }
 }
@@ -299,10 +312,15 @@ impl WorkspaceRegistry {
         if self.connection.is_held_by_current_thread() {
             return self.commit_registry_intent_locally(&intent);
         }
+        // A presentation write appends no resource record, so its rollback
+        // leaves the public topology fold exact.
+        let writes_topology = !matches!(intent, RegistryIntent::Presentation(_));
         match sink.send(intent, site) {
             EffectSend::Sent(Ok(receipt)) => Ok(receipt),
             EffectSend::Sent(Err(error)) => {
-                self.abandon_effect_commit();
+                if writes_topology {
+                    self.abandon_effect_commit();
+                }
                 Err(error)
             }
             EffectSend::Indeterminate(error, pending) => {

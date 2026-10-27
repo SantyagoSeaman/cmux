@@ -40,9 +40,35 @@ fn validate_frontend_browser_history(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Store (`Some`) or clear (`None`) a frontend browser's session history
+/// inside a registry transaction (the presentation intent's body).
+pub(super) fn set_frontend_browser_history_in(
+    tx: &Transaction<'_>,
+    browser_id: &str,
+    history: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        read_frontend_browser(tx, browser_id)?.is_some(),
+        "browser {browser_id} is not frontend-rendered"
+    );
+    match history {
+        Some(history) => {
+            tx.execute(
+                "INSERT INTO frontend_browser_history(browser_id, history) VALUES(?1, ?2)
+                 ON CONFLICT(browser_id) DO UPDATE SET history = excluded.history",
+                params![browser_id, history],
+            )?;
+        }
+        None => {
+            tx.execute("DELETE FROM frontend_browser_history WHERE browser_id = ?1", [browser_id])?;
+        }
+    }
+    Ok(())
+}
+
 impl WorkspaceRegistry {
     /// Store (`Some`) or clear (`None`) the session history of a
-    /// frontend-rendered browser.
+    /// frontend-rendered browser, through the journal writer.
     #[track_caller]
     pub fn set_frontend_browser_history(
         &mut self,
@@ -53,29 +79,11 @@ impl WorkspaceRegistry {
         if let Some(history) = history {
             validate_frontend_browser_history(history)?;
         }
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        anyhow::ensure!(
-            read_frontend_browser(&tx, browser_id)?.is_some(),
-            "browser {browser_id} is not frontend-rendered"
-        );
-        match history {
-            Some(history) => {
-                tx.execute(
-                    "INSERT INTO frontend_browser_history(browser_id, history) VALUES(?1, ?2)
-                     ON CONFLICT(browser_id) DO UPDATE SET history = excluded.history",
-                    params![browser_id, history],
-                )?;
-            }
-            None => {
-                tx.execute(
-                    "DELETE FROM frontend_browser_history WHERE browser_id = ?1",
-                    [browser_id],
-                )?;
-            }
+        let intent = PresentationCommitIntent::set_frontend_browser_history(browser_id, history);
+        match self.commit_presentation(intent)? {
+            PresentationReceipt::FrontendBrowserHistorySet => Ok(()),
+            other => Err(other.mismatch("set-frontend-browser-history").into()),
         }
-        tx.commit()?;
-        Ok(())
     }
 
     /// The session history last stored for a frontend browser, if any.

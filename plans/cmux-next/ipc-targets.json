@@ -1,5 +1,5 @@
 {
-  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there.",
+  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Plans entries are {queue, file, key (optional), task, change}: once a queue has one, --check refuses a site of it with neither a plan (a task id) nor an allowlist reason (Q13 since p05-ipc-135; its keys are FUNCTION: TOKEN). Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there.",
   "allowlist": [
     {
       "queue": "Q4",
@@ -74,6 +74,138 @@
       "file": "Packages/macOS/CmuxNext/Sources/CmuxNextDaemon/Connection/ResourceOperationClient.swift",
       "key": "resourceRequest",
       "reason": "The typed funnel itself: it sends a generated ResourceRequestLine through DaemonConnection's one resource request path (p05-ipc-045)."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/mux/resource_content/projection_crosscheck.rs",
+      "key": "projection_difference: unchecked_transaction",
+      "reason": "Read-only diagnostic cross-check, only when crosscheck_enabled() (off by default); it never commits."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/kept_tab_store.rs",
+      "key": "test kept_tab_schema_adds_the_title_column_to_an_older_table: transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/sidebar_doc_store.rs",
+      "key": "migrate_at_open: unchecked_transaction",
+      "reason": "Open-time schema migration on the registry's own connection before any request runs; not a request path."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/store.rs",
+      "key": "migrate_saved_tab_groups_to_personal: unchecked_transaction",
+      "reason": "Open-time schema migration on the registry's own connection before any request runs; not a request path."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/tab_state_store.rs",
+      "key": "test tab_marked_unread_column_is_added_and_an_empty_row_is_dropped: transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/tab_state_store.rs",
+      "key": "test tab_attention_column_is_added_and_cleared_by_clear_or_close: transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/tab_state_store.rs",
+      "key": "test a_navigation_clears_only_a_mark_set_on_another_page: transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/window_record_store.rs",
+      "key": "migrate_window_projection: unchecked_transaction",
+      "reason": "Open-time schema migration on the registry's own connection before any request runs; not a request path."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs",
+      "key": "initialize: unchecked_transaction",
+      "reason": "Open-time schema migration on the registry's own connection before any request runs; not a request path."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/agent_cli_intents.rs",
+      "key": "test cmux_next_agent_cli_intent_ledger_without_recorded_at_gains_it_and_prunes_old_rows: unchecked_transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/feed_local_store.rs",
+      "key": "sweep_closed_feed_local_items: unchecked_transaction",
+      "reason": "Runs once from open_feed_local while the mux is constructed (mux/construct.rs), before the socket serves requests."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/feed_local_store.rs",
+      "key": "migrate_feed_local_from_ledger: unchecked_transaction",
+      "reason": "Runs once from open_feed_local while the mux is constructed (mux/construct.rs), before the socket serves requests."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "test legacy_built_in_agent_manifest_is_migrated: unchecked_transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "test legacy_agent_manifest_with_plugin_exit_is_migrated: unchecked_transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "test unknown_built_in_agent_manifest_still_fails_closed: unchecked_transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions/writer_batch.rs",
+      "key": "append_journal_ingress_events_with_current_timeout: unchecked_transaction",
+      "reason": "The journal writer's own batch transaction: this is the writer, the target every request-side write moves to."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/mutation_ledger_retention.rs",
+      "key": "quarantine_mutation_ledger: unchecked_transaction",
+      "reason": "Ledger maintenance on the mux maintenance pass (mux/ledger_maintenance.rs), not a request; it pauses while journal maintenance is paused."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_store.rs",
+      "key": "migrate_personal_v1: unchecked_transaction",
+      "reason": "Open-time schema migration on the registry's own connection before any request runs; not a request path."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/presentation_store/workspace_notes.rs",
+      "key": "test notes_columns_are_added_once: transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/registry_intent.rs",
+      "key": "commit_registry_intent_locally: unchecked_transaction",
+      "reason": "The counted fallback when the writer does not run or the caller holds the connection (server-stats write_path.request_effect_commits); p05-ipc-120 removes or allowlists it with the admit path."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/screen_store.rs",
+      "key": "test state_resource_screen_rows_move_into_screen_storage_once: transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/session_journal/salvage.rs",
+      "key": "test append_probe: unchecked_transaction",
+      "reason": "Inside a #[cfg(test)] item: a test builds its own fixture, no request runs it."
     }
   ],
   "ipc5_ops": [
@@ -483,5 +615,574 @@
         "source": "not recorded (p05-ipc-003 record run)"
       }
     }
-  }
+  },
+  "plans": [
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_links.rs",
+      "key": "resolve_link: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread (conversations.sqlite3 is not the registry); requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_search.rs",
+      "key": "search: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread; requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_store.rs",
+      "key": "list: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread; requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_store.rs",
+      "key": "snapshot: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread; requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_store.rs",
+      "key": "history: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread; requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_threads.rs",
+      "key": "thread: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread; requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/conversation_threads.rs",
+      "key": "thread_summaries: transaction",
+      "task": "p05-ipc-401",
+      "change": "the conversation owner's reads and writes move to its own sequenced store thread; requests post and get a receipt"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/command_history_store.rs",
+      "key": "append_terminal_commands: unchecked_transaction",
+      "task": "p05-ipc-402",
+      "change": "command history appends and deletes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/command_history_store.rs",
+      "key": "delete_terminal_commands: unchecked_transaction",
+      "task": "p05-ipc-402",
+      "change": "command history appends and deletes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/conversation_tabs_store.rs",
+      "key": "delete_frontend_browser: unchecked_transaction",
+      "task": "p05-ipc-403",
+      "change": "frontend browser deletes (closed browser rows) writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/remote_terminal_tabs_store.rs",
+      "key": "update_remote_terminal: unchecked_transaction",
+      "task": "p05-ipc-403",
+      "change": "remote terminal tab updates writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/state/store.rs",
+      "key": "commit_state_mutation: unchecked_transaction",
+      "task": "p05-ipc-404",
+      "change": "commit_state_mutation writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs",
+      "key": "close_terminal: unchecked_transaction",
+      "task": "p05-ipc-405",
+      "change": "close_terminal, close_terminals_atomically and put_frontend_projection writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs",
+      "key": "close_terminals_atomically: unchecked_transaction",
+      "task": "p05-ipc-405",
+      "change": "close_terminal, close_terminals_atomically and put_frontend_projection writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs",
+      "key": "put_frontend_projection: unchecked_transaction",
+      "task": "p05-ipc-405",
+      "change": "close_terminal, close_terminals_atomically and put_frontend_projection writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/agent_cli_intents.rs",
+      "key": "record_agent_cli_intents_at: unchecked_transaction",
+      "task": "p05-ipc-406",
+      "change": "agent CLI intent record, settle and receipt writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/agent_cli_intents.rs",
+      "key": "settle_agent_cli_intents: unchecked_transaction",
+      "task": "p05-ipc-406",
+      "change": "agent CLI intent record, settle and receipt writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/agent_cli_intents.rs",
+      "key": "attach_agent_cli_intent_receipt: unchecked_transaction",
+      "task": "p05-ipc-406",
+      "change": "agent CLI intent record, settle and receipt writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+      "key": "prepare_resource_creation_for: unchecked_transaction",
+      "task": "p05-ipc-407",
+      "change": "resource effect prepare, executing and close writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135); prepare reads move to the admitted overlay (p05-ipc-133)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+      "key": "commit_resource_creation_patch: unchecked_transaction",
+      "task": "p05-ipc-407",
+      "change": "resource effect prepare, executing and close writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135); prepare reads move to the admitted overlay (p05-ipc-133)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+      "key": "prepare_resource_effect_in: unchecked_transaction",
+      "task": "p05-ipc-407",
+      "change": "resource effect prepare, executing and close writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135); prepare reads move to the admitted overlay (p05-ipc-133)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+      "key": "mark_resource_effect_executing: unchecked_transaction",
+      "task": "p05-ipc-407",
+      "change": "resource effect prepare, executing and close writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135); prepare reads move to the admitted overlay (p05-ipc-133)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+      "key": "commit_resource_close_patch: unchecked_transaction",
+      "task": "p05-ipc-407",
+      "change": "resource effect prepare, executing and close writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135); prepare reads move to the admitted overlay (p05-ipc-133)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/effect_store.rs",
+      "key": "mark_resource_effect_indeterminate: unchecked_transaction",
+      "task": "p05-ipc-407",
+      "change": "resource effect prepare, executing and close writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135); prepare reads move to the admitted overlay (p05-ipc-133)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/feed_local_store.rs",
+      "key": "commit_feed_local_handoff: unchecked_transaction",
+      "task": "p05-ipc-408",
+      "change": "feed handoff and notification acks writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/feed_local_store.rs",
+      "key": "ack_notifications_durable: unchecked_transaction",
+      "task": "p05-ipc-408",
+      "change": "feed handoff and notification acks writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/idle_policy_store.rs",
+      "key": "set_terminal_idle_policy: unchecked_transaction",
+      "task": "p05-ipc-409",
+      "change": "terminal idle policy writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "put_journal_producer: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "append_journal_ingress: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "put_journal_hook: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "schedule_journal_hook_deliveries: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "start_journal_hook_deliveries: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "finish_journal_hook_deliveries: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "create_journal_checkpoint: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "begin_journal_segment_seal: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions.rs",
+      "key": "commit_journal_segment_seal: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "journal producer, hook, delivery, checkpoint and segment-seal writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/journal_extensions/exit_snapshot.rs",
+      "key": "put_terminal_exit_snapshot: unchecked_transaction",
+      "task": "p05-ipc-410",
+      "change": "terminal exit snapshot writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_bookmarks/ops.rs",
+      "key": "apply_bookmark_op: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_browser_profiles.rs",
+      "key": "create_browser_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_browser_profiles.rs",
+      "key": "update_browser_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_browser_profiles.rs",
+      "key": "move_browser_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_browser_profiles.rs",
+      "key": "delete_browser_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "create_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "update_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "move_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "delete_profile: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "set_profile_follows: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "pin_workspace: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "unpin_workspace: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "put_session: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "forget_session: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "create_personal_group: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "update_personal_group: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "move_personal_group: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "set_personal_workspace: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations.rs",
+      "key": "import_session_organization: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_mutations/mixed_order.rs",
+      "key": "set_personal_group_top: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_session_icon.rs",
+      "key": "set_session_icon: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_store/blobs.rs",
+      "key": "put_blob: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/personal_terminals.rs",
+      "key": "set_personal_terminal: unchecked_transaction",
+      "task": "p05-ipc-411",
+      "change": "personal store writes writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/presentation_store.rs",
+      "key": "put_frontend_browser: unchecked_transaction",
+      "task": "p05-ipc-412",
+      "change": "put_frontend_browser with a borrowed extra: its callers (state/app_workspaces.rs, state/conversation_tabs.rs, state/remote_terminal_tabs.rs) pass owned rows to put_frontend_browser_owned, as frontend_browser_keys.rs does, and the borrowed form is deleted"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "advance_agent_hook_apply_cursor: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "commit_agent_projection_with_hook_state: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "commit_notification_ack: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "commit_notification_clear: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "prune_notification_reads: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "commit_resource_patch_with_workspace_ledger: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
+      "key": "commit_resource_projection: unchecked_transaction",
+      "task": "p05-ipc-413",
+      "change": "agent hook cursor and projection, notification ack/clear/prune and resource patch/projection commits writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/screen_store.rs",
+      "key": "replace_screen_state: unchecked_transaction",
+      "task": "p05-ipc-414",
+      "change": "screen state and saved screen groups writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/screen_store.rs",
+      "key": "put_saved_screen_group: unchecked_transaction",
+      "task": "p05-ipc-414",
+      "change": "screen state and saved screen groups writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/screen_store.rs",
+      "key": "delete_saved_screen_group: unchecked_transaction",
+      "task": "p05-ipc-414",
+      "change": "screen state and saved screen groups writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_archive_store.rs",
+      "key": "put_terminal_archives: unchecked_transaction",
+      "task": "p05-ipc-415",
+      "change": "terminal archives writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_commit_intent.rs",
+      "key": "commit_terminals_together: unchecked_transaction",
+      "task": "p05-ipc-122",
+      "change": "commit_terminals_together sends its intents as one writer batch (terminal_lifecycle_commit.rs, Q3 task 122)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_exit_store.rs",
+      "key": "commit_terminal_exit_receipt: unchecked_transaction",
+      "task": "p05-ipc-415",
+      "change": "terminal exit receipts writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_keep_store.rs",
+      "key": "set_terminal_keep: unchecked_transaction",
+      "task": "p05-ipc-409",
+      "change": "terminal keep writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_resource_close_store.rs",
+      "key": "close_terminal_with_resource_patch: unchecked_transaction",
+      "task": "p05-ipc-415",
+      "change": "terminal close with resource patch writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_respawn_store.rs",
+      "key": "begin_terminal_respawn: unchecked_transaction",
+      "task": "p05-ipc-415",
+      "change": "terminal respawn begin and commit writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_respawn_store.rs",
+      "key": "commit_terminal_respawned: unchecked_transaction",
+      "task": "p05-ipc-415",
+      "change": "terminal respawn begin and commit writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/terminal_resume_store.rs",
+      "key": "set_terminal_resume_command: unchecked_transaction",
+      "task": "p05-ipc-409",
+      "change": "terminal resume command writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/topology_close_store.rs",
+      "key": "commit_topology_close: unchecked_transaction",
+      "task": "p05-ipc-415",
+      "change": "topology close writes become RegistryIntents committed by the journal writer (registry_intent), as presentation_store does (p05-ipc-135)"
+    },
+    {
+      "queue": "Q13",
+      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/workspace_commit_intent.rs",
+      "key": "commit_workspace_registry: unchecked_transaction",
+      "task": "p05-ipc-416",
+      "change": "commit_workspace_registry with a borrowed extra: its callers pass owned rows (WorkspaceCommitIntent::with_extra_rows) and the local branch is deleted"
+    }
+  ]
 }
