@@ -235,6 +235,13 @@ impl Mux {
         self.presentation.lock().recover_poison().clone()
     }
 
+    /// Install the presentation an admitted registry commit leaves
+    /// (`AdmittedWorkspaceCommit::presentation`). The caller holds the
+    /// registry lock, so no other commit can interleave.
+    pub(crate) fn install_presentation(&self, snapshot: PresentationSnapshot) {
+        *self.presentation.lock().unwrap() = Arc::new(snapshot);
+    }
+
     /// Reload the presentation snapshot from the registry. The caller holds
     /// the registry lock, so no other commit can interleave.
     #[track_caller]
@@ -619,12 +626,12 @@ impl Mux {
                 group: Some(group.clone()),
                 ..WorkspacePresentationUpdate::default()
             };
-            let commit = {
+            let intent = {
                 let desired_active_workspace = state
                     .workspaces
                     .get(state.active_workspace)
                     .map(|workspace| &workspace.public_id);
-                registry.commit_workspace_presentation(
+                registry.prepare_workspace_presentation_commit(
                     mutation,
                     &fingerprint,
                     expected_generation,
@@ -643,8 +650,15 @@ impl Mux {
                     }),
                 )?
             };
-            let resource_revision = registry.snapshot()?.resource_revision;
-            self.reload_presentation(&registry)?;
+            // Admitted (F10): the receipt, resource revision and presentation
+            // are decided at prepare; the pin goes once the intent is on the
+            // writer's lane, and nothing below reads the connection.
+            let admitted = registry.admit_workspace_commit(intent, true, || state.unpin())?;
+            let commit = admitted.commit;
+            let resource_revision = admitted.resource_revision.unwrap_or(state.resource_revision);
+            if let Some(presentation) = admitted.presentation {
+                self.install_presentation(presentation);
+            }
             let active_id = state.workspaces.get(state.active_workspace).map(|ws| ws.id);
             state.move_workspace(old_idx, new_idx);
             state.active_workspace = active_id
@@ -753,12 +767,12 @@ impl Mux {
             }
             let changed = before != after;
             let desired = self.registry_projection(&state);
-            let commit = {
+            let intent = {
                 let desired_active_workspace = state
                     .workspaces
                     .get(state.active_workspace)
                     .map(|workspace| &workspace.public_id);
-                registry.commit_workspace_presentation(
+                registry.prepare_workspace_presentation_commit(
                     mutation,
                     &fingerprint,
                     expected_generation,
@@ -776,8 +790,15 @@ impl Mux {
                     }),
                 )?
             };
-            let resource_revision = registry.snapshot()?.resource_revision;
-            self.reload_presentation(&registry)?;
+            // Admitted (F10): the receipt, resource revision and presentation
+            // are decided at prepare; the pin goes once the intent is on the
+            // writer's lane, and nothing below reads the connection.
+            let admitted = registry.admit_workspace_commit(intent, true, || state.unpin())?;
+            let commit = admitted.commit;
+            let resource_revision = admitted.resource_revision.unwrap_or(state.resource_revision);
+            if let Some(presentation) = admitted.presentation {
+                self.install_presentation(presentation);
+            }
             state.workspace_revision = commit.revision;
             state.resource_revision = resource_revision;
             let decorations = self.tree_decorations_in_state(&state);

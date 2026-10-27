@@ -190,40 +190,31 @@ impl Mux {
                 "key": key,
                 "index": index,
             });
-            let commit = if project_resource {
-                registry.commit_with_active_workspace(
-                    mutation,
-                    &fingerprint,
-                    expected_generation,
-                    expected_revision,
-                    "workspace-added",
-                    &key,
-                    &desired,
-                    Some(&active_public_id),
-                    &result,
-                )?
+            // The commit is admitted (F10): its receipt, resource revision
+            // and presentation are decided at prepare, and the connection pin
+            // goes only once the intent is on the writer's lane. Nothing
+            // below reads the registry connection.
+            let intent = registry.prepare_workspace_commit(
+                mutation,
+                &fingerprint,
+                expected_generation,
+                expected_revision,
+                "workspace-added",
+                &key,
+                &desired,
+                Some(&active_public_id),
+                &result,
+                project_resource,
+            )?;
+            let intent = if !project_resource && mark.writes() {
+                let (marked, marked_key) = (workspace_public_id.as_str().to_string(), key.clone());
+                intent.with_extra_rows(Box::new(move |tx| mark.write(tx, &marked, &marked_key)))
             } else {
-                let marked = workspace_public_id.as_str().to_string();
-                let marked_key = key.clone();
-                let writes = mark.writes();
-                let write_mark = move |tx: &crate::workspace_registry::RegistryTransaction<'_>| {
-                    mark.write(tx, &marked, &marked_key)
-                };
-                registry.commit_for_resource_effect_with(
-                    mutation,
-                    &fingerprint,
-                    expected_generation,
-                    expected_revision,
-                    "workspace-added",
-                    &key,
-                    &desired,
-                    Some(&active_public_id),
-                    &result,
-                    writes.then_some(
-                        &write_mark as crate::workspace_registry::RegistryTransactionWrite<'_>,
-                    ),
-                )?
+                intent
             };
+            let admitted =
+                registry.admit_workspace_commit(intent, reloads_presentation, || state.unpin())?;
+            let commit = admitted.commit;
             let committed_workspace = commit.result["workspace"]
                 .as_u64()
                 .ok_or_else(|| anyhow::anyhow!("stored create result is missing workspace"))?;
@@ -244,12 +235,9 @@ impl Mux {
                     replayed: true,
                 });
             }
-            let resource_revision = project_resource
-                .then(|| registry.snapshot())
-                .transpose()?
-                .map(|snapshot| snapshot.resource_revision);
-            if reloads_presentation {
-                self.reload_presentation(&registry)?;
+            let resource_revision = admitted.resource_revision;
+            if let Some(presentation) = admitted.presentation {
+                self.install_presentation(presentation);
                 notifications.presentation = self.presentation_snapshot();
             }
             state.push_workspace(Workspace {

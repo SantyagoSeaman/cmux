@@ -8,6 +8,11 @@ impl WorkspaceRegistry {
     /// The outer effect must subsequently commit a full resource projection.
     /// This stage deliberately leaves the public revision and event stream
     /// untouched so one logical creation produces one public batch.
+    /// Production stages (`Mux` workspace creation and close) prepare with
+    /// `project_resource` false and admit the intent themselves, so they can
+    /// release their connection pin (`workspace_admit`); `extra` rows (state
+    /// marks) ride the intent.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub(crate) fn commit_for_resource_effect(
@@ -21,41 +26,9 @@ impl WorkspaceRegistry {
         workspaces: &[RegistryWorkspace],
         active_workspace: Option<&WorkspacePublicId>,
         result: &Value,
+        extra: Option<OwnedTransactionWrite>,
     ) -> anyhow::Result<RegistryCommit> {
-        self.commit_for_resource_effect_with(
-            mutation,
-            fingerprint,
-            expected_generation,
-            expected_revision,
-            event_kind,
-            workspace_key,
-            workspaces,
-            active_workspace,
-            result,
-            None,
-        )
-    }
-
-    /// [`Self::commit_for_resource_effect`] that also writes `extra` (state
-    /// rows such as the ephemeral flag) in the staging transaction, so the
-    /// resource projection that later publishes the workspace already sees
-    /// them.
-    #[allow(clippy::too_many_arguments)]
-    #[track_caller]
-    pub(crate) fn commit_for_resource_effect_with(
-        &mut self,
-        mutation: &WorkspaceMutation,
-        fingerprint: &Value,
-        expected_generation: Option<&str>,
-        expected_revision: Option<u64>,
-        event_kind: &str,
-        workspace_key: &str,
-        workspaces: &[RegistryWorkspace],
-        active_workspace: Option<&WorkspacePublicId>,
-        result: &Value,
-        extra: Option<RegistryTransactionWrite<'_>>,
-    ) -> anyhow::Result<RegistryCommit> {
-        self.commit_workspace_registry(
+        let intent = self.prepare_workspace_commit(
             mutation,
             fingerprint,
             expected_generation,
@@ -66,8 +39,12 @@ impl WorkspaceRegistry {
             active_workspace,
             result,
             false,
-            extra,
-        )
+        )?;
+        let intent = match extra {
+            Some(extra) => intent.with_extra_rows(extra),
+            None => intent,
+        };
+        Ok(self.admit_workspace_commit(intent, false, || {})?.commit)
     }
 
     /// Prepare a `commit_resource_effect` intent that also writes `extra` in

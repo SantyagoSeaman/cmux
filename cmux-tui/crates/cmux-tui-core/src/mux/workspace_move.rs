@@ -82,7 +82,7 @@ impl Mux {
             desired.insert(new_idx, desired_workspace);
             let desired_active_workspace =
                 state.workspaces.get(state.active_workspace).map(|workspace| &workspace.public_id);
-            let commit = registry.commit_with_active_workspace(
+            let intent = registry.prepare_workspace_commit(
                 mutation,
                 &fingerprint,
                 expected_generation,
@@ -97,8 +97,13 @@ impl Mux {
                     "index": new_idx,
                     "changed": changed,
                 }),
+                true,
             )?;
-            let resource_revision = registry.snapshot()?.resource_revision;
+            // Admitted (F10): the receipt and resource revision are decided
+            // at prepare; the pin goes once the intent is on the writer's lane.
+            let admitted = registry.admit_workspace_commit(intent, false, || state.unpin())?;
+            let commit = admitted.commit;
+            let resource_revision = admitted.resource_revision.unwrap_or(state.resource_revision);
             let active_id = state.workspaces.get(state.active_workspace).map(|ws| ws.id);
             state.move_workspace(old_idx, new_idx);
             state.active_workspace = active_id

@@ -94,52 +94,6 @@ impl WorkspaceRegistry {
             extra: None,
         })
     }
-
-    /// Commit a workspace registry revision: through the journal writer when
-    /// it runs and the caller does not hold the connection, else locally. A
-    /// borrowed `extra` cannot leave this thread, so it commits locally.
-    #[allow(clippy::too_many_arguments)]
-    #[track_caller]
-    pub(super) fn commit_workspace_registry(
-        &mut self,
-        mutation: &WorkspaceMutation,
-        fingerprint: &Value,
-        expected_generation: Option<&str>,
-        expected_revision: Option<u64>,
-        event_kind: &str,
-        workspace_key: &str,
-        workspaces: &[RegistryWorkspace],
-        active_workspace: Option<&WorkspacePublicId>,
-        result: &Value,
-        project_resource: bool,
-        extra: Option<RegistryTransactionWrite<'_>>,
-    ) -> anyhow::Result<RegistryCommit> {
-        let intent = self.prepare_workspace_commit(
-            mutation,
-            fingerprint,
-            expected_generation,
-            expected_revision,
-            event_kind,
-            workspace_key,
-            workspaces,
-            active_workspace,
-            result,
-            project_resource,
-        )?;
-        let Some(extra) = extra else {
-            return Ok(self
-                .commit_registry_intent(RegistryIntent::Workspace(intent))?
-                .into_workspace()?
-                .commit);
-        };
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        let receipt = intent.apply(&tx, Some(extra))?;
-        tx.commit()?;
-        drop(db);
-        self.connection.write_path_stats().request_effect_committed();
-        Ok(receipt.commit)
-    }
 }
 
 impl WorkspaceCommitIntent {
