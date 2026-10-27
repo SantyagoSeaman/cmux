@@ -48,6 +48,11 @@ extension LineTransport {
                 return
             }
         }
+        if !streamed, let name = envelope.event, AgentSessionStreamRoute.carries(name),
+           let handler = state.withLock({ $0.agentSessionHandler }) {
+            recorder?.lineRead(.event)
+            return handler(name, line)
+        }
         if let name = streamed ? Self.streamEvent : envelope.event {
             let index = state.withLock { state -> UInt64 in
                 if name == "daemon-shutdown" { state.sawShutdown = true }

@@ -43,7 +43,10 @@ pub use agent_session_trust::AGENT_SESSION_TRUST_CAPABILITY;
 
 pub const AGENT_SESSION_ATTACH_CAPABILITY: &str = "agent-session-attach-v1";
 
-pub(crate) const MAX_ATTACHMENTS_PER_CLIENT: usize = 8;
+/// Attachments one connection may hold. The app attaches every agent chat tab it shows of
+/// this machine on its one connection to the daemon (p05-ipc-102), so this is the app's
+/// bound too; half the daemon's, so no one connection takes them all.
+pub(crate) const MAX_ATTACHMENTS_PER_CLIENT: usize = 32;
 pub(crate) const MAX_ATTACHMENTS_TOTAL: usize = 64;
 /// Records per attach or events page.
 pub(crate) const MAX_PAGE: u64 = 500;

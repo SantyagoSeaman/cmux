@@ -228,13 +228,14 @@ extension AgentTabStore {
             }
             let machine = record.hostName ?? services.machines.machineName(daemon.machineID) ?? daemon.machineID
             let session = record.session ?? tabs.sessions[tabs.resolve(key)]
-            guard !daemon.isLocal, daemon.supports(DaemonCapability.agentSessionAttach.rawValue), let endpoint = daemon.remoteEndpoint else {
+            guard !daemon.isLocal, daemon.supports(DaemonCapability.agentSessionAttach.rawValue) else {
                 // A chat this app started on that machine says what to do there; an older tab
                 // recorded for another Mac keeps the "runs on" notice.
                 guard started else { return nil }
                 return AgentTabRefusedHost(refusal: .startUnsupported(machine: machine))
             }
-            var host = AgentTabRemoteHost(surface: tab.surface.rawValue, session: session, machine: machine, endpoint: endpoint, mainWork: services.mainWork, servesTrust: daemon.supports(DaemonCapability.agentSessionTrust.rawValue),
+            let connection = daemon.connectionProvider
+            var host = AgentTabRemoteHost(surface: tab.surface.rawValue, session: session, machine: machine, connection: connection, mainWork: services.mainWork, servesTrust: daemon.supports(DaemonCapability.agentSessionTrust.rawValue),
                                            servesKeyedReason: daemon.supports(DaemonCapability.agentSessionStartKeyedReason.rawValue))
             if started {
                 // The tab may still be provisional here: each handshake reads its store surface.
@@ -251,7 +252,7 @@ extension AgentTabStore {
                 guard daemon.supports(DaemonCapability.agentSessionStart.rawValue) else { return AgentTabRefusedHost(refusal: .startUnsupported(machine: machine)) }
                 host.start = { [weak tabs] cwd, harness, personKey in
                     guard let tabs else { throw CancellationError() }
-                    return try await tabs.startRemoteChat(key, machine: machine, cwd: cwd, harness: harness, personKey: personKey, endpoint: endpoint)
+                    return try await tabs.startRemoteChat(key, machine: machine, cwd: cwd, harness: harness, personKey: personKey, connection: connection)
                 }
             }
             // cx-0q7o: the app's own ssh exec to that machine restarts its acpmux with a key.

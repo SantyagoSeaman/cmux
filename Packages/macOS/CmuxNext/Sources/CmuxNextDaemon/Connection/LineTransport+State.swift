@@ -20,6 +20,9 @@ extension LineTransport {
         var controlStreams: Set<String> = []
         /// Gets resource API stream lines (`stream_item`, `stream_end`).
         var streamHandler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?
+        /// Gets the agent session attachments' pushes (``AgentSessionStreamRoute``), uncounted: they
+        /// are no stream-0 event, so no reply's barrier waits for the store to apply one.
+        var agentSessionHandler: (@Sendable (_ event: String, _ line: Data) -> Void)?
 
         /// Takes every deadline due at `now` out and marks its request expired: what each one's
         /// `timedOut` needs. The timer is no longer armed (its fire called this).

@@ -142,7 +142,7 @@ final class AgentTabStore {
     /// web content crash or a view rebuilt after the tab was released.
     var sessions: [String: String] = [:]
     /// A new chat's seed on another machine (its folder and harness start it there, its draft and
-    /// prompt reach the page), by tab (``startRemoteChat(_:machine:endpoint:)``).
+    /// prompt reach the page), by tab (``startRemoteChat(_:machine:cwd:harness:personKey:connection:)``).
     var remoteSeeds: [String: AgentPaneSeedSource] = [:]
     /// New chats on another machine whose store tab is still being created: they start once it is.
     var remoteCreations: [String: AgentTabPending] = [:]

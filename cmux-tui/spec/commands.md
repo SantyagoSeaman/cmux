@@ -9796,7 +9796,7 @@ comes from the store record: no command takes a session id, a cwd, a command,
 an agent or an MCP server, and every unknown param is
 `agent_session.bad_request`. Other error codes: `agent_session.not_trusted`,
 `agent_session.unavailable` (no acpmux), `agent_session.not_attached`,
-`agent_session.limit` (8 attachments per connection, 64 per daemon, 8 calls in
+`agent_session.limit` (32 attachments per connection, 64 per daemon, 8 calls in
 flight per attachment), `agent_session.timeout` (5 s), `agent_session.refused`
 (acpmux refused), `agent_session.unknown_permission`,
 `agent_session.read_only` (a mutation sent to an observation attachment),

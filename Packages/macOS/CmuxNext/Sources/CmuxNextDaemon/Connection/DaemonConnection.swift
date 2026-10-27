@@ -52,6 +52,8 @@ public actor DaemonConnection {
     public nonisolated let mutationCauses = MutationCauseLedger()
     /// Where events go: `events`, or the consumer of ``consumeEvents(_:)``; and each subscriber.
     nonisolated let route: DaemonEventRoute
+    /// The agent session attachments this connection carries; their pushes go there, never to `route`.
+    nonisolated let agentSessions = AgentSessionStreamRoute()
 
     let configuration: Configuration
     private let endpointProvider: EndpointProvider
@@ -137,6 +139,7 @@ public actor DaemonConnection {
         releaseHandoffHold()
         endReadyWaits()
         route.finish()
+        agentSessions.end(serial: serial)
     }
 
     public var isReady: Bool {
@@ -265,6 +268,12 @@ public actor DaemonConnection {
             let raw = configuration.role == .pageRelay
             let decoder = transport.decoder
             let mutationCauses = mutationCauses
+            if !raw {
+                let agentSessions = agentSessions
+                transport.setAgentSessionHandler { name, line in
+                    agentSessions.deliver(name: name, line: line, serial: serial, decoder: decoder)
+                }
+            }
             transport.start(
                 onCausedEvent: { [weak self] name, line, index, wireCause in
                     let event = raw ? DaemonEvent.raw(name: name, line: line, decoder: decoder)
@@ -329,6 +338,7 @@ public actor DaemonConnection {
         case .lost(let text): text
         }
         logger.info("cmux-tui connection lost: \(detail, privacy: .public)")
+        agentSessions.end(serial: serial)
         route.emit(DaemonEventEnvelope(sequence: DaemonEventEnvelope.sequence(serial: serial, index: DaemonEventEnvelope.lastIndex),
                                        event: .disconnected(reason: detail), sourceID: eventSourceID))
         scheduleReconnect()

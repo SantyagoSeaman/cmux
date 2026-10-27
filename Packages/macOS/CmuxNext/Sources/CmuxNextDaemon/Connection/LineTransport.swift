@@ -172,6 +172,10 @@ final class LineTransport: Sendable {
     /// The writer queue's class (``DaemonWireStats/Role/writerQoS``; tests).
     var writerQoS: DispatchQoS { writer.queueQoS }
     func setStreamHandler(_ handler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?) { state.withLock { $0.streamHandler = handler } }
+    /// Hands the `agent-session-*` pushes to `handler` instead of the event handler; call before `start`.
+    func setAgentSessionHandler(_ handler: (@Sendable (_ event: String, _ line: Data) -> Void)?) {
+        state.withLock { $0.agentSessionHandler = handler }
+    }
 
     /// Counts `streamID`'s lines as stream-0 events until its `stream_end`;
     /// call before the request that opens it, `endControlSequence` if that fails.

@@ -1,19 +1,22 @@
 import CmuxNextCompat
 public import Foundation
-import os
 
-/// One agent chat tab of a session daemon, attached over a dedicated daemon connection
-/// (`agent-session-attach-v1`, cmux-tui/spec/commands.md "Agent session attach"): how the app
-/// shows a chat whose acpmux runs on the daemon's machine. A separate socket from the control
-/// connection, so a long transcript replay never delays the tree.
+/// One agent chat tab of a session daemon (`agent-session-attach-v1`, cmux-tui/spec/commands.md
+/// "Agent session attach"): how the app shows a chat whose acpmux runs on the daemon's machine.
+/// The attachment is a stream on the connection the machine's store already holds
+/// (``DaemonConnection/agentSessions``), not a socket of its own (p05-ipc-102): its pushes reach this
+/// client on that connection's reader and never pass through the store, and the daemon writes them
+/// on the attachment's own outbound stream, behind its control replies.
 ///
-/// Connects on the first attach. A dropped connection ends the attachment (`closed`), and the
-/// page reconnects with a fresh client and replays from the newest seq it holds. Nothing here
-/// names a session, a folder or a command: the daemon pins the session from its tab record.
+/// A dropped connection ends the attachment (`closed`, `connection_lost`), and the page reconnects
+/// with a fresh client and replays from the newest seq it holds. Nothing here names a session, a
+/// folder or a command: the daemon pins the session from its tab record.
 public actor AgentSessionAttachClient {
-    public typealias EndpointProvider = @Sendable () async throws -> DaemonEndpoint
-    /// One push for the attachment: `agent-session-record`, `-permission` or `-closed`, with
-    /// the line's JSON object.
+    /// The machine's current connection (its `DaemonService`'s), asked for at each verb so a
+    /// replaced connection is picked up.
+    public typealias ConnectionProvider = @Sendable () async throws -> DaemonConnection
+    /// One push for the attachment: `agent-session-record`, `-permission`, `-changed` or `-closed`,
+    /// with the line's JSON object.
     public typealias EventHandler = @Sendable (_ event: String, _ line: Data) -> Void
 
     /// How the daemon attachment is used. Observation has its own capability and command so a
@@ -36,14 +39,6 @@ public actor AgentSessionAttachClient {
             }
         }
 
-        var clientInfoKind: String { command.wire }
-        var clientInfoName: String {
-            switch self {
-            case .attach: return "cmux-next agent attach"
-            case .observe: return "cmux-next agent observer"
-            }
-        }
-
         var unsupportedMessage: String {
             let feature = self == .observe ? "agent session observation" : "agent session attach"
             return "the daemon does not serve \(feature)"
@@ -54,21 +49,12 @@ public actor AgentSessionAttachClient {
 
     private let surface: UInt64
     private let mode: Mode
-    private let endpoint: EndpointProvider
+    private let connection: ConnectionProvider
     private let requestTimeout: Duration
-    private let logger = Logger(subsystem: "com.cmuxterm.app.next", category: "agent-attach")
-    private var transport: LineTransport?
-    private var connecting: Task<LineTransport, any Error>?
     private let handler = HandlerBox()
     private var closed = false
-    /// The connected daemon serves `agent-session-start-v1` (read from its own `identify`).
-    private var servesStart = false
-    /// The connected daemon serves `agent-session-trust-v1`.
-    private var servesTrust = false
-    /// The connected daemon serves `agent-session-start-keyed-reason-v1`.
-    private var servesKeyedReason = false
-    /// The connected daemon serves `agent-session-children-v1`.
-    private var servesChildren = false
+    /// The attachment's endpoint on the connection that carries it, while attached.
+    private var bound: (connection: DaemonConnection, token: AgentSessionStreamRoute.Token)?
 
     /// A start that needs the app's person key in that machine's acpmux (cx-0w0jj): `instance`
     /// is the acpmux run the app holds a key for, nil when it holds none.
@@ -77,12 +63,12 @@ public actor AgentSessionAttachClient {
         public init(instance: String?) { self.instance = instance }
     }
 
-    /// `surface`: the tab's surface id in the daemon's store.
+    /// `surface`: the tab's surface id in the daemon's store. `connection`: the daemon's machine connection.
     public init(surface: UInt64, requestTimeout: Duration = .seconds(10), mode: Mode = .attach,
-                endpoint: @escaping EndpointProvider) {
+                connection: @escaping ConnectionProvider) {
         self.surface = surface
         self.mode = mode
-        self.endpoint = endpoint
+        self.connection = connection
         self.requestTimeout = requestTimeout
     }
 
@@ -90,7 +76,30 @@ public actor AgentSessionAttachClient {
     public func attach(afterSeq: UInt64?, beforeSeq: UInt64?, limit: Int?, kinds: [String]?,
                        events: @escaping EventHandler) async throws -> Data {
         handler.set(events)
-        return try await call(mode.command, page(afterSeq, beforeSeq, limit, kinds))
+        let (connection, _) = try await liveConnection()
+        // Attached on this connection already: the daemon answers a page only.
+        let attached = bound.map { $0.connection === connection && connection.agentSessions.isOpen($0.token) } ?? false
+        var opening: DaemonConnection.AgentSessionOpening?
+        if !attached {
+            await release()
+            let handler = handler
+            opening = DaemonConnection.AgentSessionOpening(surface: surface) { name, line in
+                if name == "agent-session-closed" {
+                    // The close is the last push: whichever of the daemon's and the connection's comes first.
+                    handler.take()?(name, line)
+                } else {
+                    handler.current?(name, line)
+                }
+            }
+        }
+        let (data, token) = try await send(mode.command, page(afterSeq, beforeSeq, limit, kinds), on: connection, opening: opening)
+        guard let token else { return data }
+        guard !closed else {
+            await connection.closeAgentSessionStream(token, timeout: requestTimeout)
+            throw AgentSessionAttachError(code: "agent_session.closed", message: "closed")
+        }
+        bound = (connection, token)
+        return data
     }
 
     public func events(afterSeq: UInt64?, beforeSeq: UInt64?, limit: Int?, kinds: [String]?) async throws -> Data {
@@ -109,18 +118,18 @@ public actor AgentSessionAttachClient {
         guard mode == .attach else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "a read-only agent session cannot start a chat")
         }
-        _ = try await liveTransport()
-        guard servesStart else {
+        let (connection, identity) = try await liveConnection()
+        guard identity.supports(DaemonCapability.agentSessionStart.rawValue) else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "the daemon does not serve agent session start")
         }
         var params: [String: any Sendable] = ["cwd": cwd]
         if let harness { params["harness"] = harness }
         if homeConfirmed { params["home_confirmed"] = true }
-        if let personKey, servesKeyedReason {
+        if let personKey, identity.supports(DaemonCapability.agentSessionStartKeyedReason.rawValue) {
             params["require_person_key"] = true
             if let instance = personKey.instance { params["person_instance"] = instance }
         }
-        let data = try await call("agent-session-start", params)
+        let data = try await send("agent-session-start", params, on: connection).data
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let session = object["session"] as? String, !session.isEmpty else {
             throw AgentSessionAttachError(code: "agent_session.refused", message: "agent-session-start answered no session")
@@ -135,17 +144,17 @@ public actor AgentSessionAttachClient {
         guard mode == .attach else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "a read-only agent session cannot change trust")
         }
-        _ = try await liveTransport()
-        guard servesTrust else {
+        let (connection, identity) = try await liveConnection()
+        guard identity.supports(DaemonCapability.agentSessionTrust.rawValue) else {
             throw AgentSessionAttachError(code: Self.startUnsupported, message: "the daemon does not serve agent session trust")
         }
         var params: [String: any Sendable] = ["cwd": cwd]
         if let level { params["level"] = level }
         if homeConfirmed { params["home_confirmed"] = true }
-        return try await call("agent-session-trust", params)
+        return try await send("agent-session-trust", params, on: connection).data
     }
 
-    /// The code ``start(cwd:harness:)`` throws for a daemon without `agent-session-start-v1`.
+    /// The code ``start(cwd:harness:homeConfirmed:personKey:)`` throws for a daemon without `agent-session-start-v1`.
     public static let startUnsupported = "agent_session.start_unsupported"
 
     public func prompt(id: String, text: String) async throws -> Data {
@@ -167,33 +176,32 @@ public actor AgentSessionAttachClient {
         _ = try await call("agent-session-permission", params)
     }
 
+    /// Ends this client's attachment: the daemon's is detached once no other client on the
+    /// connection shows the same tab.
     public func detach() async {
-        _ = try? await call("agent-session-detach", [:])
+        handler.set(nil)
+        await release()
     }
 
     /// `agent-session-children` (`agent-session-children-v1`): the chats the attached tab's session
     /// started on the daemon's machine (`{sessions}`, acpmux summaries); the attachment then
     /// streams their changes too. A daemon without the verb lists none.
     public func children() async throws -> Data {
-        _ = try await liveTransport()
-        guard servesChildren else { return Data(#"{"sessions":[]}"#.utf8) }
-        return try await call("agent-session-children", [:])
+        let (connection, identity) = try await liveConnection()
+        guard identity.supports(DaemonCapability.agentSessionChildren.rawValue) else { return Data(#"{"sessions":[]}"#.utf8) }
+        return try await send("agent-session-children", [:], on: connection).data
     }
 
     /// Reads one image from the attached session's host acpmux (`agent-session-media`).
     public func media(path: String) async throws -> Data {
-        _ = try await liveTransport()
-        return try await call("agent-session-media", ["path": path])
+        try await call("agent-session-media", ["path": path])
     }
 
-    /// Ends the attachment and the connection; no push after it.
-    public func close() {
+    /// Ends the attachment; no push after it, and every later verb is refused.
+    public func close() async {
         closed = true
         handler.set(nil)
-        connecting?.cancel()
-        connecting = nil
-        transport?.close()
-        transport = nil
+        await release()
     }
 
     // MARK: Private
@@ -207,85 +215,46 @@ public actor AgentSessionAttachClient {
         return params
     }
 
+    /// The machine's ready connection and its identity, refused when this client closed or the
+    /// daemon does not serve this mode.
+    private func liveConnection() async throws -> (DaemonConnection, DaemonIdentity) {
+        if closed { throw AgentSessionAttachError(code: "agent_session.closed", message: "closed") }
+        let connection = try await self.connection()
+        let identity = try await connection.agentSessionIdentity(within: requestTimeout)
+        guard identity.supports(mode.capability) else {
+            throw AgentSessionAttachError(code: "agent_session.unsupported", message: mode.unsupportedMessage)
+        }
+        return (connection, identity)
+    }
+
     /// One verb on the tab; the result's `data` as JSON, or the daemon's refusal.
     private func call(_ cmd: DaemonCommandName, _ params: [String: any Sendable]) async throws -> Data {
-        let transport = try await liveTransport()
+        let (connection, _) = try await liveConnection()
+        return try await send(cmd, params, on: connection).data
+    }
+
+    private func send(_ cmd: DaemonCommandName, _ params: [String: any Sendable], on connection: DaemonConnection,
+                      opening: DaemonConnection.AgentSessionOpening? = nil) async throws -> (data: Data, token: AgentSessionStreamRoute.Token?) {
         var object = params
         object["cmd"] = cmd.wire
         object["surface"] = surface
         // Integers stay integers (the daemon reads u64 seqs and surface ids).
         let fields = try JSONSerialization.data(withJSONObject: object)
-        let response: LineTransport.Response
         do {
-            response = try await transport.request(cmd: cmd, timeout: requestTimeout) { id in
-                Data(#"{"id":\#(id),"#.utf8) + fields.dropFirst()
-            }
+            let (response, token) = try await connection.sendAgentSession(cmd, timeout: requestTimeout, opening: opening, fields: fields)
+            response.recorder?.decoded()  // Self.data(of:) parses the line
+            return (Self.data(of: response.line), token)
         } catch DaemonError.command(_, let message, let code, let details, _) {
             throw AgentSessionAttachError(code: code ?? "agent_session.refused", message: message, details: details)
         }
-        response.recorder?.decoded()  // Self.data(of:) parses the line
-        return Self.data(of: response.line)
     }
 
-    private func liveTransport() async throws -> LineTransport {
-        if closed { throw AgentSessionAttachError(code: "agent_session.closed", message: "closed") }
-        if let transport, !transport.isClosed { return transport }
-        transport = nil
-        if let connecting { return try await connecting.value }
-        let task = Task { try await self.connect() }
-        connecting = task
-        defer { connecting = nil }
-        let transport = try await task.value
-        if closed {
-            transport.close()
-            throw AgentSessionAttachError(code: "agent_session.closed", message: "closed")
-        }
-        self.transport = transport
-        return transport
-    }
-
-    private func connect() async throws -> LineTransport {
-        let endpoint = try await self.endpoint()
-        let transport = try LineTransport(path: endpoint.socketPath, role: .agentSessionAttach, stats: endpoint.wireStats)
-        let handler = handler
-        let surface = surface
-        let recorder = transport.recorder
-        transport.start(
-            onEvent: { name, line, _ in
-                guard name.hasPrefix("agent-session-") else { return }
-                recorder?.decoded()  // Self.surface(of:) parses the line
-                guard Self.surface(of: line) == surface else { return }
-                handler.current?(name, line)
-                if name == "agent-session-closed" { handler.set(nil) }
-            },
-            onClose: { [logger] reason in
-                guard let current = handler.current else { return }
-                handler.set(nil)
-                logger.info("agent attach connection ended: \(String(describing: reason), privacy: .public)")
-                current("agent-session-closed", Data(#"{"event":"agent-session-closed","reason":"connection_lost"}"#.utf8))
-            })
-        do {
-            let identity = try await DaemonConnection.perform(IdentifyRequest(), on: transport, timeout: requestTimeout)
-            guard identity.supports(mode.capability) else {
-                transport.close()
-                throw AgentSessionAttachError(code: "agent_session.unsupported", message: mode.unsupportedMessage)
-            }
-            servesStart = identity.supports(DaemonCapability.agentSessionStart.rawValue)
-            servesTrust = identity.supports(DaemonCapability.agentSessionTrust.rawValue)
-            servesKeyedReason = identity.supports(DaemonCapability.agentSessionStartKeyedReason.rawValue)
-            servesChildren = identity.supports(DaemonCapability.agentSessionChildren.rawValue)
-            _ = try await DaemonConnection.perform(
-                SetClientInfoRequest(name: mode.clientInfoName, kind: mode.clientInfoKind, capabilities: []),
-                on: transport, timeout: requestTimeout)
-        } catch {
-            transport.close()
-            throw error
-        }
-        return transport
-    }
-
-    private static func surface(of line: Data) -> UInt64? {
-        ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any])?["surface"].flatMap { ($0 as? NSNumber)?.uint64Value }
+    /// Gives up this client's endpoint; the connection detaches the daemon's attachment when it was
+    /// the tab's last.
+    private func release() async {
+        guard let bound else { return }
+        self.bound = nil
+        await bound.connection.closeAgentSessionStream(bound.token, timeout: requestTimeout)
     }
 
     /// The `data` member of an `ok:true` response line, as JSON.
@@ -320,9 +289,16 @@ public struct AgentSessionAttachError: Error, Sendable, Equatable {
     public static let needsKeyedStart = "agent_session.needs_keyed_start"
 }
 
-/// The current push handler, read on the transport's reader thread.
+/// The current push handler, read on the connection's reader thread.
 private final class HandlerBox: Sendable {
     private let lock = Mutex<AgentSessionAttachClient.EventHandler?>(nil)
     var current: AgentSessionAttachClient.EventHandler? { lock.withLock { $0 } }
     func set(_ handler: AgentSessionAttachClient.EventHandler?) { lock.withLock { $0 = handler } }
+    /// The handler, cleared in the same step: the one close is delivered once.
+    func take() -> AgentSessionAttachClient.EventHandler? {
+        lock.withLock { handler in
+            defer { handler = nil }
+            return handler
+        }
+    }
 }

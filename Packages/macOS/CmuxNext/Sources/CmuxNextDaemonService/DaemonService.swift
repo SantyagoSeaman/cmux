@@ -151,9 +151,14 @@ public final class DaemonService {
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     /// How the connections reach this app's daemon (the page relay opens its own with it).
     @ObservationIgnored public private(set) var endpointProvider: DaemonConnection.EndpointProvider?
-    /// A remote machine's route (`start(remote:)`), for a second connection to its daemon (an
-    /// agent chat that runs on that machine); nil for this app's own daemon.
-    @ObservationIgnored public private(set) var remoteEndpoint: DaemonConnection.EndpointProvider?
+    /// The connection the store holds at each call, for a client that rides it (an agent chat that
+    /// runs on that machine, ``AgentSessionAttachClient``); `notConnected` while it has none.
+    public nonisolated var connectionProvider: AgentSessionAttachClient.ConnectionProvider {
+        { [weak self] in
+            guard let connection = await self?.connection else { throw DaemonError.notConnected }
+            return connection
+        }
+    }
     /// Hands an owner without `ws-listen-v1` off to the bundled build (DaemonService+PageListener).
     @ObservationIgnored var pageListenerHandOff: (@Sendable (DaemonConnection, DaemonIdentity) async -> Bool)?
     /// Hands the local daemon off for a confirmed server-update restart (`restartForUpdate`); nil
@@ -307,7 +312,6 @@ public final class DaemonService {
                admit: (@MainActor (DaemonIdentity) throws -> Void)? = nil, onEnd: (@MainActor () -> Void)? = nil) {
         guard runTask == nil, !policyBlock.isBlocked else { return }
         let wireStats = wireStats
-        remoteEndpoint = { DaemonEndpoint(socketPath: try await endpoint(), wireStats: wireStats) }
         let store = store
         if let onEnd { store.onDisconnected = onEnd }
         let machineID = machineID

@@ -22390,7 +22390,7 @@
    "constraints": [
     "A malformed request or an unknown param is agent_session.bad_request, answered before the trust check. Then only trusted local (Unix) connections pass: WebSocket clients and the remote relay are refused with agent_session.not_trusted, and a daemon without an acpmux socket answers agent_session.unavailable.",
     "The session always comes from the tab's store record: no param names a session, cwd, command, agent or MCP server.",
-    "The tab must be an agent_session tab of this store with a bound session that acpmux resolves exactly, else agent_session.unknown_tab. 8 attachments per connection and 64 per daemon (agent_session.limit).",
+    "The tab must be an agent_session tab of this store with a bound session that acpmux resolves exactly, else agent_session.unknown_tab. 32 attachments per connection and 64 per daemon (agent_session.limit).",
     "Subscribes the connection to the tab's session and answers the attach page; on a tab already attached in this mode it only pages, and on one observed it is agent_session.mode_conflict.",
     "Live records then arrive as agent-session-record, permission requests as agent-session-permission and status changes as agent-session-changed; agent-session-closed ends the attachment. A record never overtakes the attach reply. See spec/commands.md.",
     "limit is clamped to 1..500 (default 200), never refused. kinds holds at most 32 entries of 1 to 64 bytes of [a-z_.], else agent_session.bad_request. A page holds at most 8 MiB of records, the rest left for the next page with hasMore."
