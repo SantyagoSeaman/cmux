@@ -257,7 +257,8 @@ public actor DaemonConnection {
             DaemonLaunchTimings.shared.mark("daemon.endpoint_resolved")
             let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge,
                                                          role: configuration.role == .pageRelay ? .pageRelay : .control,
-                                                         stats: endpoint.wireStats, hangs: configuration.hangWatch)
+                                                         stats: endpoint.wireStats, hangs: configuration.hangWatch,
+                                                         badMessages: endpoint.badMessages)
             DaemonLaunchTimings.shared.mark("daemon.socket_connected")
             let gate = EventGate()
             let route = route

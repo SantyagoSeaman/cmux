@@ -246,7 +246,8 @@ public actor AgentSessionAttachClient {
 
     private func connect() async throws -> LineTransport {
         let endpoint = try await self.endpoint()
-        let transport = try LineTransport(path: endpoint.socketPath, role: .agentSessionAttach, stats: endpoint.wireStats)
+        let transport = try LineTransport(path: endpoint.socketPath, role: .agentSessionAttach, stats: endpoint.wireStats,
+                                      badMessages: endpoint.badMessages)
         let handler = handler
         let surface = surface
         let recorder = transport.recorder

@@ -17,7 +17,10 @@
 //!
 //! A bad message closes the connection, as Chrome's `ReportBadMessage`
 //! (mojo/public/cpp/bindings/message.h) ends the sender: nothing after the
-//! bad byte is interpreted.
+//! bad byte is interpreted. Every such close goes through
+//! [`IpcStats::bad_message`](crate::diagnostics::IpcStats::bad_message),
+//! which counts it and reports its reason once per launch; the daemon's
+//! other connections keep working.
 //!
 //! REQUEST and CANCEL frames go to [`frame_dispatch`] (p05-ipc-071).
 
@@ -345,8 +348,9 @@ pub(super) fn serve_connection(
     };
     input.release();
     if let ConnectionEnd::BadMessage(bad) = &end {
-        ipc.bad_message();
-        eprintln!("cmux-tui: client {client} closed: bad_message {}: {bad}", bad.reason());
+        let peer = format!("client {client} {}", transport.as_str());
+        ipc.bad_message(&peer, bad.reason(), bad);
+        eprintln!("cmux-tui: {peer} closed: bad_message {}: {bad}", bad.reason());
     }
     if end == ConnectionEnd::PeerClosed {
         surface_scheduler.finish_and_wait();

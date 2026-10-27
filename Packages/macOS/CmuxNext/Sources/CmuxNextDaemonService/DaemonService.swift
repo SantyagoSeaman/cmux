@@ -36,6 +36,9 @@ public final class DaemonService {
     /// `debug.daemon.wire`): the app's recorder in Debug and bench builds and opted-in release
     /// builds, else nil.
     let wireStats: DaemonWireStats?
+    /// The bad messages of this machine's daemon when it is remote (``DaemonEndpoint/badMessages``); the local
+    /// daemon's endpoints carry their launcher's ledger.
+    let remoteBadMessages = BadMessageReports()
     public let store: DaemonStore
     /// Set while an administrator turned this machine's feature off: no endpoint, no re-attach.
     public let policyBlock = PolicyBlock()
@@ -307,7 +310,8 @@ public final class DaemonService {
                admit: (@MainActor (DaemonIdentity) throws -> Void)? = nil, onEnd: (@MainActor () -> Void)? = nil) {
         guard runTask == nil, !policyBlock.isBlocked else { return }
         let wireStats = wireStats
-        remoteEndpoint = { DaemonEndpoint(socketPath: try await endpoint(), wireStats: wireStats) }
+        let badMessages = remoteBadMessages
+        remoteEndpoint = { DaemonEndpoint(socketPath: try await endpoint(), wireStats: wireStats, badMessages: badMessages) }
         let store = store
         if let onEnd { store.onDisconnected = onEnd }
         let machineID = machineID
@@ -331,7 +335,8 @@ public final class DaemonService {
             while !Task.isCancelled {
                 let connected = await DaemonStartup.shared.connect(wake: wake, clock: clock) {
                     DaemonConnection(configuration: configuration) {
-                        DaemonEndpoint(socketPath: try await endpoint(), bridge: bridge, wireStats: wireStats)
+                        DaemonEndpoint(socketPath: try await endpoint(), bridge: bridge, wireStats: wireStats,
+                                       badMessages: badMessages)
                     }
                 } onFailure: { error in
                     logger.error("\(machineID, privacy: .public): daemon unavailable: \(error.description, privacy: .public)")

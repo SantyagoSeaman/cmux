@@ -170,10 +170,12 @@ fn a_blocked_write_is_a_stall() {
 #[test]
 fn bad_message_and_depth_counters() {
     let stats = IpcStats::default();
-    stats.bad_message();
+    assert_eq!(stats.bad_message("client 1 unix", "bad_magic", &"0x41"), Reported::First);
+    assert_eq!(stats.bad_message("client 2 unix", "bad_magic", &"0x41"), Reported::Repeat);
     stats.sequence_depth(3);
     let snapshot = stats.snapshot();
-    assert_eq!(snapshot.bad_message, 1);
+    assert_eq!(snapshot.bad_message, 2);
+    assert_eq!(stats.bad_messages().count("bad_magic"), 2);
     assert_eq!(snapshot.sequence_depth.count, 1);
     assert_eq!(snapshot.sequence_depth.max, 3);
 }

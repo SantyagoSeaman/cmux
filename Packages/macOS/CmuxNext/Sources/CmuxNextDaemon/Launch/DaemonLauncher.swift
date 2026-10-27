@@ -115,6 +115,9 @@ public struct DaemonLauncher: Sendable {
     /// Put on every endpoint this launcher hands out (``DaemonEndpoint/wireStats``), so the
     /// connections to its daemon count there; its socket probe counts there too. Nil counts nothing.
     public let wireStats: DaemonWireStats?
+    /// Put on every endpoint this launcher hands out (``DaemonEndpoint/badMessages``): its daemon's bad
+    /// messages, each reason reported once per launch.
+    public let badMessages: BadMessageReports
 
     public init(
         work: BackgroundWork,
@@ -122,11 +125,13 @@ public struct DaemonLauncher: Sendable {
         environment: @escaping @Sendable () async -> [String: String],
         ensureTimeout: Duration = .seconds(20),
         clock: any Clock<Duration> = ContinuousClock(),
-        wireStats: DaemonWireStats? = nil
+        wireStats: DaemonWireStats? = nil,
+        badMessages: BadMessageReports = BadMessageReports()
     ) {
         self.work = work
         self.configuration = configuration
         self.wireStats = wireStats
+        self.badMessages = badMessages
         rememberedSocket = RememberedSocket(configuration.rememberedSocket)
         self.environmentProvider = environment
         self.ensureTimeout = ensureTimeout
@@ -429,6 +434,7 @@ public struct DaemonLauncher: Sendable {
         let handoff = handoff
         let clock = clock
         let wireStats = wireStats
+        let badMessages = badMessages
         return {
             // A daemon exiting for a version handoff still answers `server
             // status` for a moment: start its successor only once it is gone.
@@ -439,13 +445,14 @@ public struct DaemonLauncher: Sendable {
             if let path = remembered.take() {
                 if DaemonSocketMemory.acceptsConnections(path, wireStats: wireStats) {
                     DaemonLaunchTimings.shared.mark("daemon.remembered_socket")
-                    return DaemonEndpoint(socketPath: path, wireStats: wireStats)
+                    return DaemonEndpoint(socketPath: path, wireStats: wireStats, badMessages: badMessages)
                 }
             }
             let ensured = try await ensureRecordingOutcome()
             if ensured.status == "started" { onSpawned?() }
             var endpoint = ensured.endpoint
             endpoint.wireStats = wireStats
+            endpoint.badMessages = badMessages
             return endpoint
         }
     }

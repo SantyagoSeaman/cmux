@@ -12,6 +12,10 @@
 //! telemetry choice. The line format and hook live in `cmux-panic-log`,
 //! which the acpmux daemon uses too.
 //!
+//! Its bad-message lines (`"kind": "bad_message"`, cmux-panic-log
+//! `bad_message`) go to the same log: one per reason per launch, for a
+//! client the daemon closed for breaking the wire.
+//!
 //! The owner's hang log (cmux-panic-log `hang`) is beside it,
 //! `owner-hangs-<session>.jsonl` with the same fields: the request watchdog
 //! writes one line per watched scope (a request, a journal commit, a
@@ -34,6 +38,10 @@ pub(super) use cmux_tui_core::diagnostics::owner_panic_log_path as log_path;
 /// in a process with a hang log).
 pub(super) fn install(session: &str) {
     if let Some(path) = log_path(session) {
+        // A client that broke the wire gets one `bad_message` line per
+        // reason per launch beside the panics (cmux-panic-log bad_message).
+        use cmux_panic_log::bad_message;
+        let _ = bad_message::install(bad_message::file_sink(path.clone(), fields(session)));
         cmux_panic_log::install(path, fields(session), is_test_thread);
     }
     install_hang_log(session);

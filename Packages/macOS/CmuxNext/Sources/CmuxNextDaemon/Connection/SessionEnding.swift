@@ -86,7 +86,7 @@ enum SessionEnding {
         let transport: LineTransport
         do {
             transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .sessionEnding,
-                                                     stats: endpoint.wireStats)
+                                                     stats: endpoint.wireStats, badMessages: endpoint.badMessages)
         } catch {
             return [EndSessionsFailure(step: .listWorkspaces, message: String(describing: error))]
         }

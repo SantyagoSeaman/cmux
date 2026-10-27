@@ -19,11 +19,17 @@
 //! The hang log beside it ([`hang`]) gets one JSON line per watched scope
 //! that runs past its hang deadline, with the hung thread's stack.
 //!
+//! The bad-message ledger ([`bad_message`]) counts each peer that broke its
+//! wire's rules by reason and writes one `"kind": "bad_message"` line per
+//! reason per launch, as Chrome's `ReportBadMessage` reports and ends only
+//! the sender.
+//!
 //! [`Supervisor`] runs long-lived threads and tasks under a declared failure
 //! policy ([`Fatal`] by default, [`Restart`] for state-private workers) and a
 //! [`ShutdownBehavior`]; a fatal failure adds a `"kind": "supervised_exit"`
 //! line and ends the process.
 
+pub mod bad_message;
 pub mod crash_keys;
 pub mod hang;
 

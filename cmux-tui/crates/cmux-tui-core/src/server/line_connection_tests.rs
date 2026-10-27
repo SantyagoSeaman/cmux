@@ -71,6 +71,16 @@ fn connect_with(
     admission: Box<dyn admission::LineAdmission + Send>,
 ) -> Peer {
     let mux = Mux::new_for_test(format!("line-conn-{label}"), crate::SurfaceOptions::default());
+    connect_on(mux, lane, transport, admission)
+}
+
+/// A peer on `mux`, beside the connections it serves already.
+fn connect_on(
+    mux: Arc<Mux>,
+    lane: Option<RecordingFrames>,
+    transport: ClientTransport,
+    admission: Box<dyn admission::LineAdmission + Send>,
+) -> Peer {
     let (socket, server) = UnixStream::pair().unwrap();
     let served_mux = mux.clone();
     let served = std::thread::spawn(move || {
@@ -187,6 +197,45 @@ fn line_connection_a_frame_before_negotiation_closes_with_bad_message() {
         peer.finish(),
         ConnectionEnd::BadMessage(ConnectionBadMessage::Wire(BadMessage::FramesNotNegotiated))
     );
+}
+
+#[test]
+fn line_connection_a_bad_message_closes_only_that_connection() {
+    let mut good = connect("bad-only-that", None);
+    let local = || Box::new(admission::LocalAdmission);
+    let mut bad = connect_on(good.mux.clone(), None, ClientTransport::Unix, local());
+    good.send(&ping(1));
+    assert_eq!(good.reply().unwrap()["id"], json!(1));
+    bad.send(&ping(2));
+    assert_eq!(bad.reply().unwrap()["id"], json!(2));
+
+    // A malformed frame (no frames were negotiated) ends that peer only.
+    bad.send(&request_frame(7, b"{}"));
+    assert_eq!(bad.reply(), None, "the bad peer is closed");
+    assert_eq!(
+        bad.finish(),
+        ConnectionEnd::BadMessage(ConnectionBadMessage::Wire(BadMessage::FramesNotNegotiated))
+    );
+    good.send(&ping(3));
+    assert_eq!(good.reply().unwrap()["id"], json!(3), "the other connection keeps working");
+
+    // A second bad peer is closed and counted again; its reason was
+    // reported once already.
+    let mut again = connect_on(good.mux.clone(), None, ClientTransport::Unix, local());
+    again.send(b"\xff\x00");
+    assert_eq!(again.reply(), None);
+    assert!(matches!(again.finish(), ConnectionEnd::BadMessage(_)));
+    let ipc = good.mux.ipc_stats().clone();
+    assert_eq!(ipc.snapshot().bad_message, 2);
+    assert_eq!(ipc.bad_messages().count("frames_not_negotiated"), 2);
+    assert_eq!(
+        ipc.bad_message("client 0 unix", "frames_not_negotiated", &""),
+        cmux_panic_log::bad_message::Reported::Repeat
+    );
+
+    good.send(&ping(4));
+    assert_eq!(good.reply().unwrap()["id"], json!(4));
+    assert_eq!(good.finish(), ConnectionEnd::PeerClosed);
 }
 
 #[test]

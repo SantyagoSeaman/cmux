@@ -477,8 +477,9 @@ fn handle_websocket_connection_with_permit(
             }
             Ok(Message::Close(_)) => break,
             // The protocol is JSON text: a binary message is malformed.
-            Ok(Message::Binary(_)) => {
-                ipc.bad_message();
+            Ok(Message::Binary(payload)) => {
+                let detail = format!("a {}-byte binary message", payload.len());
+                report_websocket_bad_message(&ipc, client, "binary_message", &detail);
                 break;
             }
             Ok(_) => break,
@@ -499,8 +500,8 @@ fn handle_websocket_connection_with_permit(
                 }
             }
             Err(error) => {
-                if is_malformed_websocket_message(&error) {
-                    ipc.bad_message();
+                if let Some(reason) = malformed_websocket_reason(&error) {
+                    report_websocket_bad_message(&ipc, client, reason, &error);
                 }
                 break;
             }
@@ -513,19 +514,32 @@ fn handle_websocket_connection_with_permit(
     drop(connection_permit);
 }
 
-/// Whether a read error means the peer sent a malformed message (oversize,
-/// not UTF-8, against the protocol), not that the connection went away.
-fn is_malformed_websocket_message(error: &tungstenite::Error) -> bool {
+/// The bad_message reason of a read error when the peer sent a malformed
+/// message (oversize, not UTF-8, against the protocol); `None` when the
+/// connection only went away.
+fn malformed_websocket_reason(error: &tungstenite::Error) -> Option<&'static str> {
     use tungstenite::error::ProtocolError;
     match error {
-        tungstenite::Error::Capacity(_)
-        | tungstenite::Error::Utf8(_)
-        | tungstenite::Error::AttackAttempt => true,
-        tungstenite::Error::Protocol(protocol) => {
-            !matches!(protocol, ProtocolError::ResetWithoutClosingHandshake)
-        }
-        _ => false,
+        tungstenite::Error::Capacity(_) => Some("oversize"),
+        tungstenite::Error::Utf8(_) => Some("invalid_utf8"),
+        tungstenite::Error::AttackAttempt => Some("attack_attempt"),
+        tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => None,
+        tungstenite::Error::Protocol(_) => Some("websocket_protocol"),
+        _ => None,
     }
+}
+
+/// Counts and reports WebSocket client `client`'s bad message; the read loop
+/// then closes that client only.
+fn report_websocket_bad_message(
+    ipc: &crate::diagnostics::IpcStats,
+    client: u64,
+    reason: &'static str,
+    detail: &dyn std::fmt::Display,
+) {
+    let peer = format!("client {client} ws");
+    ipc.bad_message(&peer, reason, detail);
+    eprintln!("cmux-tui: {peer} closed: bad_message {reason}: {detail}");
 }
 
 /// What admitted the connection, once authenticated: `Person` for a

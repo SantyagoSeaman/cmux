@@ -70,6 +70,9 @@ final class LineTransport: Sendable {
     /// Decodes this connection's lines on its reader thread, counting into ``recorder``; event
     /// handlers, which run there, decode with it too.
     let decoder: WireDecoder
+    /// Where a bad message from the daemon is counted and reported before the connection closes
+    /// (``DaemonEndpoint/badMessages``); nil reports nothing, and the connection still closes.
+    let badMessages: BadMessageReports?
     /// Watches the reader's handling of each line, never its wait in `read(2)`; nil watches nothing.
     private let hangWatched: HangWatchedLane?
     /// The one timer of every reply deadline on this connection, armed for the earliest (``DeadlineHeap``).
@@ -84,12 +87,14 @@ final class LineTransport: Sendable {
     /// - Parameter stats: Where the connection counts (``DaemonEndpoint/wireStats``); nil for none.
     /// - Parameter hangs: Watches each line the reader handles and each writer drain step; nil: none. `writerTarget`: see `open`.
     /// - Parameter clock: What reply deadlines are measured and slept on; tests pass a `ManualClock`.
+    /// - Parameter badMessages: Counts and reports the daemon's bad messages (``DaemonEndpoint/badMessages``).
     init(path: String, opened: DaemonBridge.Opened? = nil, role: DaemonWireStats.Role, stats: DaemonWireStats?,
          hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil, trace: TraceRuntime = .shared,
-         clock: any Clock<Duration> = ContinuousClock()) throws(DaemonError) {
+         clock: any Clock<Duration> = ContinuousClock(), badMessages: BadMessageReports? = nil) throws(DaemonError) {
         self.path = path
         self.role = role
         self.trace = trace
+        self.badMessages = badMessages
         traceConnection = Self.traceConnectionBits(scope: trace.nextAsyncScope())
         traceFlowSeed = Self.requestFlowSeed(pid: getpid())
         deadlineTimer = DemandTimer(owner: "LineTransport.deadline", clock: clock)
@@ -282,6 +287,20 @@ final class LineTransport: Sendable {
         return .success(submittedID)
     }
 
+    /// The peer name of this connection's bad-message reports: its role (the socket path names the user).
+    var badMessagePeer: String { "daemon \(role.name)" }
+
+    /// The daemon sent a message that broke the wire's rules (a decoder above the transport found it): counts
+    /// and reports `reason` (``BadMessageReports``), then closes this connection, and only it, as lost, so its
+    /// owner reconnects. Pending requests fail with `.connectionClosed`; nothing read after it is routed.
+    func reportBadMessage(reason: String, detail: String) {
+        badMessages?.report(peer: badMessagePeer, reason: reason, detail: detail)
+        failAll(.lost("bad message: \(reason)"))
+        socket.withLock { socket in
+            if socket.fd >= 0 { Darwin.shutdown(socket.fd, SHUT_RDWR) }
+        }
+    }
+
     /// Closes the socket; pending requests fail with `.connectionClosed`.
     func close() {
         failAll(.closedByClient)
@@ -388,6 +407,8 @@ final class LineTransport: Sendable {
                 next = Self.nextMessage(&reader)
             }
             if case .failure(let bad) = next {
+                // Chrome's ReportBadMessage: counted, reported once per reason, and only this connection ends.
+                badMessages?.report(peer: badMessagePeer, reason: bad.reason, detail: String(describing: bad))
                 closeDetail = "bad message: \(bad.reason)"
                 break
             }

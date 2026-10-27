@@ -13,14 +13,19 @@
 //! takes only in part queues the rest until the fd is writable again
 //! (mojo/core/channel_posix.cc, `ChannelPosix::FlushOutgoingMessagesNoLock`).
 //! Recording is a relaxed atomic add, as `base/metrics/histogram_macros.h`
-//! records; nothing here allocates or locks.
+//! records; nothing here allocates or locks. A bad_message close also
+//! reports through the daemon's bad-message ledger (cmux-panic-log
+//! `bad_message`, Chrome's `ReportBadMessage`): one atomic add per close,
+//! and one log record per reason per launch.
 
 use std::cell::Cell;
+use std::fmt::Display;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use cmux_ipc::frame::FrameKind;
+use cmux_panic_log::bad_message::{BadMessages, Reported};
 use serde::Serialize;
 
 use super::{HistogramSnapshot, LogLinearHistogram};
@@ -77,6 +82,8 @@ pub struct IpcStats {
     write_syscalls: AtomicU64,
     write_stalls: AtomicU64,
     bad_message: AtomicU64,
+    /// The bad_message closes by reason, each reason reported once.
+    bad_messages: BadMessages,
 }
 
 impl Default for IpcStats {
@@ -94,6 +101,7 @@ impl Default for IpcStats {
             write_syscalls: AtomicU64::new(0),
             write_stalls: AtomicU64::new(0),
             bad_message: AtomicU64::new(0),
+            bad_messages: BadMessages::default(),
         }
     }
 }
@@ -141,9 +149,17 @@ impl IpcStats {
         self.messages_written.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A connection closed because a message was malformed.
-    pub fn bad_message(&self) {
+    /// `peer`'s connection closes because it sent a malformed message:
+    /// counts the close and reports `reason` (once per reason per launch).
+    /// The caller closes that connection, and only it.
+    pub fn bad_message(&self, peer: &str, reason: &'static str, detail: &dyn Display) -> Reported {
         self.bad_message.fetch_add(1, Ordering::Relaxed);
+        self.bad_messages.report_bad_message(peer, reason, detail)
+    }
+
+    /// The bad_message closes by reason.
+    pub fn bad_messages(&self) -> &BadMessages {
+        &self.bad_messages
     }
 
     /// `writer`, with each `write` call (one syscall on a socket) counted

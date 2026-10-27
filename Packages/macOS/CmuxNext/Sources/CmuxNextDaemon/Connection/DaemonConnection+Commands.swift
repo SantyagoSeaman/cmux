@@ -364,7 +364,8 @@ extension DaemonConnection {
         }
         guard let endpoint else { throw DaemonError.notConnected }
         let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .shutdown,
-                                                     stats: endpoint.wireStats, hangs: configuration.hangWatch)
+                                                     stats: endpoint.wireStats, hangs: configuration.hangWatch,
+                                                     badMessages: endpoint.badMessages)
         transport.start(onEvent: { _, _, _ in }, onClose: { _ in })
         defer { transport.close() }
         let request = ShutdownDaemonRequest(pid: identity.pid, generation: identity.generation, endTerminals: true,

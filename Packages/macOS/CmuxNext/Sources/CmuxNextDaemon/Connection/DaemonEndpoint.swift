@@ -16,14 +16,19 @@ public struct DaemonEndpoint: Hashable, Sendable {
     /// passes it to its ``LineTransport``. Nil counts nothing (a release build). Not part of the
     /// endpoint's identity (equality and hash).
     public var wireStats: DaemonWireStats?
+    /// Where the connections opened to this endpoint count and report the daemon's bad messages
+    /// (``BadMessageReports``): the ledger of the launcher or remote service that owns this daemon, so a
+    /// reason is reported once per daemon per launch. Nil reports nothing. Not part of the endpoint's identity.
+    public var badMessages: BadMessageReports?
 
     public init(socketPath: String, pid: Int32? = nil, generation: DaemonGeneration? = nil, bridge: DaemonBridge? = nil,
-                wireStats: DaemonWireStats? = nil) {
+                wireStats: DaemonWireStats? = nil, badMessages: BadMessageReports? = nil) {
         self.socketPath = socketPath
         self.pid = pid
         self.generation = generation
         self.bridge = bridge
         self.wireStats = wireStats
+        self.badMessages = badMessages
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
