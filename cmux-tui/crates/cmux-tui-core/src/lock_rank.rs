@@ -1,4 +1,7 @@
-//! Debug-build lock ranks (lockdep style) for the mux and surface locks.
+//! Debug-build lock ranks (lockdep style) for the mux and surface locks: the
+//! daemon's rank family for the shared `cmux_lock_rank` crate, which holds
+//! [`RankedMutex`], the per-thread rank stack and the order check
+//! (Chromium's base/task/common/checked_lock.h).
 //!
 //! Order, outer first: workspace registry -> journal writer -> registry
 //! connection -> `Mux::state` -> Kitty limits request -> PTY geometry ->
@@ -8,9 +11,9 @@
 //! both locks, so every test, Testbox gate and debug dogfood build checks the
 //! order on every path it runs. `try_lock` cannot deadlock: it is recorded but
 //! not checked. In release builds the rank, the name and the thread-local
-//! stack are compiled out; [`RankedMutex`] is then a plain [`Mutex`]. Holds
-//! of the ranks up to `Mux::state` are counted in every build: lock
-//! admission never makes a thread wait while it holds one
+//! stack are compiled out; [`RankedMutex`] is then a plain `Mutex` ranked
+//! `Leaf`. Holds of the ranks up to `Mux::state` are counted in every build:
+//! lock admission never makes a thread wait while it holds one
 //! ([`HeldRank::may_yield`]).
 //!
 //! Debug and test builds also time a contended [`RankedMutex::lock`]: the
@@ -22,12 +25,19 @@
 //! path the same way: base/synchronization/lock_impl.h (`LockImpl::Lock`
 //! tries first) and base/synchronization/lock_metrics_recorder.h.
 
-use std::ops::{Deref, DerefMut};
-#[cfg(debug_assertions)]
+use std::cell::Cell;
 use std::panic::Location;
-use std::sync::{LockResult, Mutex, MutexGuard, PoisonError, TryLockError, TryLockResult};
-#[cfg(debug_assertions)]
-use std::time::Instant;
+use std::time::Duration;
+
+/// One rank this thread holds; dropping it releases the rank.
+pub(crate) type HeldRank = cmux_lock_rank::HeldRank<LockRank>;
+/// A checked rank this thread is about to block on: the boost is taken
+/// before the wait, so the lock is never handed to a lowered waiter.
+pub(crate) type RankWait = cmux_lock_rank::RankWait<LockRank>;
+/// A `Mutex` with a lock rank. The API mirrors `std::sync::Mutex`.
+pub(crate) type RankedMutex<T> = cmux_lock_rank::RankedMutex<LockRank, T>;
+/// A held [`RankedMutex`]. The lock is released before its rank.
+pub(crate) type RankedGuard<'a, T> = cmux_lock_rank::RankedGuard<'a, LockRank, T>;
 
 /// Rank of a ranked lock. A thread acquires ranks in ascending order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,78 +74,6 @@ pub(crate) enum LockRank {
     Leaf,
 }
 
-#[cfg(debug_assertions)]
-mod held {
-    use super::LockRank;
-    use std::cell::RefCell;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    struct Held {
-        rank: LockRank,
-        name: &'static str,
-        id: u64,
-    }
-
-    thread_local! {
-        static HELD: RefCell<Vec<Held>> = const { RefCell::new(Vec::new()) };
-    }
-
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-    #[track_caller]
-    pub(super) fn check(rank: LockRank, name: &'static str) {
-        let violation = HELD.with(|held| {
-            held.borrow()
-                .iter()
-                .max_by_key(|entry| entry.rank)
-                .filter(|inner| inner.rank >= rank)
-                .map(|inner| (inner.name, inner.rank))
-        });
-        // Panic outside the closure so the location is the acquisition site.
-        if let Some((held_name, held_rank)) = violation {
-            // crash-allow: the debug and test lock-order assertion; release builds compile it out.
-            panic!(
-                "lock order violation: acquiring {name} ({rank:?}) while this thread holds \
-                 {held_name} ({held_rank:?}); the order is workspace.registry > journal.writer > \
-                 registry.connection > mux.state > pty.kitty_limits_request > \
-                 pty.geometry > pty.term > pty.runtime > pty.kitty_graphics_limits > \
-                 pty.taps > leaf (see PtyTerminalRuntime)"
-            );
-        }
-    }
-
-    pub(super) fn push(rank: LockRank, name: &'static str) -> u64 {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        HELD.with(|held| held.borrow_mut().push(Held { rank, name, id }));
-        id
-    }
-
-    /// Lock admission found no counted rank held (`free`): then no rank of
-    /// any kind may be held, or the thread would yield while holding a lock.
-    #[track_caller]
-    pub(super) fn assert_none_held_if(free: bool) {
-        if !free {
-            return;
-        }
-        let held_name = HELD.with(|held| held.borrow().first().map(|entry| entry.name));
-        debug_assert!(
-            held_name.is_none(),
-            "lock admission would yield while this thread holds {held_name:?}: nothing \
-             waits for another class while it holds a ranked lock"
-        );
-    }
-
-    pub(super) fn pop(id: u64) {
-        // Guards may drop out of order, and during thread teardown.
-        let _ = HELD.try_with(|held| {
-            let mut held = held.borrow_mut();
-            if let Some(index) = held.iter().rposition(|entry| entry.id == id) {
-                held.remove(index);
-            }
-        });
-    }
-}
-
 /// The last rank whose holds are counted in every build: lock admission
 /// (`server::priority_gate`) gates the registry, connection and state locks,
 /// and the lock order allows a thread to hold only these ranks while it
@@ -145,7 +83,7 @@ const LAST_ADMISSION_RANK: LockRank = LockRank::MuxState;
 thread_local! {
     /// Holds of ranks up to [`LAST_ADMISSION_RANK`] on this thread, counted
     /// in release builds too.
-    static ADMISSION_RANK_HOLDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static ADMISSION_RANK_HOLDS: Cell<u32> = const { Cell::new(0) };
 }
 
 impl LockRank {
@@ -158,259 +96,81 @@ impl LockRank {
     const fn raises_holder(self) -> bool {
         !matches!(self, Self::JournalWriter)
     }
+}
 
-    fn boost(self) -> cmux_tui_platform::qos::LockBoost {
+impl cmux_lock_rank::Rank for LockRank {
+    const ALL: &'static [Self] = &[
+        Self::WorkspaceRegistry,
+        Self::JournalWriter,
+        Self::RegistryConnection,
+        Self::MuxState,
+        Self::KittyLimitsRequest,
+        Self::Geometry,
+        Self::Terminal,
+        Self::Runtime,
+        Self::KittyLimits,
+        Self::AttachTaps,
+        Self::Leaf,
+    ];
+    const ORDER: &'static str = "workspace.registry > journal.writer > registry.connection > \
+         mux.state > pty.kitty_limits_request > pty.geometry > pty.term > pty.runtime > \
+         pty.kitty_graphics_limits > pty.taps > leaf (see PtyTerminalRuntime)";
+    const UNRANKED: Self = Self::Leaf;
+    type Wait = cmux_tui_platform::qos::LockBoost;
+    type Hold = AdmissionHold;
+
+    #[inline]
+    fn ordinal(self) -> usize {
+        self as usize
+    }
+
+    /// Raise a lowered thread before it blocks on the lock.
+    #[inline]
+    fn before_wait(self) -> cmux_tui_platform::qos::LockBoost {
         if self.raises_holder() {
             cmux_tui_platform::qos::LockBoost::hold()
         } else {
             cmux_tui_platform::qos::LockBoost::none()
         }
     }
-}
-
-/// One rank this thread holds; dropping it releases the rank. In release
-/// builds only the holder's QoS boost and the count of the ranks lock
-/// admission reads are kept.
-pub(crate) struct HeldRank {
-    #[cfg(debug_assertions)]
-    id: u64,
-    counted: bool,
-    /// Dropped with the rank, after the lock the guard releases first.
-    _boost: cmux_tui_platform::qos::LockBoost,
-}
-
-/// A checked rank this thread is about to block on: the boost is taken
-/// before the wait, so the lock is never handed to a lowered waiter.
-#[must_use = "the boost holds only until the lock is recorded with `held`"]
-pub(crate) struct RankWait {
-    rank: LockRank,
-    name: &'static str,
-    boost: cmux_tui_platform::qos::LockBoost,
-}
-
-impl RankWait {
-    /// A re-entry of a reentrant lock this thread holds: no order check and
-    /// no wait.
-    #[inline]
-    pub(crate) fn reentry(rank: LockRank, name: &'static str) -> Self {
-        Self { rank, name, boost: rank.boost() }
-    }
-
-    /// Record that this thread now holds the rank it waited for.
-    #[inline]
-    pub(crate) fn held(self) -> HeldRank {
-        HeldRank::with_boost(self.rank, self.name, self.boost)
-    }
-}
-
-impl HeldRank {
-    /// Check that `rank` may be acquired now. Call before blocking on the lock.
-    #[track_caller]
-    #[inline]
-    pub(crate) fn check(rank: LockRank, name: &'static str) {
-        #[cfg(debug_assertions)]
-        held::check(rank, name);
-        #[cfg(not(debug_assertions))]
-        let _ = (rank, name);
-    }
-
-    /// [`Self::check`], then raise a lowered thread before it blocks on the
-    /// lock; [`RankWait::held`] records the acquisition.
-    #[track_caller]
-    #[inline]
-    pub(crate) fn acquire(rank: LockRank, name: &'static str) -> RankWait {
-        Self::check(rank, name);
-        RankWait { rank, name, boost: rank.boost() }
-    }
-
-    /// Record that this thread now holds `rank`, taken without a wait (a
-    /// `try_lock`, a re-entry).
-    #[inline]
-    pub(crate) fn record(rank: LockRank, name: &'static str) -> Self {
-        Self::with_boost(rank, name, rank.boost())
-    }
 
     #[inline]
-    fn with_boost(
-        rank: LockRank,
-        name: &'static str,
-        _boost: cmux_tui_platform::qos::LockBoost,
-    ) -> Self {
-        let counted = rank <= LAST_ADMISSION_RANK;
+    fn on_held(self, boost: cmux_tui_platform::qos::LockBoost) -> AdmissionHold {
+        let counted = self <= LAST_ADMISSION_RANK;
         if counted {
             ADMISSION_RANK_HOLDS.with(|holds| holds.set(holds.get() + 1));
         }
-        #[cfg(debug_assertions)]
-        {
-            Self { id: held::push(rank, name), counted, _boost }
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            let _ = name;
-            Self { counted, _boost }
-        }
+        AdmissionHold { counted, _boost: boost }
     }
 
     /// True when this thread holds no ranked lock, so a lock admission may
     /// make it wait (`server::priority_gate`): a thread that yields while it
-    /// holds a lock could hold up the very request it yields to. Debug and
-    /// test builds check the whole rank stack against the count.
+    /// holds a lock could hold up the very request it yields to.
     #[inline]
-    pub(crate) fn may_yield() -> bool {
-        let free = ADMISSION_RANK_HOLDS.with(std::cell::Cell::get) == 0;
-        #[cfg(debug_assertions)]
-        held::assert_none_held_if(free);
-        free
+    fn may_yield() -> bool {
+        ADMISSION_RANK_HOLDS.with(Cell::get) == 0
+    }
+
+    fn note_contended_wait(waited: Duration, site: &'static Location<'static>) {
+        cmux_threads::lock_wait::note_timed_lock_wait(waited, site);
     }
 }
 
-impl Drop for HeldRank {
+/// What a held rank keeps in every build: the holder's QoS boost and the
+/// count of the ranks lock admission reads.
+pub(crate) struct AdmissionHold {
+    counted: bool,
+    /// Dropped after the count, as the rank's last part.
+    _boost: cmux_tui_platform::qos::LockBoost,
+}
+
+impl Drop for AdmissionHold {
     #[inline]
     fn drop(&mut self) {
-        #[cfg(debug_assertions)]
-        held::pop(self.id);
         if self.counted {
             // Guards may drop during thread teardown.
             let _ = ADMISSION_RANK_HOLDS.try_with(|holds| holds.set(holds.get().saturating_sub(1)));
         }
-    }
-}
-
-/// A [`Mutex`] with a lock rank. The API mirrors `std::sync::Mutex`.
-pub(crate) struct RankedMutex<T> {
-    inner: Mutex<T>,
-    #[cfg(debug_assertions)]
-    rank: LockRank,
-    #[cfg(debug_assertions)]
-    name: &'static str,
-    /// Test builds only: what a test reads of [`Self::wait_timed`].
-    #[cfg(test)]
-    probe: WaitProbe,
-}
-
-/// The threads past a failed try of a [`RankedMutex`], so a test starts a
-/// hold only once its waiter is contended, and the last wait it measured.
-#[cfg(test)]
-#[derive(Default)]
-struct WaitProbe {
-    waiting: std::sync::atomic::AtomicU32,
-    last_wait_nanos: std::sync::atomic::AtomicU64,
-}
-
-impl<T> RankedMutex<T> {
-    pub(crate) fn new(rank: LockRank, name: &'static str, value: T) -> Self {
-        #[cfg(not(debug_assertions))]
-        let _ = (rank, name);
-        Self {
-            inner: Mutex::new(value),
-            #[cfg(debug_assertions)]
-            rank,
-            #[cfg(debug_assertions)]
-            name,
-            #[cfg(test)]
-            probe: WaitProbe::default(),
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn rank(&self) -> (LockRank, &'static str) {
-        (self.rank, self.name)
-    }
-
-    #[cfg(not(debug_assertions))]
-    fn rank(&self) -> (LockRank, &'static str) {
-        (LockRank::Leaf, "")
-    }
-
-    #[track_caller]
-    #[inline]
-    pub(crate) fn lock(&self) -> LockResult<RankedGuard<'_, T>> {
-        let (rank, name) = self.rank();
-        let wait = HeldRank::acquire(rank, name);
-        match self.lock_timed() {
-            Ok(guard) => Ok(RankedGuard { guard, _held: wait.held() }),
-            Err(poison) => Err(PoisonError::new(RankedGuard {
-                guard: poison.into_inner(),
-                _held: wait.held(),
-            })),
-        }
-    }
-
-    /// The inner lock, tried first; a contended wait is timed
-    /// ([`Self::wait_timed`]).
-    #[cfg(debug_assertions)]
-    #[track_caller]
-    #[inline]
-    fn lock_timed(&self) -> LockResult<MutexGuard<'_, T>> {
-        match self.inner.try_lock() {
-            Ok(guard) => Ok(guard),
-            Err(TryLockError::Poisoned(poison)) => Err(poison),
-            Err(TryLockError::WouldBlock) => self.wait_timed(Location::caller()),
-        }
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[inline]
-    fn lock_timed(&self) -> LockResult<MutexGuard<'_, T>> {
-        self.inner.lock()
-    }
-
-    /// Waits for the inner lock after a failed try and reports the wait for
-    /// `site`. The report never panics, so it may run with the guard taken.
-    #[cfg(debug_assertions)]
-    #[cold]
-    #[inline(never)]
-    fn wait_timed(&self, site: &'static Location<'static>) -> LockResult<MutexGuard<'_, T>> {
-        let since = Instant::now();
-        #[cfg(test)]
-        self.probe.waiting.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let locked = self.inner.lock();
-        let waited = since.elapsed();
-        #[cfg(test)]
-        {
-            let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
-            self.probe.last_wait_nanos.store(nanos, std::sync::atomic::Ordering::Release);
-            self.probe.waiting.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        }
-        cmux_threads::lock_wait::note_timed_lock_wait(waited, site);
-        locked
-    }
-
-    #[inline]
-    pub(crate) fn try_lock(&self) -> TryLockResult<RankedGuard<'_, T>> {
-        let (rank, name) = self.rank();
-        match self.inner.try_lock() {
-            Ok(guard) => Ok(RankedGuard { guard, _held: HeldRank::record(rank, name) }),
-            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
-            Err(TryLockError::Poisoned(poison)) => {
-                Err(TryLockError::Poisoned(PoisonError::new(RankedGuard {
-                    guard: poison.into_inner(),
-                    _held: HeldRank::record(rank, name),
-                })))
-            }
-        }
-    }
-}
-
-/// A held [`RankedMutex`]. The lock is released before its rank.
-pub(crate) struct RankedGuard<'a, T> {
-    guard: MutexGuard<'a, T>,
-    _held: HeldRank,
-}
-
-impl<T> Deref for RankedGuard<'_, T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        &self.guard
-    }
-}
-
-impl<T> DerefMut for RankedGuard<'_, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.guard
     }
 }
 
@@ -420,7 +180,6 @@ mod tests {
     use cmux_threads::{BlockingKind, BlockingMode, LOCK_WAIT_BUDGET, ThreadQos};
     use std::panic::Location;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     /// The `file:line` of a lock call; `lock` returns it from the line it
@@ -468,13 +227,13 @@ mod tests {
             let mutex = Arc::clone(&mutex);
             move || lock(&mutex)
         });
-        while mutex.probe.waiting.load(Ordering::Acquire) == 0 {
+        while mutex.contention().waiting == 0 {
             std::thread::yield_now();
         }
         cmux_threads::checked::sync::sleep(hold);
         drop(guard);
         let site = cmux_threads::checked::sync::join(waiter).expect("waiter");
-        let waited = Duration::from_nanos(mutex.probe.last_wait_nanos.load(Ordering::Acquire));
+        let waited = mutex.contention().last_wait;
         Contended { count: lock_wait_count(site), waited }
     }
 
@@ -510,6 +269,48 @@ mod tests {
         assert_eq!(lock_wait_count(site), 0);
     }
 
+    /// The shared crate maps a held rank back through `ALL` by ordinal.
+    #[test]
+    fn every_rank_is_listed_in_order() {
+        use cmux_lock_rank::Rank;
+        for (index, rank) in LockRank::ALL.iter().enumerate() {
+            assert_eq!(rank.ordinal(), index, "{rank:?}");
+        }
+        assert!(LockRank::ALL.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(LockRank::ALL.last(), Some(&LockRank::UNRANKED));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "lock order violation: acquiring test.state (MuxState) while this thread holds \
+                    test.term (Terminal); the order is workspace.registry > journal.writer > \
+                    registry.connection > mux.state > pty.kitty_limits_request > pty.geometry > \
+                    pty.term > pty.runtime > pty.kitty_graphics_limits > pty.taps > leaf (see \
+                    PtyTerminalRuntime)"
+    )]
+    fn an_inversion_names_both_locks_and_the_order() {
+        let term = RankedMutex::new(LockRank::Terminal, "test.term", ());
+        let state = RankedMutex::new(LockRank::MuxState, "test.state", ());
+        let _term = term.lock().expect("term");
+        let _state = state.lock();
+    }
+
+    /// Lock admission may yield only once the counted ranks are released:
+    /// a state hold counts from when it is held, not while it waits.
+    #[test]
+    fn admission_ranks_count_from_held_to_drop() {
+        use super::HeldRank;
+        assert!(HeldRank::may_yield());
+        let wait = HeldRank::acquire(LockRank::MuxState, "test.state");
+        assert!(HeldRank::may_yield(), "a waiting thread holds nothing yet");
+        let held = wait.held();
+        assert!(!HeldRank::may_yield());
+        let leaf = HeldRank::record(LockRank::Leaf, "test.leaf");
+        drop(held);
+        drop(leaf);
+        assert!(HeldRank::may_yield());
+    }
+
     #[test]
     fn an_uncontended_lock_records_no_lock_wait_site() {
         let mutex = Arc::new(RankedMutex::new(LockRank::Leaf, "test.leaf", 0_u32));
@@ -521,7 +322,7 @@ mod tests {
                 site
             }
         });
-        assert_eq!(mutex.probe.last_wait_nanos.load(Ordering::Acquire), 0);
+        assert_eq!(mutex.contention().last_wait, Duration::ZERO);
         assert_eq!(lock_wait_count(site), 0);
     }
 }
