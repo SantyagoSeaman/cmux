@@ -36,6 +36,13 @@
 //! base/synchronization/lock_impl_posix.cc): a waiter of a higher QoS than
 //! the owner (a request thread behind a Utility journal writer) raises the
 //! owner to its QoS until the owner's last hold ends.
+//!
+//! A first acquisition on a request path passes the admitted overlay's read
+//! barrier first (`admitted_overlay`): while the writer has not answered an
+//! admitted intent, SQLite does not show it yet, so the read waits for the
+//! writer (counted, `read_barrier_waits`) before it takes the lock the
+//! writer commits under. Hot topology reads take the overlay instead and
+//! never reach the connection.
 
 use std::cell::Cell;
 use std::panic::Location;
@@ -165,6 +172,13 @@ pub(crate) struct RegistryConnection {
     pub(super) intent_sink: std::sync::OnceLock<Arc<dyn super::RegistryIntentSink>>,
     /// Indeterminate registry commits still owed to state (cx-g1fa.3).
     pub(super) unsettled: std::sync::Mutex<Vec<super::registry_intent::UnsettledReceipt>>,
+    /// Admitted intents the writer has not committed yet
+    /// (`admitted_overlay`). Taken only by threads that hold the workspace
+    /// registry, so it is never contended, never by the writer, and never
+    /// while this thread holds the connection lock.
+    admitted: cmux_threads::sync::Mutex<super::admitted_overlay::AdmittedOverlay>,
+    /// Entries in `admitted`, so a first acquisition with none skips its lock.
+    admitted_pending: std::sync::atomic::AtomicUsize,
     /// Flushes the WAL to disk off every request path (`wal_durability`);
     /// `None` for an in-memory registry.
     durability: Option<super::wal_durability::WalDurability>,
@@ -269,6 +283,8 @@ impl RegistryConnection {
             write_path_stats: crate::diagnostics::WritePathStats::default(),
             intent_sink: std::sync::OnceLock::new(),
             unsettled: std::sync::Mutex::default(),
+            admitted: cmux_threads::sync::Mutex::new(Default::default()),
+            admitted_pending: std::sync::atomic::AtomicUsize::new(0),
             durability,
             #[cfg(test)]
             journal_hooks: std::sync::Mutex::default(),
@@ -302,8 +318,11 @@ impl RegistryConnection {
     #[track_caller]
     pub(crate) fn get_at(&self, site: &'static Location<'static>) -> RegistryConnectionGuard<'_> {
         self.debug_assert_lock_order();
-        let wait = self.acquire_rank();
         let reentry = self.connection.is_owned_by_current_thread();
+        if !reentry {
+            self.read_barrier(site);
+        }
+        let wait = self.acquire_rank();
         let timed = RequestPathHold::note_acquire(reentry, site);
         let guard = if reentry {
             Gated::reentered(self.connection.lock(), &*self.gate)
@@ -326,9 +345,12 @@ impl RegistryConnection {
     #[track_caller]
     pub(crate) fn pin(&self) -> RegistryConnectionPin {
         self.debug_assert_lock_order();
-        let wait = self.acquire_rank();
         let site = Location::caller();
         let reentry = self.connection.is_owned_by_current_thread();
+        if !reentry {
+            self.read_barrier(site);
+        }
+        let wait = self.acquire_rank();
         let timed = RequestPathHold::note_acquire(reentry, site);
         let guard = if reentry {
             Gated::reentered(self.connection.lock_arc(), Arc::clone(&self.gate))
@@ -343,6 +365,52 @@ impl RegistryConnection {
             _rank: wait.held(),
             _request_path: RequestPathHold::held(timed),
         }
+    }
+
+    /// The admitted overlay, its answers taken; the pending count follows it.
+    pub(super) fn admitted_overlay(&self) -> AdmittedOverlayGuard<'_> {
+        AdmittedOverlayGuard {
+            overlay: self.admitted.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            pending: &self.admitted_pending,
+        }
+    }
+
+    /// Wait until the writer answered every admitted intent, before a first
+    /// acquisition at `site` (see the module docs).
+    fn read_barrier(&self, site: &'static Location<'static>) {
+        if self.admitted_pending.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return;
+        }
+        self.admitted_overlay().barrier(site);
+    }
+
+    /// Admit an intent to the overlay (`WorkspaceRegistry::admit_registry_intent`).
+    pub(super) fn admit_intent(
+        &self,
+        mutation: Option<(String, String)>,
+        base_revision: Option<u64>,
+        topology: super::admitted_overlay::AdmittedTopology,
+    ) -> super::admitted_overlay::AdmittedCommitSignal {
+        self.admitted_overlay().admit(mutation, base_revision, topology)
+    }
+
+    /// The newest admitted resource topology for a hot read; `None` when the
+    /// read goes to SQLite (behind the barrier if an intent is cold).
+    pub(super) fn admitted_topology(&self) -> Option<Arc<super::ResourceTopologySnapshot>> {
+        if self.admitted_pending.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return None;
+        }
+        self.admitted_overlay().serve()
+    }
+
+    /// `(hot reads served, read barrier waits, read barrier timeouts)` of
+    /// the admitted overlay.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "p05-ipc-120 admits intents through the overlay")
+    )]
+    pub(crate) fn admitted_counts(&self) -> (u64, u64, u64) {
+        self.admitted_overlay().counts()
     }
 
     /// A first acquisition: the holder record (lock-wait attribution and
@@ -485,6 +553,33 @@ impl RegistryConnection {
             _rank: record_rank(),
             _request_path: RequestPathHold::NONE,
         })
+    }
+}
+
+/// The overlay lock; on release it publishes how many entries are left.
+pub(super) struct AdmittedOverlayGuard<'a> {
+    overlay: cmux_threads::sync::MutexGuard<'a, super::admitted_overlay::AdmittedOverlay>,
+    pending: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl std::ops::Deref for AdmittedOverlayGuard<'_> {
+    type Target = super::admitted_overlay::AdmittedOverlay;
+
+    fn deref(&self) -> &Self::Target {
+        &self.overlay
+    }
+}
+
+impl std::ops::DerefMut for AdmittedOverlayGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.overlay
+    }
+}
+
+impl Drop for AdmittedOverlayGuard<'_> {
+    fn drop(&mut self) {
+        let left = self.overlay.pending();
+        self.pending.store(left, std::sync::atomic::Ordering::Release);
     }
 }
 

@@ -70,7 +70,9 @@ impl WorkspaceRegistry {
         result: &Value,
         project_resource: bool,
     ) -> anyhow::Result<WorkspaceCommitIntent> {
-        // A late indeterminate commit must land before the topology read.
+        // A late indeterminate commit must land before the topology read,
+        // which takes the newest admitted topology before SQLite
+        // (`admitted_overlay`).
         self.connection.drain_unsettled()?;
         validate_identifier("mutation id", &mutation.id)?;
         validate_identifier("mutation origin", &mutation.origin)?;
@@ -143,6 +145,27 @@ impl WorkspaceRegistry {
 }
 
 impl WorkspaceCommitIntent {
+    /// What the admitted overlay keeps for this intent: its mutation, the
+    /// resource revision it was prepared on, and the topology it leaves.
+    pub(super) fn admitted(
+        &self,
+    ) -> (Option<(String, String)>, Option<u64>, admitted_overlay::AdmittedTopology) {
+        use admitted_overlay::AdmittedTopology;
+        let mutation = Some((self.mutation.origin.clone(), self.mutation.id.clone()));
+        let Some(previous) = self.previous_topology.as_ref() else {
+            return (mutation, None, AdmittedTopology::Unchanged);
+        };
+        let topology = admitted_overlay::topology_after_workspace_commit(
+            previous,
+            &self.workspaces,
+            self.active_workspace.as_ref(),
+        )
+        .map_or(AdmittedTopology::Cold, |after| {
+            AdmittedTopology::After(std::sync::Arc::new(after))
+        });
+        (mutation, Some(previous.revision), topology)
+    }
+
     /// Write `extra` after the ledger, before the resource batch.
     #[allow(dead_code)]
     pub(crate) fn with_extra_rows(mut self, extra: OwnedTransactionWrite) -> Self {

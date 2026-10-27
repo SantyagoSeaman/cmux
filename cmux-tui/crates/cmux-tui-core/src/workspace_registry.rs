@@ -32,6 +32,8 @@ use crate::terminal_host_runtime::TerminalHostLiveness;
 pub use open_guard::RegistryQuarantined;
 use open_guard::preflight_unsupported_schema;
 
+#[cfg_attr(not(test), expect(dead_code, reason = "p05-ipc-120 admits intents through the overlay"))]
+mod admitted_overlay;
 pub(crate) mod agent_cli_intents;
 mod compact;
 mod detached_terminals;

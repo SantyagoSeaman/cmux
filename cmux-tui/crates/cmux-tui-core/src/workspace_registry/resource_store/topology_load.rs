@@ -17,6 +17,9 @@ impl WorkspaceRegistry {
         &self,
         workspaces: &[WorkspacePublicId],
     ) -> anyhow::Result<ResourceTopologySnapshot> {
+        if let Some(admitted) = self.connection.admitted_topology() {
+            return Ok(admitted_overlay::scoped(&admitted, workspaces));
+        }
         load_resource_topology_scoped(
             &self.connection.get(),
             self.session_id.clone(),
