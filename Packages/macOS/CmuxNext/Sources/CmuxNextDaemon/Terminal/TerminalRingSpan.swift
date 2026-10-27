@@ -108,7 +108,7 @@ struct TerminalRingRun: Sendable {
     private func span(_ bytes: Data, from start: UInt64) throws(TerminalRingCutError) -> TerminalRingSpan {
         let ring = ring
         let laps = laps
-        let range = start ..< start + UInt64(bytes.count)
+        let range = start ..< start + UInt64(truncatingIfNeeded: bytes.count)
         // SAFETY: only the address is read, inside the closure that lends it.
         let address = unsafe bytes.withUnsafeBytes { buffer in unsafe UInt(bitPattern: buffer.baseAddress) }
         guard ring.dataAddresses.contains(address),

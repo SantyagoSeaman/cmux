@@ -32,9 +32,10 @@ extension TerminalEventQueue.State {
         }
         guard !finished, !run.laps.isMarked else { return nil }
         if let waiter = waiter.take() { return (waiter, .output(span.bytes, colors: nil)) }
-        if items.count > head, case .ring(let tail)? = items.last, tail.count < UInt64(mergeLimit),
+        if items.count > head, case .ring(let tail)? = items.last, tail.count < UInt64(clamping: mergeLimit),
            let wider = tail.joined(with: run) {
-            items[items.count - 1] = .ring(wider)  // one range of one mapping: O(1) items however long the stall
+            _ = items.popLast()
+            items.append(.ring(wider))  // one range of one mapping: O(1) items however long the stall
         } else {
             items.append(.ring(run))
         }
@@ -46,7 +47,7 @@ extension TerminalEventQueue.State {
     mutating func take(ring first: TerminalRingRun, mergeLimit: Int) -> TerminalChannelEvent? {
         guard !first.laps.isMarked else { return nil }
         var joined = first  // one range of one mapping: merging copies nothing
-        while joined.count < UInt64(mergeLimit), case .ring(let next)? = items[checked: head],
+        while joined.count < UInt64(clamping: mergeLimit), case .ring(let next)? = items[checked: head],
               let wider = joined.joined(with: next) {
             joined = wider
             head += 1
@@ -61,7 +62,7 @@ extension TerminalEventQueue.State {
 
     /// The first queued run of `ring`: it starts before every later one.
     private func oldestRun(of ring: any TerminalOutputRing) -> TerminalRingRun? {
-        for item in items[head...] {
+        for item in items.dropFirst(head) {
             if case .ring(let run) = item, run.ring === ring { return run }
         }
         return nil
