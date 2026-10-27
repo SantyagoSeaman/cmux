@@ -43,10 +43,11 @@ impl Hub {
         session.last_active.store(self.clock_now(), Ordering::Relaxed);
     }
 
-    /// Unused right now. A turn or permission an adopted host's recovery
-    /// rebuilt (`hosts.rs` `recover_work`) counts like a live one: it sets
-    /// `session.turn` (and holds `turn_lock` until the answer), registers
-    /// the permission as pending, and moves the status off ready.
+    /// Unused right now, read while the caller holds its `turn_lock` and `spawn_lock` (so no
+    /// prompt and no start begins until the harness is gone). A turn or permission an adopted
+    /// host's recovery rebuilt (`hosts.rs` `recover_work`) counts like a live one: it sets
+    /// `session.turn` (and holds `turn_lock` until the answer), registers the permission as
+    /// pending, and moves the status off ready.
     fn idle_eligible(&self, session: &Session) -> bool {
         !self.stopping.load(Ordering::SeqCst)
             && matches!(session.status(), SessionStatus::Ready | SessionStatus::Idle)
@@ -54,10 +55,8 @@ impl Hub {
             // Nor a turn Claude Code started itself (a task notification's), which `turn` does
             // not show.
             && !session.harness_turn.load(Ordering::SeqCst)
-            && session.turn_lock.try_lock().is_ok()
             && session.queued() == 0
             && session.pending_permissions().is_empty()
-            && session.spawn_lock.try_lock().is_ok()
             // A process still running in the background (a dev server, a
             // watcher) ends with the harness: never reap it for idleness.
             && !self.any_process_running(session)
@@ -140,6 +139,14 @@ impl Hub {
             if !has_child {
                 continue;
             }
+            // Held until the harness is gone: a prompt (the queue takes `turn_lock` first) or a
+            // start that comes meanwhile waits, then starts the agent again, never one that is
+            // being ended. Either held: in use.
+            let held = (session.turn_lock.try_lock(), session.spawn_lock.try_lock());
+            let (Ok(_turn), Ok(_spawn)) = held else {
+                self.touch(&session);
+                continue;
+            };
             if self.idle_eligible(&session) {
                 let idle_for = now.saturating_sub(session.last_active.load(Ordering::Relaxed));
                 let began = std::time::Instant::now();
@@ -209,14 +216,19 @@ impl Hub {
         }
     }
 
-    /// A person started typing into `session` (`_acpmux/typing` on): a hibernated session wakes
+    /// A person typed into `session` (`_acpmux/typing` on, sent again every 5 s while typing goes
+    /// on): its idle period starts again, and a hibernated session wakes
     /// now, so its agent is up by the time they send. Nothing for a session that was not
     /// hibernated, is closed, already has its agent or starts one, or whose folder has no Trust
     /// answer (`warm.rs`). The wake runs on its own task; a failure is logged and the prompt that
     /// follows starts the agent itself (and shows its error, with Retry, if that fails too).
     pub fn wake_for_typing(self: &Arc<Self>, session: &Arc<Session>, web: bool) {
+        // Typing is use: a chat being typed into does not hibernate meanwhile.
+        self.touch(session);
         if session.hibernated_at.load(Ordering::SeqCst) == 0
             || session.status() != SessionStatus::Idle
+            // A watched chat starts no agent until Take Over (`watch.rs`).
+            || session.meta().watching.is_some()
             || self.stopping.load(Ordering::SeqCst)
             || session.spawn_lock.try_lock().is_err()
         {

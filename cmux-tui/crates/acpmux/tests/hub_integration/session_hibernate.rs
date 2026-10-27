@@ -224,9 +224,13 @@ async fn typing_into_a_hibernated_chat_wakes_it_before_the_prompt() {
     r.c.request(method::SESSION_PROMPT, prompt(&id, "typed", None)).await.unwrap();
     assert_eq!(r.pids("harness").len(), 2, "the prompt started a second agent");
     assert_eq!(r.texts(&id, "user_message").iter().filter(|t| *t == "typed").count(), 1);
-    // Typing into a session that is awake starts nothing.
+    // Typing into a session that is awake starts nothing, and is use: a person still typing
+    // near the end of the 2 minutes keeps the agent.
+    r.clock.advance(IDLE - Duration::from_secs(10));
     r.c.request(method::MUX_TYPING, json!({"sessionId": id, "on": true})).await.unwrap();
+    r.clock.advance(Duration::from_secs(30));
     settle().await;
+    assert_eq!(r.status(&id), "ready", "hibernated while being typed into");
     assert_eq!(r.pids("harness").len(), 2);
 }
 
