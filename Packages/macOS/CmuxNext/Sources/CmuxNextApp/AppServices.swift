@@ -188,7 +188,7 @@ final class AppServices {
                                                                  activeWindow: { [weak self] in self?.windows.active?.window })
     private(set) lazy var updateSheet: UpdateSheetController = UpdateSheetController(source: UpdateSheetModel(service: updater, openLink: { LinkRouter.shared.open($0) }))  // first read in init (no IUO)
     /// cmux.json controller; set by `AppDelegate` once it starts. Agent tabs made before it (by launch's action bindings) follow it from here.
-    var settings: SettingsController? { didSet { if let settings, settings !== oldValue { madeAgentTabs?.follow(settings); browserHost?.follow(settings); madeRemoteLocalhost?.follow(settings); terminalDelegate.followPredictiveEcho(settings, on: mainWork); if cloudContext != nil { followHostReplica(settings) } } } }
+    var settings: SettingsController? { didSet { if let settings, settings !== oldValue { madeAgentTabs?.follow(settings); browserHost?.follow(settings); madeRemoteLocalhost?.follow(settings); terminalDelegate.followPredictiveEcho(settings, on: mainWork); (NSApp as? CmuxApplication)?.followMainJobGate(settings, on: mainWork); if cloudContext != nil { followHostReplica(settings) } } } }
     /// Writes the palette shortcut recorder's edits (the recorder holds it weakly).
     var paletteShortcutEditor: PaletteShortcutEditor? {
         didSet { palettes.built?.shortcutRecorder.editor = paletteShortcutEditor }
@@ -660,6 +660,8 @@ final class AppServices {
     let traceBlackBox: TraceBlackBoxFileSteps?
     /// The last quit's agent pages and chat composers, read off the main thread since the launch began.
     let launchImages: AgentPaneLaunchImages, relaunchWake: AgentPaneRelaunchWake
+    /// The last quit's terminal frames, read off the main thread since the launch began (the panes show them, the quit saves them).
+    let terminalLaunchFrames: TerminalLaunchFrames
     /// The agent panes' launch images as one startup ref (made at the root with the launch's scheduler).
     let launchImageHold: LaunchImageHold
     /// The launch's scheduler: the right sidebar's icon build is one of its cpu-lane posts. Nil in tests with no launch.
@@ -701,7 +703,8 @@ final class AppServices {
     ///   makes the right sidebar's icons on main when its first panel is built.
     init(environment: AppEnvironment, launchReveal: LaunchReveal = LaunchReveal(), agentPaneEnvironment: [String: String]? = nil,
          work: BackgroundWork? = nil, mainWork: MainWorkScheduler = MainWorkScheduler(budget: MainFrameBudget()),
-         launchImages: AgentPaneLaunchImages = AgentPaneLaunchImages(directory: nil), relaunchWake: AgentPaneRelaunchWake = AgentPaneRelaunchWake(file: nil),
+         launchImages: AgentPaneLaunchImages = AgentPaneLaunchImages(directory: nil), terminalLaunchFrames: TerminalLaunchFrames? = nil,
+         relaunchWake: AgentPaneRelaunchWake = AgentPaneRelaunchWake(file: nil),
          wireStats: DaemonWireStats? = nil, hangWatch: (any HangWatchScoping)? = TraceRuntime.shared.hangWatch,
          energyMonitor: EnergyMonitor = EnergyMonitor(), inputTap: InputEventTap = InputEventTap(),
          launchImageHold: LaunchImageHold = LaunchImageHold(), launchStartup: StartupScheduler? = nil,
@@ -720,6 +723,7 @@ final class AppServices {
         hoverCards = HoverCardCoordinator(input: inputTap, changes: overlayChanges, appEvents: appEvents, workspaceEvents: workspaceEvents)
         _ = CmuxDialogCenter.shared.observe { [overlayChanges] _ in overlayChanges.signal() } // an app dialog's host has no window
         (self.launchImages, self.relaunchWake, self.launchImageHold) = (launchImages, relaunchWake, launchImageHold)
+        self.terminalLaunchFrames = terminalLaunchFrames ?? TerminalLaunchFrames(state: environment.sidebarSnapshotFile?.url.deletingLastPathComponent())
         (self.launchStartup, self.crashKeys) = (launchStartup, crashKeys)
         // Estimated presents read the key display's last tick; no link starts for them.
         actionBudget = ActionBudgetMonitor(board: mainWork.budget.board, displays: FrameScheduler.appDisplays)
@@ -752,7 +756,7 @@ final class AppServices {
         crashRecovery = CrashRecoveryService(bundleID: environment.launch.bundleID, runMarker: environment.runMarker, crashKeys: crashKeys, work: work, mainWork: mainWork)
         self.features = launchFeatures
         launchPanes = LaunchPaneGate(startup: self.features.isEnabled(.launchVisiblePanesOnly) ? launchStartup : nil)
-        crashReporting = AppCrashReporting(environment: environment, features: CrashFeatureScope(FeatureFlagsPage.report(self.features, tunables: TunableStore.shared).fieldState), afterStartup: .init(handlersFirst: self.features.isEnabled(.sentryHandlersFirst), startup: launchStartup))  // after the run marker's handlers
+        crashReporting = AppCrashReporting(environment: environment, features: CrashFeatureScope(FeatureFlagsPage.report(self.features, tunables: TunableStore.shared).fieldState), afterStartup: .init(handlersFirst: self.features.isEnabled(.sentryHandlersFirst), startup: launchStartup), forwardersAfterStartup: self.features.isEnabled(.crashForwardersAfterStartup) ? launchStartup : nil)  // after the run marker's handlers
         DebugTimings.markLaunch("services.crash_reporting")
         machines = MachineRegistry(local: daemon)
         machines.isFeatureDisabled = { [registry] in registry.disabledFeatures.contains($0) }

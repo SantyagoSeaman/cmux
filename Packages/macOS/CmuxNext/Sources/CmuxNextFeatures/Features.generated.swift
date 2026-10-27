@@ -419,9 +419,26 @@ nonisolated extension Feature {
         runtimeMutable: false
     )
 
+    /// The crash report and panic log forwarders (DiagnosticReports listing, panic logs, finding acpmux) start in one best-effort files-lane job after startup completes, behind the fence; the previous run's reports are still sent this launch. Crash handlers install at launch.
+    public static let crashForwardersAfterStartup = Feature(
+        index: 24,
+        name: "crashForwardersAfterStartup",
+        owner: "Performance Lead",
+        description: "The crash report and panic log forwarders (DiagnosticReports listing, panic logs, finding acpmux) start in one best-effort files-lane job after startup completes, behind the fence; the previous run's reports are still sent this launch. Crash handlers install at launch.",
+        kind: .perfPath,
+        process: .app,
+        chromiumFeature: nil,
+        defaults: FeatureDefaults(dev: false, nightly: false, release: false),
+        expires: "2026-12-20",
+        params: [],
+        stories: ["launch-cold", "launch-warm"],
+        sticky: false,
+        runtimeMutable: false
+    )
+
     /// Daemon requests run at their cause's class: verified-app requests at user-initiated, CLI, script, agent and page requests at utility, raised while they wait for or hold a daemon lock.
     public static let daemonRequestQos = Feature(
-        index: 24,
+        index: 25,
         name: "daemonRequestQos",
         owner: "Performance Lead",
         description: "Daemon requests run at their cause's class: verified-app requests at user-initiated, CLI, script, agent and page requests at utility, raised while they wait for or hold a daemon lock.",
@@ -711,6 +728,23 @@ nonisolated extension Feature {
         expires: "2026-12-20",
         params: [],
         stories: ["memory-hidden"],
+        sticky: false,
+        runtimeMutable: false
+    )
+
+    /// Main-actor jobs that are not part of a person's input wait while a key, click, scroll or drag is pending or in dispatch, and run in order after that input's frame commits, at most one display refresh later.
+    public static let mainJobGate = Feature(
+        index: 40,
+        name: "mainJobGate",
+        owner: "PL-typing",
+        description: "Main-actor jobs that are not part of a person's input wait while a key, click, scroll or drag is pending or in dispatch, and run in order after that input's frame commits, at most one display refresh later.",
+        kind: .perfPath,
+        process: .app,
+        chromiumFeature: nil,
+        defaults: FeatureDefaults(dev: false, nightly: false, release: false),
+        expires: "2026-12-20",
+        params: [],
+        stories: ["typing", "typing-stress"],
         sticky: false,
         runtimeMutable: false
     )
@@ -1137,6 +1171,23 @@ nonisolated extension Feature {
         expires: "2026-12-20",
         params: [],
         stories: ["pane-stress"],
+        sticky: false,
+        runtimeMutable: false
+    )
+
+    /// Small app stores join the memory coordinator: last-quit terminal frames and agent pages go once the launch settles; glass lens stills and What's New pictures go at memory warning and are made again; terminal Kitty image storage is sized from the Mac's memory and halves at warning.
+    public static let memorySmallAppStores = Feature(
+        index: 64,
+        name: "memorySmallAppStores",
+        owner: "PL-memory",
+        description: "Small app stores join the memory coordinator: last-quit terminal frames and agent pages go once the launch settles; glass lens stills and What's New pictures go at memory warning and are made again; terminal Kitty image storage is sized from the Mac's memory and halves at warning.",
+        kind: .labs,
+        process: .app,
+        chromiumFeature: nil,
+        defaults: FeatureDefaults(dev: false, nightly: false, release: false),
+        expires: nil,
+        params: [],
+        stories: [],
         sticky: false,
         runtimeMutable: false
     )
@@ -1723,6 +1774,23 @@ nonisolated extension Feature {
         runtimeMutable: false
     )
 
+    /// A resized or newly shown terminal's frame at its new size goes into the commit that carries the size when Ghostty already drew it; it never waits. Needs a GhosttyNextKit pin whose ghostty_surface_present_host_frame never waits (p03-rendering-084).
+    public static let terminalPreCommitPresent = Feature(
+        index: 98,
+        name: "terminalPreCommitPresent",
+        owner: "PL-ghostty",
+        description: "A resized or newly shown terminal's frame at its new size goes into the commit that carries the size when Ghostty already drew it; it never waits. Needs a GhosttyNextKit pin whose ghostty_surface_present_host_frame never waits (p03-rendering-084).",
+        kind: .perfPath,
+        process: .app,
+        chromiumFeature: nil,
+        defaults: FeatureDefaults(dev: false, nightly: false, release: false),
+        expires: "2026-12-24",
+        params: [],
+        stories: ["motion"],
+        sticky: false,
+        runtimeMutable: false
+    )
+
     /// Terminal sizing counts one participant per app connection: all of an app's views of one terminal are leases of one participant (its latest active view sets its size), and disconnecting that participant ends only that terminal's views, not the app's connection.
     public static let terminalSizingPerApp = Feature(
         index: 99,
@@ -1948,6 +2016,7 @@ nonisolated extension Feature {
         .coldScrollbackCompression,
         .compressedSnapshots,
         .controlSocketEarlyBind,
+        .crashForwardersAfterStartup,
         .daemonRequestQos,
         .daemonTerminalStreams,
         .directionalPrewarm,
@@ -1965,6 +2034,7 @@ nonisolated extension Feature {
         .launchVisiblePanesOnly,
         .launchWindowsByOcclusion,
         .leftoverDaemonIdleExit,
+        .mainJobGate,
         .memoryAcpmuxPressure,
         .memoryAgentAndControlCaches,
         .memoryAppCaches,
@@ -1989,6 +2059,7 @@ nonisolated extension Feature {
         .memorySaverBackgroundActivity,
         .memorySaverSetting,
         .memoryScrollbackPressure,
+        .memorySmallAppStores,
         .memoryTabCaches,
         .memoryTerminalLastFrames,
         .memoryUrgentDiscardRanking,
@@ -2023,6 +2094,7 @@ nonisolated extension Feature {
         .terminalGPURelease,
         .terminalHolder,
         .terminalPointerFrames,
+        .terminalPreCommitPresent,
         .terminalSizingPerApp,
         .topPageDiscard,
         .visibilityGatedHosting,
@@ -2062,6 +2134,7 @@ nonisolated extension Feature {
         .coldScrollbackCompression,
         .compressedSnapshots,
         .controlSocketEarlyBind,
+        .crashForwardersAfterStartup,
         .daemonRequestQos,
         .daemonTerminalStreams,
         .directionalPrewarm,
@@ -2079,6 +2152,7 @@ nonisolated extension Feature {
         .launchVisiblePanesOnly,
         .launchWindowsByOcclusion,
         .leftoverDaemonIdleExit,
+        .mainJobGate,
         .memoryAcpmuxPressure,
         .memoryAgentAndControlCaches,
         .memoryAppCaches,
@@ -2103,6 +2177,7 @@ nonisolated extension Feature {
         .memorySaverBackgroundActivity,
         .memorySaverSetting,
         .memoryScrollbackPressure,
+        .memorySmallAppStores,
         .memoryTabCaches,
         .memoryTerminalLastFrames,
         .memoryUrgentDiscardRanking,
@@ -2137,6 +2212,7 @@ nonisolated extension Feature {
         .terminalGPURelease,
         .terminalHolder,
         .terminalPointerFrames,
+        .terminalPreCommitPresent,
         .terminalSizingPerApp,
         .topPageDiscard,
         .visibilityGatedHosting,
