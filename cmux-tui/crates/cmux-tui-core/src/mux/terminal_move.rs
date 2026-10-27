@@ -1,6 +1,7 @@
 //! Terminal moves between workspaces and their projection into the destination workspace state.
 
 use super::*;
+use crate::workspace_registry::{RegistryIntent, RegistryReceipt, TerminalRegistryCommit};
 
 impl Mux {
     #[allow(clippy::too_many_arguments)]
@@ -61,7 +62,6 @@ impl Mux {
                 }
                 (terminal, current_revision, true, changed, placement, topology_changed)
             } else {
-                let snapshot = registry.terminal_snapshot()?;
                 let mut terminal = registry
                     .terminal_record(terminal_id)?
                     .ok_or_else(|| anyhow::anyhow!("unknown terminal {terminal_id}"))?;
@@ -75,22 +75,33 @@ impl Mux {
                 }
                 let changed = terminal.workspace_key != workspace_key;
                 terminal.workspace_key = workspace_key.to_string();
-                let commit = registry.commit_terminal(
+                let current_revision = registry.terminal_revision()?;
+                check_terminal_move(
+                    &registry,
+                    &state,
+                    expected_generation,
+                    expected_revision,
+                    current_revision,
+                    &terminal,
+                    changed,
+                )?;
+                let result = serde_json::json!({
+                    "terminal_id":terminal_id,
+                    "workspace_key":workspace_key,
+                    "incarnation":terminal.incarnation,
+                    "state":terminal.lifecycle,
+                    "changed":changed,
+                });
+                let intent = registry.prepare_terminal_commit(
                     mutation,
                     &fingerprint,
                     expected_generation,
-                    expected_revision.or(Some(snapshot.revision)),
+                    Some(current_revision),
                     "terminal-moved",
                     &terminal,
-                    &serde_json::json!({
-                        "terminal_id":terminal_id,
-                        "workspace_key":workspace_key,
-                        "incarnation":terminal.incarnation,
-                        "state":terminal.lifecycle,
-                        "changed":changed,
-                    }),
+                    &result,
                 )?;
-                self.emit_terminal_registry_changed(&registry, commit.revision);
+                let prepared = prepared_terminal_move(&terminal, current_revision, result)?;
                 #[cfg(test)]
                 if let Some(hook) = self.terminal_move_before_projection.lock().unwrap().clone() {
                     hook();
@@ -103,7 +114,8 @@ impl Mux {
                 // The projection moved the terminal's view between panes;
                 // the resource topology must record that move under the
                 // same locks, or a restore reverts it and later tab moves
-                // plan from a placement that memory no longer has.
+                // plan from a placement that memory no longer has. It needs
+                // the connection pin, which the admission below releases.
                 if topology_changed {
                     self.commit_full_resource_projection_locked(
                         &mut registry,
@@ -112,6 +124,18 @@ impl Mux {
                         "terminal.move",
                     )?;
                 }
+                // Admit then reply (F10): the writer commits the row later,
+                // in admit order; the event goes out at admit.
+                let commit = registry
+                    .admit_registry_intent(
+                        RegistryIntent::Terminal(intent),
+                        RegistryReceipt::Terminal(prepared),
+                        || state.unpin(),
+                        None,
+                    )?
+                    .into_receipt()
+                    .into_terminal()?;
+                self.emit_terminal_registry_changed(&registry, commit.revision);
                 (terminal, commit.revision, false, changed, placement, topology_changed)
             }
         };
@@ -222,3 +246,61 @@ impl Mux {
         Ok((Some(placement), true))
     }
 }
+
+/// The `terminal-moved` checks the journal writer runs at apply, run at
+/// prepare so the admitted reply is what the writer commits (F10,
+/// p05-ipc-123): generation, revision CAS, live destination. The caller
+/// holds the registry and the pinned state, so no other terminal row or
+/// workspace close commits in between.
+fn check_terminal_move(
+    registry: &WorkspaceRegistry,
+    state: &State,
+    expected_generation: Option<&str>,
+    expected_revision: Option<u64>,
+    current_revision: u64,
+    terminal: &RegistryTerminal,
+    changed: bool,
+) -> anyhow::Result<()> {
+    if let Some(expected) = expected_generation
+        && expected != registry.generation()
+    {
+        anyhow::bail!(
+            "terminal generation conflict: expected {expected}, current {}",
+            registry.generation()
+        );
+    }
+    if let Some(expected) = expected_revision
+        && expected != current_revision
+    {
+        anyhow::bail!(
+            "terminal revision conflict: expected {expected}, current {current_revision}"
+        );
+    }
+    let key = terminal.workspace_key.as_str();
+    if changed && !detached_terminals::is_detached_key(key) && state.workspace_by_key(key).is_none()
+    {
+        anyhow::bail!("terminal workspace is missing or closed: {key}");
+    }
+    Ok(())
+}
+
+/// The receipt the writer gives a checked `terminal-moved` intent at
+/// `current_revision`: the next revision, or for an exited terminal the exit
+/// latch's replayed receipt (`TerminalCommitIntent::apply`).
+fn prepared_terminal_move(
+    terminal: &RegistryTerminal,
+    current_revision: u64,
+    result: Value,
+) -> anyhow::Result<TerminalRegistryCommit> {
+    if terminal.lifecycle == TerminalLifecycle::Exited {
+        return Ok(TerminalRegistryCommit { revision: current_revision, result, replayed: true });
+    }
+    let revision = current_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("terminal revision exhausted"))?;
+    Ok(TerminalRegistryCommit { revision, result, replayed: false })
+}
+
+#[cfg(test)]
+#[path = "terminal_move_tests.rs"]
+mod tests;
