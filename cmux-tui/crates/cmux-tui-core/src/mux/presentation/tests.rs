@@ -13,15 +13,26 @@ impl PresentationTestSession {
     }
 
     pub(crate) fn open(&self) -> Arc<Mux> {
+        self.open_with(|_| ()).0
+    }
+
+    /// [`Self::open`] after `prepare` ran on the registry (for example to
+    /// install a test intent sink before the mux installs its writer's).
+    pub(crate) fn open_with<T>(
+        &self,
+        prepare: impl FnOnce(&WorkspaceRegistry) -> T,
+    ) -> (Arc<Mux>, T) {
         let registry = WorkspaceRegistry::open(&self.root, self.session).unwrap();
-        Mux::from_workspace_registry(
+        let prepared = prepare(&registry);
+        let mux = Mux::from_workspace_registry(
             self.session.into(),
             SurfaceOptions::default(),
             registry,
             ProviderWorkspaceState::default(),
             true,
         )
-        .unwrap()
+        .unwrap();
+        (mux, prepared)
     }
 }
 

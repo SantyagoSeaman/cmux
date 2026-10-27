@@ -165,7 +165,7 @@ fn owned_extra_rows_commit_or_roll_back_with_the_record() {
     let failing: OwnedTransactionWrite = Box::new(|_| anyhow::bail!("extra rows refused"));
     let error = fixture
         .registry
-        .put_frontend_browser_owned(BROWSER, &record("https://a.test/"), failing)
+        .put_frontend_browser(BROWSER, &record("https://a.test/"), Some(failing))
         .unwrap_err();
     assert!(error.to_string().contains("extra rows refused"));
     assert!(
@@ -181,23 +181,56 @@ fn owned_extra_rows_commit_or_roll_back_with_the_record() {
     });
     fixture
         .registry
-        .put_frontend_browser_owned(BROWSER, &record("https://a.test/"), history)
+        .put_frontend_browser(BROWSER, &record("https://a.test/"), Some(history))
         .unwrap();
     assert_eq!(fixture.registry.frontend_browser_history(BROWSER).unwrap().as_deref(), Some("{}"));
     assert_eq!(fixture.writer.sent.load(Ordering::SeqCst), 2);
     assert_eq!(fixture.local_commits(), 0);
 }
 
-/// A borrowed extra cannot leave the request thread: that put commits
-/// locally and is counted (`request_effect_commits`).
+/// A keyed registration reads the key in the writer transaction: a new key
+/// puts the record with its row, a recorded one returns what it stored and
+/// writes nothing. The request thread takes no connection.
 #[test]
-fn a_borrowed_extra_commits_locally_and_is_counted() {
-    let mut fixture = Fixture::open("borrowed");
-    let write = |_: &Transaction<'_>| Ok(());
-    fixture
-        .registry
-        .put_frontend_browser(BROWSER, &record("https://a.test/"), Some(&write))
-        .unwrap();
-    assert_eq!(fixture.writer.sent.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.local_commits(), 1);
+fn a_keyed_registration_reads_and_writes_only_in_the_writer() {
+    const OTHER: &str = "browser_fedcba9876543210fedcba9876543210";
+    let mut fixture = Fixture::open("keyed");
+    let fingerprint = serde_json::json!({"pane": null, "url": "https://a.test/"});
+    let stats = RequestPathStats::new(RequestPathMode::RECORD);
+    let (first, retry) = {
+        let _scope = RequestPathScope::enter(&stats);
+        let registry = &mut fixture.registry;
+        let first = registry
+            .register_keyed_frontend_browser(
+                "key-1",
+                &fingerprint,
+                BROWSER,
+                &record("https://a.test/"),
+            )
+            .unwrap();
+        let retry = registry
+            .register_keyed_frontend_browser(
+                "key-1",
+                &fingerprint,
+                OTHER,
+                &record("https://b.test/"),
+            )
+            .unwrap();
+        (first, retry)
+    };
+    assert_eq!(stats.count(BlockingKind::Sqlite), 0, "{:?}", stats.sites());
+    assert_eq!(first, KeyedFrontendBrowserRegistration::Registered);
+    assert_eq!(
+        retry,
+        KeyedFrontendBrowserRegistration::Recorded {
+            browser_id: BROWSER.into(),
+            fingerprint,
+            committed: false,
+            record: Some(Box::new(record("https://a.test/"))),
+        }
+    );
+    let snapshot = fixture.registry.presentation_snapshot().unwrap();
+    assert!(!snapshot.frontend_browsers.contains_key(OTHER), "a recorded key writes nothing");
+    assert_eq!(fixture.writer.sent.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.local_commits(), 0);
 }

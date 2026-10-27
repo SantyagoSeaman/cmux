@@ -84,12 +84,20 @@ impl Mux {
         if settled.is_empty() {
             return;
         }
+        let mut presentation = false;
         for (receipt, settle) in settled {
+            presentation |= matches!(receipt, RegistryReceipt::Presentation(_));
             settle_one(state, &receipt, settle);
         }
-        // Subscribers read the new head (publishing takes neither the
-        // registry nor state).
-        self.publish_resource_event();
+        // A presentation write owes the snapshot, not state.
+        if presentation {
+            self.install_late_presentation(registry);
+        }
+        // Subscribers read the new head. Only the journal notification: the
+        // caller holds state, and `publish_resource_event` also retries
+        // pending terminal directories, which takes state. The flow's own
+        // commit publishes those after it releases state.
+        self.publish_journal_event();
     }
 }
 

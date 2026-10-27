@@ -76,6 +76,10 @@ pub(crate) struct UnsettledReceipt {
     /// The writer's answer once it arrived (see `drain_unsettled`).
     resolved: Option<Result<RegistryReceipt, String>>,
     settle: Option<SettleState>,
+    /// A presentation write: it owes the mux's presentation snapshot, not
+    /// state, so a holder of the registry alone can settle it
+    /// (`take_settled_presentation`).
+    presentation: bool,
 }
 
 /// How long a new registry commit waits for an earlier indeterminate one.
@@ -211,11 +215,16 @@ impl RegistryConnection {
         self.intent_sink.get().filter(|sink| sink.accepts())
     }
 
-    fn hold_unsettled(&self, pending: PendingRegistryReceipt, settle: Option<SettleState>) {
+    fn hold_unsettled(
+        &self,
+        pending: PendingRegistryReceipt,
+        settle: Option<SettleState>,
+        presentation: bool,
+    ) {
         self.unsettled
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(UnsettledReceipt { pending, resolved: None, settle });
+            .push(UnsettledReceipt { pending, resolved: None, settle, presentation });
     }
 
     /// Wait (bounded) until every earlier indeterminate commit has its
@@ -269,6 +278,35 @@ impl RegistryConnection {
         }
         *unsettled = kept;
         settled
+    }
+
+    /// How many earlier indeterminate presentation writes committed since
+    /// the last call; they leave the list. The caller reloads the mux's
+    /// presentation snapshot when it is not 0. Other receipts stay for the
+    /// next state holder ([`Self::take_settled_receipts`]).
+    pub(crate) fn take_settled_presentation(&self) -> usize {
+        let mut unsettled =
+            self.unsettled.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut committed = 0;
+        unsettled.retain_mut(|entry| {
+            if !entry.presentation {
+                return true;
+            }
+            match entry.resolved.take().or_else(|| entry.pending.try_take()) {
+                None => true,
+                Some(Ok(_)) => {
+                    committed += 1;
+                    false
+                }
+                Some(Err(error)) => {
+                    eprintln!(
+                        "cmux-tui: an indeterminate presentation write did not commit: {error}"
+                    );
+                    false
+                }
+            }
+        });
+        committed
     }
 }
 
@@ -326,9 +364,10 @@ impl WorkspaceRegistry {
             EffectSend::Indeterminate(error, pending) => {
                 // The writer can still commit after this request gives up:
                 // forget the public fold, and keep the receipt so the next
-                // state holder installs what it committed.
+                // state holder (or presentation writer, for a presentation
+                // intent) installs what it committed.
                 self.abandon_effect_commit();
-                self.connection.hold_unsettled(pending, settle);
+                self.connection.hold_unsettled(pending, settle, !writes_topology);
                 Err(error)
             }
             EffectSend::NotQueued(intent) => {

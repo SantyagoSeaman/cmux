@@ -28,6 +28,7 @@ use crate::mux::*;
 use crate::resource::BrowserPublicId;
 use crate::state::prelude::*;
 use crate::workspace_registry::FrontendBrowserRecord;
+use crate::workspace_registry::presentation_store::KeyedFrontendBrowserRegistration;
 
 pub(crate) const FRONTEND_BROWSER_TAB_KEYS_CAPABILITY: &str = "frontend-browser-tab-keys-v1";
 
@@ -47,7 +48,10 @@ pub(crate) fn create_frontend_browser_keys_schema(tx: &Transaction<'_>) -> anyho
 }
 
 /// The browser id and request fingerprint a key recorded.
-fn browser_for_key(connection: &Connection, key: &str) -> anyhow::Result<Option<(String, Value)>> {
+pub(crate) fn browser_for_key(
+    connection: &Connection,
+    key: &str,
+) -> anyhow::Result<Option<(String, Value)>> {
     let row = connection
         .query_row(
             "SELECT browser_id, fingerprint FROM frontend_browser_tab_keys
@@ -202,8 +206,44 @@ impl Mux {
         record.validate()?;
         WorkspaceMutation::daemon(key, "new-frontend-browser-tab")?;
         let _serial = KEYED_CREATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (browser_id, fresh) = match self.read_registry_state(|c| browser_for_key(c, key))? {
-            Some((browser_id, stored)) => {
+        // One writer intent reads the key and, when it is new, registers the
+        // record with the key's row: the request thread opens no SQLite
+        // connection (p05-ipc-135).
+        let candidate = BrowserPublicId::random()?;
+        let registration = {
+            let mut registry =
+                self.workspace_registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let registration = registry.register_keyed_frontend_browser(
+                key,
+                &fingerprint,
+                candidate.as_str(),
+                &record,
+            )?;
+            // The snapshot gets the stored record, also for a key whose
+            // registration committed late (an indeterminate receipt), so
+            // the resumed tab is frontend-rendered (`frontend_browser_id`).
+            match &registration {
+                KeyedFrontendBrowserRegistration::Registered => {
+                    self.note_frontend_browser_put(&registry, candidate.as_str(), record);
+                }
+                KeyedFrontendBrowserRegistration::Recorded {
+                    browser_id,
+                    record: Some(stored),
+                    ..
+                } => self.note_frontend_browser_put(&registry, browser_id, (**stored).clone()),
+                KeyedFrontendBrowserRegistration::Recorded { record: None, .. } => {}
+            }
+            self.settle_presentation_receipts(&registry);
+            registration
+        };
+        let browser_id = match registration {
+            KeyedFrontendBrowserRegistration::Registered => candidate,
+            KeyedFrontendBrowserRegistration::Recorded {
+                browser_id,
+                fingerprint: stored,
+                committed,
+                ..
+            } => {
                 anyhow::ensure!(
                     stored == fingerprint,
                     "idempotency.conflict: the key named another new-frontend-browser-tab request"
@@ -217,23 +257,12 @@ impl Mux {
                 if let Some(surface) = placed {
                     return Ok(KeyedFrontendBrowser::Placed(surface));
                 }
-                if self.read_registry_state(|c| browser_committed(c, browser_id.as_str()))? {
+                if committed {
                     return Err(FrontendBrowserReuse::KeyClosed(browser_id.to_string()).into());
                 }
-                (browser_id, false)
+                browser_id
             }
-            None => (BrowserPublicId::random()?, true),
         };
-        if fresh {
-            let id = browser_id.as_str();
-            let (owned_key, owned_id) = (key.to_string(), id.to_string());
-            let write: crate::workspace_registry::OwnedTransactionWrite =
-                Box::new(move |tx| insert_key(tx, &owned_key, &owned_id, &fingerprint));
-            let mut registry =
-                self.workspace_registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.put_frontend_browser_owned(id, &record, write)?;
-            self.note_frontend_browser_put(&registry, id, record);
-        }
         // A failed keyed creation keeps its rows, so a retry resumes it.
         create(&browser_id).map(KeyedFrontendBrowser::Created)
     }

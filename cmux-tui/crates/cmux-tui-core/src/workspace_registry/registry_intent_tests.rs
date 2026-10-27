@@ -20,7 +20,7 @@ fn journal_wait_lines(stats: &RequestPathStats) -> Vec<(&'static str, u32)> {
 fn drain_unsettled_notes_a_journal_wait_for_an_unanswered_receipt() {
     let registry = WorkspaceRegistry::in_memory("drain-unsettled-wait").expect("registry");
     let (answer, receipt) = sync_channel(1);
-    registry.connection.hold_unsettled(PendingRegistryReceipt::for_test(receipt), None);
+    registry.connection.hold_unsettled(PendingRegistryReceipt::for_test(receipt), None, false);
     let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(5));
         answer.send(Err("rolled back".to_string())).expect("answer");
@@ -38,7 +38,7 @@ fn drain_unsettled_notes_nothing_for_an_answered_receipt() {
     let registry = WorkspaceRegistry::in_memory("drain-unsettled-answered").expect("registry");
     let (answer, receipt) = sync_channel(1);
     answer.send(Err("rolled back".to_string())).expect("answer");
-    registry.connection.hold_unsettled(PendingRegistryReceipt::for_test(receipt), None);
+    registry.connection.hold_unsettled(PendingRegistryReceipt::for_test(receipt), None, false);
     let stats = RequestPathStats::new(RequestPathMode::RECORD);
     let _scope = RequestPathScope::enter(&stats);
     registry.connection.drain_unsettled().expect("already answered");

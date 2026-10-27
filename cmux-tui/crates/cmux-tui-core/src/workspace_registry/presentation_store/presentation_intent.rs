@@ -60,6 +60,12 @@ enum PresentationWrite {
         browser_id: String,
         history: Option<String>,
     },
+    RegisterKeyedFrontendBrowser {
+        key: String,
+        fingerprint: Value,
+        browser_id: String,
+        record: FrontendBrowserRecord,
+    },
 }
 
 /// [`OwnedTransactionWrite`] with a `Debug` for the intent.
@@ -85,6 +91,26 @@ pub(crate) enum PresentationReceipt {
     /// The stored record, and whether the write changed it.
     FrontendBrowserUpdated(FrontendBrowserRecord, bool),
     FrontendBrowserHistorySet,
+    KeyedFrontendBrowser(KeyedFrontendBrowserRegistration),
+}
+
+/// What a keyed frontend browser registration found in the writer
+/// transaction (state/frontend_browser_keys.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeyedFrontendBrowserRegistration {
+    /// The key was new: the record and the key's row were put under the
+    /// request's fresh browser id.
+    Registered,
+    /// The key was recorded before; nothing was written.
+    Recorded {
+        browser_id: String,
+        /// The request fingerprint the key recorded.
+        fingerprint: Value,
+        /// A tab ever committed the browser id (live or closed).
+        committed: bool,
+        /// The stored frontend browser record of the browser id.
+        record: Option<Box<FrontendBrowserRecord>>,
+    },
 }
 
 /// A receipt of another write than the one the caller committed.
@@ -190,6 +216,20 @@ impl PresentationCommitIntent {
         })
     }
 
+    pub(super) fn register_keyed_frontend_browser(
+        key: &str,
+        fingerprint: &Value,
+        browser_id: &str,
+        record: &FrontendBrowserRecord,
+    ) -> Self {
+        Self::new(PresentationWrite::RegisterKeyedFrontendBrowser {
+            key: key.to_string(),
+            fingerprint: fingerprint.clone(),
+            browser_id: browser_id.to_string(),
+            record: record.clone(),
+        })
+    }
+
     /// Resident size for the writer's durable batch byte cap.
     pub(crate) fn estimated_bytes(&self) -> usize {
         let text = |value: &Option<String>| value.as_ref().map_or(0, String::len);
@@ -215,6 +255,20 @@ impl PresentationCommitIntent {
             PresentationWrite::SetFrontendBrowserHistory { browser_id, history } => {
                 browser_id.len() + text(history)
             }
+            PresentationWrite::RegisterKeyedFrontendBrowser {
+                key,
+                fingerprint,
+                browser_id,
+                record,
+            } => {
+                key.len()
+                    + fingerprint.to_string().len()
+                    + browser_id.len()
+                    + record.url.len()
+                    + text(&record.title)
+                    + text(&record.favicon_url)
+                    + text(&record.profile_id)
+            }
         };
         // The journal record repeats the payload as JSON.
         payload.saturating_mul(2).saturating_add(512)
@@ -225,16 +279,6 @@ impl PresentationCommitIntent {
     pub(crate) fn apply(
         &self,
         transaction: &Transaction<'_>,
-    ) -> anyhow::Result<PresentationReceipt> {
-        self.apply_with(transaction, None)
-    }
-
-    /// [`Self::apply`] with borrowed extra rows, which replace the intent's
-    /// own (a caller that commits locally).
-    pub(super) fn apply_with(
-        &self,
-        transaction: &Transaction<'_>,
-        borrowed_extra: Option<super::super::RegistryTransactionWrite<'_>>,
     ) -> anyhow::Result<PresentationReceipt> {
         Ok(match &self.write {
             PresentationWrite::CreateWorkspaceGroup { id, name, color, collapsed, index } => {
@@ -265,10 +309,8 @@ impl PresentationCommitIntent {
             }
             PresentationWrite::PutFrontendBrowser { browser_id, record, extra } => {
                 put_frontend_browser_in(transaction, browser_id, record)?;
-                match (borrowed_extra, extra) {
-                    (Some(extra), _) => extra(transaction)?,
-                    (None, Some(ExtraRows(extra))) => extra(transaction)?,
-                    (None, None) => {}
+                if let Some(ExtraRows(extra)) = extra {
+                    extra(transaction)?;
                 }
                 PresentationReceipt::FrontendBrowserPut
             }
@@ -297,8 +339,41 @@ impl PresentationCommitIntent {
                 )?;
                 PresentationReceipt::FrontendBrowserHistorySet
             }
+            PresentationWrite::RegisterKeyedFrontendBrowser {
+                key,
+                fingerprint,
+                browser_id,
+                record,
+            } => PresentationReceipt::KeyedFrontendBrowser(register_keyed_frontend_browser_in(
+                transaction,
+                key,
+                fingerprint,
+                browser_id,
+                record,
+            )?),
         })
     }
+}
+
+fn register_keyed_frontend_browser_in(
+    tx: &Transaction<'_>,
+    key: &str,
+    fingerprint: &Value,
+    browser_id: &str,
+    record: &FrontendBrowserRecord,
+) -> anyhow::Result<KeyedFrontendBrowserRegistration> {
+    use crate::state::frontend_browser_keys::{browser_committed, browser_for_key, insert_key};
+    if let Some((recorded, stored)) = browser_for_key(tx, key)? {
+        return Ok(KeyedFrontendBrowserRegistration::Recorded {
+            committed: browser_committed(tx, &recorded)?,
+            record: read_frontend_browser(tx, &recorded)?.map(Box::new),
+            browser_id: recorded,
+            fingerprint: stored,
+        });
+    }
+    put_frontend_browser_in(tx, browser_id, record)?;
+    insert_key(tx, key, browser_id, fingerprint)?;
+    Ok(KeyedFrontendBrowserRegistration::Registered)
 }
 
 fn create_workspace_group_in(

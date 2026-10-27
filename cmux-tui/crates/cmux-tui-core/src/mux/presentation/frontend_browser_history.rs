@@ -7,11 +7,11 @@
 use super::*;
 
 impl Mux {
-    /// Install a frontend browser record that `registry` just put with no
-    /// extra rows (`put_frontend_browser`), without reading the store back:
-    /// the snapshot row is that record, and a fresh browser id is never
-    /// tombstoned. The caller holds the registry lock, as for
-    /// [`Self::reload_presentation`].
+    /// Install a frontend browser record that `registry` just put
+    /// (`put_frontend_browser`) or read in its writer transaction (a keyed
+    /// creation's recorded browser), without reading the store back: the
+    /// snapshot row is that stored record. The caller holds the registry
+    /// lock, as for [`Self::reload_presentation`].
     pub(crate) fn note_frontend_browser_put(
         &self,
         _registry: &WorkspaceRegistry,
@@ -103,6 +103,7 @@ impl Mux {
             if result.1 {
                 self.reload_presentation(&registry)?;
             }
+            self.settle_presentation_receipts(&registry);
             result
         };
         if let Some(owner) = owner
@@ -155,7 +156,9 @@ impl Mux {
     ) -> anyhow::Result<()> {
         let browser_id = self.require_frontend_browser_id(surface)?;
         let mut registry = self.workspace_registry.lock().unwrap();
-        registry.set_frontend_browser_history(browser_id.as_str(), history.as_deref())
+        registry.set_frontend_browser_history(browser_id.as_str(), history.as_deref())?;
+        self.settle_presentation_receipts(&registry);
+        Ok(())
     }
 
     /// The session history last stored for a frontend-rendered browser.
@@ -206,6 +209,64 @@ mod tests {
         assert_eq!(live.frontend_browsers.len(), 2);
         assert_eq!(live.frontend_browsers, stored.frontend_browsers);
         assert!(mux.has_frontend_browser_key("snapshot-key").unwrap());
+    }
+
+    /// p05-ipc-135: `new-frontend-browser-tab` (plain and keyed) opens no
+    /// request-side SQLite connection of its own: its registration goes to
+    /// the journal writer, so the op notes exactly the `sqlite` of the
+    /// browser tab commit it shares with `new-browser-tab`, and a keyed
+    /// replay notes none. The shared commit's notes (creation recovery and
+    /// lookup, the executing mark, the state pin, the public fold) belong to
+    /// p05-ipc-407, 133 and 136; when they land, `shared` is 0 here too.
+    #[test]
+    fn new_frontend_browser_tab_adds_no_request_side_sqlite() {
+        use crate::request_path::{
+            BlockingKind, RequestPathMode, RequestPathScope, RequestPathStats,
+        };
+        let session = PresentationTestSession::new("frontend-browser-tab-sqlite");
+        let mux = session.open();
+        let terminal = mux.new_workspace(None, None).unwrap().id;
+        let pane = mux.with_state(|state| state.pane_of(terminal)).unwrap();
+        let record = |url: &str| FrontendBrowserRecord {
+            engine: "webkit".into(),
+            url: url.into(),
+            title: None,
+            favicon_url: None,
+            profile_id: None,
+            owner: None,
+        };
+        let sqlite = |op: &dyn Fn()| {
+            let stats = RequestPathStats::new(RequestPathMode::RECORD);
+            {
+                let _scope = RequestPathScope::enter(&stats);
+                op();
+            }
+            (stats.count(BlockingKind::Sqlite), stats.sites())
+        };
+        let keyed = || {
+            mux.new_frontend_browser_tab_keyed_as(
+                &Actor::Daemon,
+                Some(pane),
+                record("https://keyed.test/"),
+                None,
+                "sqlite-key",
+                FrontendTabPlacement::default(),
+            )
+            .unwrap()
+        };
+        mux.new_browser_tab("https://warm.test/".into(), Some(pane), None).unwrap();
+
+        let (shared, shared_sites) = sqlite(&|| {
+            mux.new_browser_tab("https://cdp.test/".into(), Some(pane), None).unwrap();
+        });
+        let (plain, plain_sites) = sqlite(&|| {
+            mux.new_frontend_browser_tab(Some(pane), record("https://a.test/"), None).unwrap();
+        });
+        let (fresh, fresh_sites) = sqlite(&|| assert!(!keyed().replayed));
+        let (replay, replay_sites) = sqlite(&|| assert!(keyed().replayed));
+        assert_eq!(plain, shared, "plain {plain_sites:?}\nshared {shared_sites:?}");
+        assert_eq!(fresh, shared, "keyed {fresh_sites:?}\nshared {shared_sites:?}");
+        assert_eq!(replay, 0, "{replay_sites:?}");
     }
 
     #[test]

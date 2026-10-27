@@ -65,10 +65,11 @@ impl Mux {
                 owner: None,
             };
             let id = browser_id.as_str().to_string();
-            let write = |tx: &rusqlite::Transaction<'_>| write_remote_terminal(tx, &id, &record);
+            let write: crate::workspace_registry::OwnedTransactionWrite =
+                Box::new(move |tx| write_remote_terminal(tx, &id, &record));
             let mut registry =
                 self.workspace_registry.lock().unwrap_or_else(PoisonError::into_inner);
-            registry.put_frontend_browser(browser_id.as_str(), &frontend, Some(&write))?;
+            registry.put_frontend_browser(browser_id.as_str(), &frontend, Some(write))?;
             self.reload_presentation(&registry)?;
         }
         let fields = Map::from_iter([(

@@ -195,10 +195,11 @@ impl Mux {
         };
         {
             let id = browser_id.as_str().to_string();
-            let write = |tx: &Transaction<'_>| write_app_tab(tx, &id, &record);
+            let write: crate::workspace_registry::OwnedTransactionWrite =
+                Box::new(move |tx| write_app_tab(tx, &id, &record));
             let mut registry =
                 self.workspace_registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.put_frontend_browser(browser_id.as_str(), &frontend, Some(&write))?;
+            registry.put_frontend_browser(browser_id.as_str(), &frontend, Some(write))?;
             self.reload_presentation(&registry)?;
         }
         let mut fields = Map::from_iter([

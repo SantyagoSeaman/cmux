@@ -1039,13 +1039,6 @@
     },
     {
       "queue": "Q13",
-      "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/presentation_store.rs",
-      "key": "put_frontend_browser: unchecked_transaction",
-      "task": "p05-ipc-412",
-      "change": "put_frontend_browser with a borrowed extra: its callers (state/app_workspaces.rs, state/conversation_tabs.rs, state/remote_terminal_tabs.rs) pass owned rows to put_frontend_browser_owned, as frontend_browser_keys.rs does, and the borrowed form is deleted"
-    },
-    {
-      "queue": "Q13",
       "file": "cmux-tui/crates/cmux-tui-core/src/workspace_registry/resource_store.rs",
       "key": "advance_agent_hook_apply_cursor: unchecked_transaction",
       "task": "p05-ipc-413",

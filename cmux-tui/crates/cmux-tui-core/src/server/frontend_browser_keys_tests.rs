@@ -113,16 +113,17 @@ fn keyed_retry_after_a_crash_before_the_tab_commit_creates_the_recorded_tab() {
     let browser = BrowserPublicId::random().unwrap();
     let fingerprint = json!({"pane": pane_id, "record": &record});
     {
-        let key_row = |tx: &rusqlite::Transaction<'_>| {
+        let browser_id = browser.as_str().to_string();
+        let key_row: crate::workspace_registry::OwnedTransactionWrite = Box::new(move |tx| {
             crate::state::frontend_browser_keys::insert_key(
                 tx,
                 "gpui-crash-1",
-                browser.as_str(),
+                &browser_id,
                 &fingerprint,
             )
-        };
+        });
         let mut registry = mux.workspace_registry.lock().unwrap();
-        registry.put_frontend_browser(browser.as_str(), &record, Some(&key_row)).unwrap();
+        registry.put_frontend_browser(browser.as_str(), &record, Some(key_row)).unwrap();
         mux.reload_presentation(&registry).unwrap();
     }
     assert!(frontend_tabs(&mux).is_empty());

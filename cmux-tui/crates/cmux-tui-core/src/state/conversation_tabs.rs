@@ -34,7 +34,7 @@ use crate::state::frontend_browser_keys::{
 use crate::state::prelude::*;
 use crate::state::store::StateChanges;
 use crate::state::values::fresh_upserts;
-use crate::workspace_registry::FrontendBrowserRecord;
+use crate::workspace_registry::{FrontendBrowserRecord, OwnedTransactionWrite};
 
 /// Where a new conversation tab goes: a pane (or the focused pane), a
 /// workspace, which gets its first screen and pane when it has none (the
@@ -122,15 +122,17 @@ impl Mux {
                 owner: None,
             };
             let id = browser_id.as_str().to_string();
-            let key = key.map(|(origin, mutation_id)| ConversationTabKey {
-                origin,
-                mutation_id,
-                target: &target_ids,
+            let owned_key = key.map(|(origin, mutation_id)| {
+                (origin.to_string(), mutation_id.to_string(), target_ids)
             });
-            let write =
-                |tx: &rusqlite::Transaction<'_>| write_conversation_tab(tx, &id, &record, key);
+            let write: OwnedTransactionWrite = Box::new(move |tx| {
+                let key = owned_key.as_ref().map(|(origin, mutation_id, target)| {
+                    ConversationTabKey { origin, mutation_id, target }
+                });
+                write_conversation_tab(tx, &id, &record, key)
+            });
             let mut registry = self.workspace_registry.lock().unwrap();
-            registry.put_frontend_browser(browser_id.as_str(), &frontend, Some(&write))?;
+            registry.put_frontend_browser(browser_id.as_str(), &frontend, Some(write))?;
             self.reload_presentation(&registry)?;
         }
         mark_conversation_tabs_present();

@@ -44,7 +44,9 @@ mod frontend_browser_history;
 mod frontend_browser_profiles;
 mod presentation_intent;
 pub(crate) use frontend_browser_profiles::clear_frontend_browser_profile;
-pub(crate) use presentation_intent::{PresentationCommitIntent, PresentationReceipt};
+pub(crate) use presentation_intent::{
+    KeyedFrontendBrowserRegistration, PresentationCommitIntent, PresentationReceipt,
+};
 mod icon;
 pub use icon::{
     IconAssetKind, is_sha256_hex, parse_icon_asset, validate_icon_value,
@@ -1017,50 +1019,47 @@ impl WorkspaceRegistry {
 
     /// Register a frontend-rendered browser before its tab commits, so the
     /// daemon never bootstraps a CDP target for it. The browser id must be
-    /// fresh. Without `extra` it commits through the journal writer; a
-    /// borrowed `extra` cannot leave this thread, so it commits locally
-    /// ([`Self::put_frontend_browser_owned`] sends owned extra rows).
+    /// fresh. `extra` rows (owned, so they can go to the writer) commit in
+    /// the same writer SAVEPOINT as the record.
     #[track_caller]
-    pub fn put_frontend_browser(
+    pub(crate) fn put_frontend_browser(
         &mut self,
         browser_id: &str,
         record: &FrontendBrowserRecord,
-        extra: Option<super::RegistryTransactionWrite<'_>>,
+        extra: Option<super::OwnedTransactionWrite>,
     ) -> anyhow::Result<()> {
         validate_browser_public_id(browser_id)?;
         record.validate()?;
-        let intent = PresentationCommitIntent::put_frontend_browser(browser_id, record, None);
-        let Some(extra) = extra else {
-            return match self.commit_presentation(intent)? {
-                PresentationReceipt::FrontendBrowserPut => Ok(()),
-                other => Err(other.mismatch("put-frontend-browser").into()),
-            };
-        };
-        let db = self.connection.get();
-        let tx = db.unchecked_transaction()?;
-        intent.apply_with(&tx, Some(extra))?;
-        tx.commit()?;
-        drop(db);
-        self.connection.write_path_stats().request_effect_committed();
-        Ok(())
-    }
-
-    /// [`Self::put_frontend_browser`] with owned extra rows, written in the
-    /// same writer SAVEPOINT as the record.
-    #[track_caller]
-    pub(crate) fn put_frontend_browser_owned(
-        &mut self,
-        browser_id: &str,
-        record: &FrontendBrowserRecord,
-        extra: super::OwnedTransactionWrite,
-    ) -> anyhow::Result<()> {
-        validate_browser_public_id(browser_id)?;
-        record.validate()?;
-        let intent =
-            PresentationCommitIntent::put_frontend_browser(browser_id, record, Some(extra));
+        let intent = PresentationCommitIntent::put_frontend_browser(browser_id, record, extra);
         match self.commit_presentation(intent)? {
             PresentationReceipt::FrontendBrowserPut => Ok(()),
             other => Err(other.mismatch("put-frontend-browser").into()),
+        }
+    }
+
+    /// `new-frontend-browser-tab {idempotency_key}`'s registration, in one
+    /// writer transaction: the browser `key` recorded before, or `record`
+    /// put under the fresh `browser_id` with the key's row
+    /// (state/frontend_browser_keys.rs). The request thread reads nothing.
+    #[track_caller]
+    pub(crate) fn register_keyed_frontend_browser(
+        &mut self,
+        key: &str,
+        fingerprint: &Value,
+        browser_id: &str,
+        record: &FrontendBrowserRecord,
+    ) -> anyhow::Result<KeyedFrontendBrowserRegistration> {
+        validate_browser_public_id(browser_id)?;
+        record.validate()?;
+        let intent = PresentationCommitIntent::register_keyed_frontend_browser(
+            key,
+            fingerprint,
+            browser_id,
+            record,
+        );
+        match self.commit_presentation(intent)? {
+            PresentationReceipt::KeyedFrontendBrowser(registration) => Ok(registration),
+            other => Err(other.mismatch("register-keyed-frontend-browser").into()),
         }
     }
 
