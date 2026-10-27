@@ -58,6 +58,30 @@ a `.swift-version` file into the checkout.
 | `SWIFTLY_HOME_DIR`, `SWIFTLY_BIN_DIR`, `SWIFTLY_TOOLCHAINS_DIR` | swiftly's own locations |
 | `XDG_CACHE_HOME` | Parent of the image-version cache |
 
+## Parser fuzzing (fuzz.sh)
+
+Runs the oracle's parser fuzz targets of `cmux-tui/fuzz` (its own workspace and lock, so
+`cmux-tui/Cargo.lock` never changes) in libFuzzer's fork mode and writes one receipt:
+
+| Target | Parser |
+| --- | --- |
+| `control_request` | a control socket line: the request head, the v2 envelope and the `Command` parse agree |
+| `resource_params` | v2 envelope and param validation against `spec/resource-operations-v2.json` |
+| `journal_record` | a stored journal row: decode, archive round trip, and the restore reducer |
+| `pane_frame` | the pane protocol's stream reader against its buffer decoder, for any read sizes |
+| `api_compat` | the API revision translator against its rule-by-rule reference, and compat file loading |
+
+```bash
+scripts/cmux-next/linux/fuzz.sh --build-only            # build the five targets
+scripts/cmux-next/linux/fuzz.sh                         # 1 h per target, -fork=60, receipt.json
+scripts/cmux-next/linux/fuzz.sh --target pane_frame --seconds 60 --fork 4
+```
+
+Seeds come from `tests/oracle/corpus/daemon-ops` (every `resource.call` step as a v2 line), the
+line-dispatch golden, the pane-protocol vectors and `spec/api-compat.json`
+(`cmux-tui/fuzz/seeds.py`). `scripts/cmux-next/rust-fuzz.sh` builds, seeds, applies the limits and
+classifies; a crash, out-of-memory, timeout or leak is a finding with its artifact under `--out`.
+
 ## String tables (compile-xcstrings.py)
 
 On Linux, SwiftPM copies a `.xcstrings` catalog into the bundle as JSON, and Foundation

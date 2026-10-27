@@ -125,7 +125,78 @@ def holder(_repo: Path) -> Iterable[bytes]:
     yield b"cmux-holder wire 1-5\n"
 
 
+# p15-oracle task 220: the parser targets start from the requests the
+# correctness oracle and the line-dispatch golden already send.
+
+
+def oracle_resource_lines(repo: Path) -> Iterable[bytes]:
+    # Every resource.call step of the oracle's daemon-ops cases as the v2
+    # line the oracle's daemon driver sends: the step's target selectors and
+    # its params in `params` (scripts/cmux-next/oracle/driver_daemon.py).
+    seen: set[str] = set()
+    for path in sorted((repo / "tests/oracle/corpus/daemon-ops").glob("*.json")):
+        for step in json.loads(path.read_text()).get("steps", []):
+            args = step.get("args", {})
+            if step.get("op") != "resource.call" or not isinstance(args.get("method"), str):
+                continue
+            envelope = {
+                "protocol": "cmux.protocol/2",
+                "type": "request",
+                "id": step.get("id", "seed"),
+                "operation": args["method"],
+                "params": {**step.get("target", {}), **args.get("params", {})},
+            }
+            if isinstance(args.get("idempotencyKey"), str):
+                envelope["idempotency_key"] = args["idempotencyKey"]
+            line = json.dumps(envelope, separators=(",", ":"))
+            if line not in seen:
+                seen.add(line)
+                yield line.encode()
+
+
+def control_request(repo: Path) -> Iterable[bytes]:
+    fixture = repo / "cmux-tui/spec/fixtures/line-dispatch/replies.json"
+    for case in json.loads(fixture.read_text()).get("cases", []):
+        if isinstance(case.get("line"), str):
+            yield case["line"].encode()
+    yield from oracle_resource_lines(repo)
+
+
+def resource_params(repo: Path) -> Iterable[bytes]:
+    # Byte 0 = 0x00: the rest is a line as written (fuzz_targets/resource_params.rs).
+    for line in oracle_resource_lines(repo):
+        yield b"\x00" + line
+
+
+def pane_frame(repo: Path) -> Iterable[bytes]:
+    # Byte 0 = N read sizes, then the sizes, then the stream
+    # (fuzz_targets/pane_frame.rs): each stream read at once and a byte at a time.
+    for stream in pane_protocol(repo):
+        yield b"\x00" + stream
+        yield b"\x01\x01" + stream
+
+
+def api_compat(repo: Path) -> Iterable[bytes]:
+    # Byte 0 = 0x00: a compat file, 0x00, a message (fuzz_targets/api_compat.rs).
+    spec = (repo / "cmux-tui/spec/api-compat.json").read_bytes()
+    fixtures = json.loads((repo / "cmux-tui/spec/api-compat-fixtures.json").read_text())
+    messages = [json.dumps(case.get("input", case)).encode() for case in fixtures.get("cases", [])]
+    messages.append(b'{"cmd":"new-workspace","id":1,"name":"a"}')
+    rename = json.dumps({"protocol": "seed", "base": 1, "revisions": [{"rev": 2, "changes": [
+        {"message": "event:workspace", "op": "rename", "path": "/workspace/name", "to": "title"},
+        {"message": "event:workspace", "op": "retype", "path": "/workspace/id",
+         "up": {"kind": "number_to_string"}, "down": {"kind": "string_to_number"}},
+    ]}]}).encode()
+    for file in (spec, rename):
+        for message in (*messages, b'{"workspace":{"name":"a","id":1}}'):
+            yield b"\x00" + file + b"\x00" + message
+
+
 TARGETS: dict[str, Callable[[Path], Iterable[bytes]]] = {
+    "control_request": control_request,
+    "resource_params": resource_params,
+    "pane_frame": pane_frame,
+    "api_compat": api_compat,
     "ghostty_vt_output": terminal_corpus,
     "terminal_host_read_frame": terminal_host_frames,
     "pane_protocol_frame": pane_protocol,

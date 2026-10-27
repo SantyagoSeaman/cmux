@@ -134,6 +134,21 @@ impl LineFrame<'_> {
     }
 }
 
+/// The `Command` decode of a line the head sends to the `Command` path.
+/// serde decodes an integer tag as a variant index (`{"cmd":15}`); the head
+/// names only a string `cmd`, so such a line runs no command.
+pub(super) fn command_request(
+    head: &RequestHead<'_>,
+    message: &str,
+) -> serde_json::Result<Request> {
+    let request = crate::line_parses::parse::<Request>(message)?;
+    if head.is_command() {
+        Ok(request)
+    } else {
+        Err(serde::de::Error::custom("`cmd` must be a command name string"))
+    }
+}
+
 /// Reads the line's head once, then hands the line to the one handler the
 /// head names: a v2 line to the page router or the resource router, a
 /// feature route's `cmd` to its route (server/routes.rs), anything else to
@@ -163,7 +178,7 @@ pub(super) fn dispatch_line(line: &LineFrame<'_>) -> bool {
         }
     }
     line.stage(FrameStage::Route);
-    let request = match crate::line_parses::parse::<Request>(message) {
+    let request = match command_request(&head, message) {
         Ok(request) => request,
         Err(error) => {
             let mut span =

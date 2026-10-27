@@ -1,7 +1,9 @@
 //! Entry points of the cmux-tui/fuzz targets (plans/cmux-next/chrome-parity/
 //! p10-stability.md, task 020): the terminal-host payload codecs, the session
 //! journal's stored-row and archived-segment decoders, the output store's
-//! snapshot and segment files, and the page listener's request head.
+//! snapshot and segment files, and the page listener's request head; and
+//! (p15-oracle task 220) the control socket's line decodes, v2 param
+//! validation against the operation catalog and the journal restore reducer.
 //!
 //! Built only with the `fuzz` feature, which only the fuzz workspace turns
 //! on. Each entry calls the decoder the daemon calls; none adds its own
@@ -294,3 +296,87 @@ pub fn page_request_head(
 
 /// The largest request head the listener reads before it answers 431.
 pub const PAGE_REQUEST_HEAD_MAX_BYTES: usize = crate::server::page_files::REQUEST_HEAD_MAX_BYTES;
+
+/// What one control socket line decodes to, at each of the three decodes
+/// `dispatch_line` runs (server/connection_frame.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlLine {
+    /// The head's `cmd`, when it is a string.
+    pub head_cmd: Option<String>,
+    /// The head's v2 `operation`, when it is a string.
+    pub head_operation: Option<String>,
+    /// The head has `protocol`: the resource router answers the line.
+    pub head_resource: bool,
+    /// The `Command` path answers the line.
+    pub head_command: bool,
+    /// The method the line's request span names.
+    pub head_method: u16,
+    /// The `Command` parse: its wire name and method, or why it failed.
+    pub command: Result<ControlCommand, String>,
+    /// The v2 envelope parse: `None` when the line is not a v2 line, else
+    /// the operation's wire name or why the envelope is malformed.
+    pub resource: Option<Result<&'static str, String>>,
+}
+
+/// A line the `Command` parse accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlCommand {
+    /// The command's canonical `cmd`.
+    pub wire: &'static str,
+    /// Its method id; `None` when the method table does not name the wire.
+    pub method: Option<u16>,
+}
+
+/// The control socket's decodes of one line.
+pub fn control_line(message: &str) -> ControlLine {
+    crate::server::fuzz_control_line::control_line(message)
+}
+
+/// A v2 request the router accepted: the envelope it moves into dispatch
+/// and the catalog fields (with defaults) the operation reads.
+#[derive(Debug, Clone)]
+pub struct AcceptedResourceRequest {
+    pub envelope: crate::resource::RequestEnvelope,
+    pub selectors: crate::ResourceSelectors,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The resource router's parse and validation of one v2 line, as the
+/// local user sends it; `None` when the line is not a v2 line.
+pub fn resource_request(
+    message: &str,
+) -> Option<Result<AcceptedResourceRequest, crate::resource::ResourceError>> {
+    let envelope = crate::resource_router::parse_resource_line(message)?;
+    Some(envelope.and_then(|envelope| {
+        crate::resource_router::validate_resource_envelope(
+            envelope,
+            crate::workspace_registry::Actor::local_user(),
+        )
+        .map(|request| AcceptedResourceRequest {
+            envelope: request.envelope,
+            selectors: request.selectors,
+            fields: request.fields,
+        })
+    }))
+}
+
+/// The restore preview the journal reducer builds from a checkpoint at
+/// `source_sequence` holding `state`, then `records`, through
+/// `head_sequence` (`session.journal.restore.preview`).
+pub fn journal_restore_preview(
+    state: serde_json::Value,
+    source_sequence: u64,
+    records: &[SessionJournalRecord],
+    head_sequence: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let checkpoint = crate::JournalCheckpoint {
+        checkpoint_id: "checkpoint_fuzz".to_owned(),
+        source_sequence,
+        reducer_version: crate::journal_checkpoint::JOURNAL_REDUCER_VERSION,
+        state,
+        content_refs: Vec::new(),
+        sha256: "00".repeat(32),
+        created_at_ms: 0,
+    };
+    crate::journal_checkpoint::restore_preview(&checkpoint, records, head_sequence)
+}

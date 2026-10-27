@@ -260,7 +260,7 @@ fn terminal_replay_blob_with_recovery(
     Ok((blob, recovered))
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "fuzz", any(unix, windows))))]
 pub(crate) fn restore_preview(
     checkpoint: &JournalCheckpoint,
     records: &[SessionJournalRecord],

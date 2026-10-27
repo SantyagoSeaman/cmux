@@ -48,6 +48,8 @@ arbitrary = { version = "1", features = ["derive"] }
 base64 = "0.22"
 flate2 = "1"
 sha2 = "0.10"
+# p15-oracle task 220: the API revision translator.
+cmux-api-compat = { path = "../crates/cmux-api-compat" }
 
 # The same Crossterm patch as the main workspace, so any crate here that
 # reaches Crossterm builds the code cmux ships.
@@ -411,6 +413,38 @@ bench = false
 [[bin]]
 name = "page_request_head"
 path = "fuzz_targets/page_request_head.rs"
+test = false
+doc = false
+bench = false
+
+# p15-oracle task 220 (plans/cmux-next/chrome-parity/p15-oracle.md): control
+# line decode, v2 param validation, pane stream reader, API revision
+# translator; journal_record above also restores what it decodes.
+# scripts/cmux-next/linux/fuzz.sh runs them with -fork.
+[[bin]]
+name = "control_request"
+path = "fuzz_targets/control_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_params"
+path = "fuzz_targets/resource_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pane_frame"
+path = "fuzz_targets/pane_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "api_compat"
+path = "fuzz_targets/api_compat.rs"
 test = false
 doc = false
 bench = false

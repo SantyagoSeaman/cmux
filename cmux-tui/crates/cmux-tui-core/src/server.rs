@@ -2467,6 +2467,8 @@ use resource_connection::{
 };
 
 mod connection_frame;
+#[cfg(all(feature = "fuzz", any(unix, windows)))]
+pub(crate) mod fuzz_control_line;
 mod request_head;
 mod request_spans;
 mod routes;

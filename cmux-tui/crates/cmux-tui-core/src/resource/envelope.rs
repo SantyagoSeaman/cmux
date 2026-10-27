@@ -1,6 +1,10 @@
 //! The request, response and stream envelopes of `cmux.protocol/2` (moved
 //! out of resource.rs, behavior unchanged).
 
+use std::fmt;
+use std::marker::PhantomData;
+
+use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -13,9 +17,10 @@ use super::{
 #[serde(deny_unknown_fields)]
 pub struct RequestEnvelope {
     pub protocol: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", deserialize_with = "string_form")]
     pub envelope_type: EnvelopeType,
     pub id: RequestId,
+    #[serde(deserialize_with = "string_form")]
     pub operation: ResourceOperation,
     pub params: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +38,32 @@ pub struct RequestEnvelope {
     /// is never serialized, logged or part of a fingerprint.
     #[serde(default, skip_serializing)]
     pub credential: Option<crate::launch_credential::PresentedCredential>,
+}
+
+/// A unit enum member from its JSON string only. The derived decoder also
+/// takes the map form (`{"session.ping":null}`), which the request head
+/// (server/request_head.rs) does not route on, so the head and the envelope
+/// would name different operations for one line.
+fn string_form<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct StringForm<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for StringForm<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: de::Error>(self, text: &str) -> Result<T, E> {
+            T::deserialize(de::value::StrDeserializer::<E>::new(text))
+        }
+    }
+
+    deserializer.deserialize_str(StringForm(PhantomData))
 }
 
 impl RequestEnvelope {
