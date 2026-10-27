@@ -1,4 +1,5 @@
 import CmuxNextActions
+import CmuxNextAppCore
 
 extension ActionRegistry {
     /// Binds a throwing handler; a thrown error is reported with `refuse`.
@@ -19,12 +20,8 @@ extension ActionRegistry {
         return bind(id, unavailable: reason, invoke: { [weak self] invocation in
             do {
                 try run(invocation)
-            } catch let failure as ActionFailure where failure.isNotFound {
-                self?.refuseNotFound(failure.message)
-            } catch let failure as ActionFailure where failure.isQuiet {
-                self?.refuse(failure.message, quiet: true)
             } catch {
-                self?.refuse(RefusalStrings.describe(error))
+                self?.refuse(thrown: error)
             }
         })
     }
@@ -45,12 +42,8 @@ extension ActionRegistry {
         return bindEffect(id, unavailable: reason, effect: { [weak self] invocation in
             do {
                 return try effect(invocation)
-            } catch let failure as ActionFailure where failure.isNotFound {
-                self?.refuseNotFound(failure.message)
-            } catch let failure as ActionFailure where failure.isQuiet {
-                self?.refuse(failure.message, quiet: true)
             } catch {
-                self?.refuse(RefusalStrings.describe(error))
+                self?.refuse(thrown: error)
             }
             return .done
         })

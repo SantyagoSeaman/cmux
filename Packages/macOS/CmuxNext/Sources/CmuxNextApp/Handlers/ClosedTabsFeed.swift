@@ -1,3 +1,4 @@
+import CmuxNextAppCore
 import CmuxNextDaemon
 import CmuxNextWakeups
 import Foundation

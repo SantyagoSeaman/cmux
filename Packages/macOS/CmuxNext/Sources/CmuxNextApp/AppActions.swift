@@ -1,6 +1,7 @@
 import AppKit
 import CmuxNextActions
 import CmuxNextAgentLanes
+import CmuxNextAppCore
 import CmuxNextBridge
 import CmuxNextDaemon
 import CmuxNextDesign
@@ -30,7 +31,9 @@ enum AppActions {
         // Pin/Unpin Chat on a history row: bound with the app's actions, with or without a local acpmux (the
         // Chats feed only fills the history; a launch without one used to leave the action unbound).
         SidebarChatHistoryFeed.bind(into: registry)
-        FilesPaneHandlers.bind(into: registry, context: context)
+        // The page providers register at launch, so a restored tab finds them.
+        services.pages.register(services.viewers.filesPanes)
+        FilesPaneHandlers(host: services).bind(into: registry)
         HistoryHandlers.bind(into: registry, context: context)
         StashHandlers.bind(into: registry, context: context)
         TabSearchHandlers.bind(into: registry, context: context)
@@ -38,8 +41,10 @@ enum AppActions {
         BookmarkHandlers.bind(into: registry, context: context)
         BookmarkIconHandlers.bind(into: registry, context: context)
         AppStoreHandlers.bind(into: registry, context: context)
-        TasksHandlers.bind(into: registry, context: context)
-        TaskManagerHandlers.bind(into: registry, context: context)
+        services.pages.register(services.tasks)
+        TasksHandlers(host: services).bind(into: registry)
+        services.pages.register(services.taskManager)
+        TaskManagerHandlers(host: services).bind(into: registry)
         KeybindingHandlers.bind(into: registry, context: context)
         PageCommandHandlers.bind(into: registry, context: context)
         ListHandlers.bind(into: registry, context: context)

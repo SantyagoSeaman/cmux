@@ -1,4 +1,5 @@
 import CmuxNextActions
+import CmuxNextAppCore
 import CmuxNextBridge
 import CmuxNextDaemon
 import CmuxNextDaemonService

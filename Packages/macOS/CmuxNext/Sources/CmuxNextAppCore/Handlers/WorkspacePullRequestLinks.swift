@@ -1,15 +1,16 @@
 import CmuxNextBridge
 import CmuxNextCompat
-import CmuxNextDaemon
-import Foundation
+public import CmuxNextDaemon
+public import Foundation
 
 /// The web links of a workspace's status entries (Open All Workspace PR
 /// Links): the `pr` entry's first (`cmux workspace status set pr <text>`),
 /// then the other entries', in order, each link once. Only http and https.
-struct WorkspacePullRequestLinks {
-    let urls: [URL]
+@MainActor
+public struct WorkspacePullRequestLinks {
+    public let urls: [URL]
 
-    init(_ entries: [WorkspaceStatus.Entry]) {
+    public init(_ entries: [WorkspaceStatus.Entry]) {
         let ordered = entries.filter { $0.key == SidebarMapping.pullRequestKey } + entries.filter { $0.key != SidebarMapping.pullRequestKey }
         var seen = Set<String>()
         var urls: [URL] = []
