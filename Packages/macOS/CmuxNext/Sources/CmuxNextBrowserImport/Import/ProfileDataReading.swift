@@ -8,8 +8,9 @@ public import Foundation
 /// (CmuxNextBrowserImportService); the readers are not linked into the App
 /// (plans/cmux-next/rule-of-2.md).
 public protocol ProfileDataReading: Sendable {
-    /// `@concurrent`: a reader may block on the files it opens, never on its caller's actor.
-    @concurrent func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult
+    /// A reader opens files: it does that off its caller's actor (a `@concurrent` step), so a
+    /// main-actor caller never blocks on it.
+    func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult
 }
 
 /// A parse replied with another kind of value than its format reads: the reply is not trusted.

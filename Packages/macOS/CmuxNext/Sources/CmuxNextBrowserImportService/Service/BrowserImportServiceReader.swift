@@ -17,13 +17,19 @@ public struct BrowserImportServiceReader: ProfileDataReading {
         self.connector = connector
     }
 
-    @concurrent public func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
+    public func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
+        try await Self.parse(job, connector: connector)
+    }
+
+    /// The file opens and the wait, off the caller's actor.
+    @concurrent private static func parse(_ job: ProfileParseJob, connector: any BrowserImportServiceConnecting) async throws
+        -> ProfileParseResult {
         guard connector.isAvailable() else { throw BrowserImportServiceError.notBundled }
         let wire = BrowserImportServiceWire()
         let request = try wire.encode(job.spec)
         let files = try ServiceFiles(job)
         defer { files.close() }
-        let bytes = try await send(request, files)
+        let bytes = try await send(request, files, connector: connector)
         switch try wire.reply(from: bytes) {
         case .parsed(let result):
             guard let checked = result.checked(for: job.spec) else { throw BrowserImportServiceError.badReply }
@@ -35,7 +41,7 @@ public struct BrowserImportServiceReader: ProfileDataReading {
         }
     }
 
-    private func send(_ request: Data, _ files: ServiceFiles) async throws -> Data {
+    private static func send(_ request: Data, _ files: ServiceFiles, connector: any BrowserImportServiceConnecting) async throws -> Data {
         let connection = connector.makeConnection()
         connection.remoteObjectInterface = NSXPCInterface.browserImportParsing()
         connection.resume()

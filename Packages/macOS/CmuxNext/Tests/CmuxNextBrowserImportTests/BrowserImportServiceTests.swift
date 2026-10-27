@@ -306,7 +306,7 @@ struct HostileImportService: BrowserImportServiceConnecting {
         NSXPCConnection(listenerEndpoint: listener.endpoint)
     }
 
-    final class HostileGate: NSObject, NSXPCListenerDelegate, BrowserImportParsing, Sendable {
+    final nonisolated class HostileGate: NSObject, NSXPCListenerDelegate, BrowserImportParsing, Sendable {
         let answer: Data
 
         init(answer: Data) {

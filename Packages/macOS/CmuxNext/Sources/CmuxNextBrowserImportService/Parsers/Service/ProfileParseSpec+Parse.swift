@@ -50,7 +50,12 @@ extension ProfileParseSpec {
 public struct InProcessProfileReader: ProfileDataReading {
     public init() {}
 
-    @concurrent public func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
+    public func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
+        try await Self.parse(job)
+    }
+
+    /// The blocking reads, off the caller's actor.
+    @concurrent private static func parse(_ job: ProfileParseJob) async throws -> ProfileParseResult {
         try job.spec.parse(at: job.file)
     }
 }
