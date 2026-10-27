@@ -11,6 +11,10 @@ import CmuxNextWakeups
 /// RFC 6455 ping only after ``keepaliveSilence`` with no frame either way (``SilenceKeepalive``),
 /// which Cloudflare answers without waking the owner's Durable Object. No pong within ``pongLimit``
 /// closes the socket, and the run loop reconnects.
+///
+/// With the app's Energy Saver policy (p14-energy-120, ``KeepaliveGate``) a sleep of the Mac or its
+/// displays drops the armed keepalive and a pending pong deadline, and a wake that finds the network
+/// closes a socket that slept once and reconnects within ``EnergyPolicy/reconnectJitter``.
 @MainActor
 final class HandApprovalWire {
     enum Event: Sendable {
@@ -33,19 +37,39 @@ final class HandApprovalWire {
     let keepalive: SilenceKeepalive
     /// The pong deadline of the latest keepalive ping.
     private let pong: DemandTimer
+    /// The Energy Saver gate: holds the keepalive while the Mac or its displays sleep.
+    private let gate: KeepaliveGate
+    /// The wait between connections (``KeepaliveGate/retryWait(_:timer:)``).
+    private let retry: DemandTimer
 
-    init(apiBaseURL: URL, clock: any Clock<Duration> = ContinuousClock(),
+    /// - Parameters:
+    ///   - energy: The app's one ``EnergyPolicySource`` (`MainWorkScheduler.energy`); nil never holds the keepalive.
+    ///   - wakeJitter: A value in 0..<1 that spreads the reconnect after a wake (tests pass a constant).
+    init(apiBaseURL: URL, clock: any Clock<Duration> = ContinuousClock(), energy: EnergyPolicySource? = nil,
          keepaliveSilence: Duration = HandApprovalWire.keepaliveSilence,
+         wakeJitter: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
          token: @escaping @Sendable () async throws -> String) {
         var c = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) ?? URLComponents()
         c.scheme = c.scheme == "http" ? "ws" : "wss"
         c.path = "/v1/wire/user"
         url = c.url ?? apiBaseURL
         self.token = token
-        keepalive = SilenceKeepalive(owner: "cloud.wire.keepalive", silence: keepaliveSilence, clock: clock)
+        gate = KeepaliveGate(energy, random: wakeJitter)
+        keepalive = SilenceKeepalive(owner: "cloud.wire.keepalive", silence: keepaliveSilence, clock: clock, gate: gate)
         // timer-class-allow: off-main: the pong deadline only closes the pinged socket (thread-safe) and runs no main-thread job.
         pong = DemandTimer(owner: "HandApprovalWire.pong", clock: clock)
+        // timer-class-allow: off-main: the retry deadline only resolves the gate's wait (thread-safe); the run loop resumes on its own actor.
+        retry = DemandTimer(owner: "hands.wire.reconnect", clock: clock)
+        gate.follow { [keepalive, pong] edge in
+            if edge == .pause {
+                keepalive.pause()
+                pong.cancel()
+            }
+        }
     }
+
+    /// True while a keepalive ping waits for its pong.
+    var awaitsPong: Bool { pong.isScheduled }
 
     func start(_ sink: @escaping @MainActor (Event) -> Void) {
         stop()
@@ -59,6 +83,7 @@ final class HandApprovalWire {
         runner = nil
         keepalive.stop()
         pong.cancel()
+        gate.closed()
     }
 
     /// One keepalive ping on `socket`: its pong re-arms the keepalive and drops the deadline; a failed
@@ -87,8 +112,9 @@ final class HandApprovalWire {
             } catch is CancellationError {
                 return
             } catch {}
-            // concurrency-allow: Backoff.wait is an async sleep after a failure, not a blocking wait.
-            do { try await backoff.wait(owner: "hands.wire.reconnect") } catch { return }
+            guard generation == self.generation else { return }
+            // concurrency-allow: the gate's retry wait is a one-shot DemandTimer (Backoff's step after a failure, or the short wait after a wake), not a blocking wait.
+            do { try await gate.retryWait(&backoff, timer: retry) } catch { return }
         }
     }
 
@@ -105,11 +131,13 @@ final class HandApprovalWire {
         task.maximumMessageSize = 8 << 20
         task.resume()
         keepalive.start { [weak self] in self?.ping(task) }
+        gate.opened(close: { task.cancel(with: .goingAway, reason: nil) }, resume: { [keepalive] in keepalive.heard() })
         defer {
             // A stopped or restarted wire already dropped them; a newer session's are not this one's.
             if generation == self.generation {
                 keepalive.stop()
                 pong.cancel()
+                gate.closed()
             }
             task.cancel(with: .goingAway, reason: nil)
         }

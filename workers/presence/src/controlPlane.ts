@@ -65,9 +65,11 @@ export const CONTROL_HEARTBEAT_TYPE = "ping" as const;
  * long (p14-energy-121). Any frame it sent (a delta, an ack retry, the last
  * heartbeat) already showed the client and the path that the socket is alive,
  * so the extra alarms (hint confirm, ack rungs, snapshot retry) never ping an
- * idle client again. The longest a live socket waits for a frame is one
- * refresh interval plus this silence, inside the client's 90 s receive
- * timeout (IrxControlPlaneClient.receiveTimeout). */
+ * idle client again. A skipped socket pulls the next alarm to its last frame
+ * plus one refresh interval, and the heartbeat goes out before the upstream
+ * refresh, so a live socket waits at most one refresh interval (plus the
+ * alarm's own lateness) for a frame, as before, well inside the client's 90 s
+ * receive timeout (IrxControlPlaneClient.receiveTimeout). */
 export const CONTROL_HEARTBEAT_SILENCE_MS = 20_000;
 
 /** A publish_hint is an ANNOUNCEMENT (phase A never writes hints to Vercel —
@@ -1704,11 +1706,14 @@ export class ControlPlaneCore {
       live.push(socket);
     }
     if (live.length === 0) return; // idle account: stop the refresh cadence
+    // Before the upstream refresh, so a slow discovery fetch never delays it.
+    this.sendHeartbeat(live);
     await this.refreshDirectory(live);
     await this.retryUnackedDirectories(live);
-    this.sendHeartbeat(live);
     let earliestExpiry = Number.POSITIVE_INFINITY;
     let earliestAckRetry = Number.POSITIVE_INFINITY;
+    let earliestQuiet = Number.POSITIVE_INFINITY;
+    const end = this.deps.now();
     for (const socket of live) {
       const attachment = socket.getAttachment();
       if (!attachment) continue;
@@ -1718,9 +1723,19 @@ export class ControlPlaneCore {
       if (attachment.ackRetry !== undefined && attachment.ackRetry.nextAt < earliestAckRetry) {
         earliestAckRetry = attachment.ackRetry.nextAt;
       }
+      // A socket whose heartbeat this run skipped hears the next one a refresh
+      // interval after its last frame, not after this run: its silence stays
+      // within CONTROL_REFRESH_INTERVAL_MS. A send that failed (a gone socket)
+      // never pulls the alarm closer than the silence budget.
+      if (attachment.helloed && attachment.lastSentAt !== undefined) {
+        earliestQuiet = Math.min(earliestQuiet, Math.max(
+          attachment.lastSentAt + CONTROL_REFRESH_INTERVAL_MS,
+          end + CONTROL_HEARTBEAT_SILENCE_MS,
+        ));
+      }
     }
     await this.deps.scheduleAlarmAt(
-      Math.min(this.deps.now() + CONTROL_REFRESH_INTERVAL_MS, earliestExpiry),
+      Math.min(end + CONTROL_REFRESH_INTERVAL_MS, earliestExpiry, earliestQuiet),
     );
     // Pull the alarm to the earliest due ack rung (ensure-at keeps the min).
     if (earliestAckRetry !== Number.POSITIVE_INFINITY) {
@@ -1757,10 +1772,17 @@ export class ControlPlaneCore {
 
   /** The DO just sent `socket` a frame: its heartbeat waits a full
    * CONTROL_HEARTBEAT_SILENCE_MS from now. Stamps the caller's attachment
-   * object, so a later setAttachment of that object keeps the stamp. */
+   * object, so a later setAttachment of that object keeps the stamp, and
+   * writes only the stamp onto the stored attachment: the caller's copy may
+   * predate an await (a mint fetch) during which an ack or a ladder rung
+   * changed the stored one. */
   private noteSent(socket: CtlSocket, attachment: CtlAttachment): void {
-    attachment.lastSentAt = this.deps.now();
-    socket.setAttachment(attachment);
+    const now = this.deps.now();
+    attachment.lastSentAt = now;
+    const stored = socket.getAttachment();
+    if (!stored) return;
+    stored.lastSentAt = now;
+    socket.setAttachment(stored);
   }
 
   /** Resend the LATEST merged directory to every live socket whose retry rung

@@ -2001,6 +2001,16 @@ then `idle-budget tabs-static --gate`) gives the measured values and adds a slot
   15 s budget -> 0 pings.
 - Test phase: idle-budget signed-in; worker tests for changed workers.
 - Size M. Depends: 102, 105. Queue Q12.
+- iroh relay (2026-10-27): no change here; its allowance is left to p14-energy-122. Phone Access's endpoint (iroh-ffi
+  1.2.0-cmux.1.ios17, manaflow-ai/iroh rev 9816d2505ddd) already pings on silence both ways: the client's
+  `ActiveRelayActor::run_connected` (`iroh/src/socket/transports/relay/actor.rs`, `PING_INTERVAL` 15 s) pings only
+  after 15 s with no relay frame (`ping_interval.reset()` on every frame read), and the relay server
+  (`iroh-relay/src/server/client.rs`) pings a client only after 16-20 s with no client frame, so an idle link carries
+  one ping and pong per 15 s (an estimated 70 bytes with WebSocket and TLS framing, not measured). The 15 s is an iroh
+  constant that iroh-ffi's `EndpointOptions` does not expose. In signed-in it falls under the app's pooled keepalive
+  allowances. p14-energy-122 binds the endpoint only while a phone is paired or the pairing page is open (none in
+  signed-in) and records the bound endpoint's keepalive; allowed_periodic is at wakeup-audit's 6-entry limit, so that
+  entry must replace or merge one.
 
 #### p14-energy-122 Phone Access iroh endpoint only when usable
 - Files: `Packages/macOS/CmuxNext/Sources/CmuxNextPhoneAccess/MobileHostService.swift`,

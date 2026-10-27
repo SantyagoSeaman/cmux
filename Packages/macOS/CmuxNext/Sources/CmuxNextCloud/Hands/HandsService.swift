@@ -1,3 +1,4 @@
+public import CmuxNextWakeups
 public import Foundation
 public import Observation
 
@@ -60,10 +61,12 @@ public final class HandsService {
     @ObservationIgnored private var ended: [String: ContinuousClock.Instant] = [:]
     private static let logLimit = 64
 
+    /// - Parameter energy: The app's one ``EnergyPolicySource`` (`MainWorkScheduler.energy`): the user socket's
+    ///   keepalive holds while the Mac or its displays sleep (p14-energy-121); nil never holds it.
     public init(apiBaseURL: URL, accessToken: @escaping HandsAPIClient.AccessToken, identity: MacInstallIdentity,
-                presence: HandPresenceKeyStore) {
+                presence: HandPresenceKeyStore, energy: EnergyPolicySource? = nil) {
         api = HandsAPIClient(baseURL: apiBaseURL, accessToken: accessToken)
-        wire = HandApprovalWire(apiBaseURL: apiBaseURL, token: accessToken)
+        wire = HandApprovalWire(apiBaseURL: apiBaseURL, energy: energy, token: accessToken)
         (self.identity, self.presence) = (identity, presence)
     }
 

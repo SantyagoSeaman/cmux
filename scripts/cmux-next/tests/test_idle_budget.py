@@ -2505,6 +2505,23 @@ class D15BudgetTests(unittest.TestCase):
         self.assertFalse(ib.periodic_excuse({"allowed_periodic": [{**rule, "metrics": ["log_lines"]}]}, "app",
                                             "log_lines", {"log_lines": 1}, 0, 60.0))
 
+    def test_bytes_to_one_end_are_excused_once_whatever_rules_name_it(self):
+        # 100 bytes to the keepalive end, 200 to an end no rule names: 200 stay, over a 150 limit.
+        entry = {"network_bytes": 300, "remote_bytes": {"17.253.4.125:443": 100, "1.1.1.1:443": 200}}
+        rule = {"owner": "DeviceHubSocket.ping", "period_s": 30, "why": "keepalive", "kind": "app",
+                "metrics": ["network_bytes"], "bytes_per_period": 1000, "remote": "17.253.4.125:443"}
+        two_capped = [rule, {**rule, "owner": "cloud.wire.keepalive"}]
+        capped_and_uncapped = [rule, {key: value for key, value in rule.items() if key != "bytes_per_period"}]
+        for rules in (two_capped, capped_and_uncapped):
+            budget = {"allowed_periodic": rules}
+            self.assertFalse(ib.periodic_excuse(budget, "app", "network_bytes", entry, 150, 60.0), rules)
+            self.assertTrue(ib.periodic_excuse(budget, "app", "network_bytes", entry, 200, 60.0), rules)
+        # two capped rules on one end pool their allowances up to what moved there, never past it
+        small = [{**rule, "bytes_per_period": 20}, {**rule, "owner": "cloud.wire.keepalive", "bytes_per_period": 20}]
+        # 2 x 2 periods x 20 = 80 of the 100 bytes in a 45 s window: 220 stay
+        self.assertFalse(ib.periodic_excuse({"allowed_periodic": small}, "app", "network_bytes", entry, 219, 45.0))
+        self.assertTrue(ib.periodic_excuse({"allowed_periodic": small}, "app", "network_bytes", entry, 220, 45.0))
+
     def test_window_facts_carry_the_window_length_for_keepalive_allowances(self):
         entry = {"assertions": [], "saver": {"observed": [None, None], "reason": None}, "result": {"seconds": 59.8}}
         self.assertEqual(ib.window_facts(entry)["seconds"], 59.8)

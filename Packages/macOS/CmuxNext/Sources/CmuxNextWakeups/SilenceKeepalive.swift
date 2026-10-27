@@ -1,3 +1,5 @@
+import CmuxNextCompat
+
 /// A client socket's keepalive that fires only after ``silence`` with no frame either way
 /// (p14-energy-121). Every frame the owner reads or writes calls ``heard()``, which pushes the one
 /// deadline back; while frames flow the probe never runs, and an idle socket gets one probe per
@@ -15,6 +17,8 @@ public final class SilenceKeepalive {
     public nonisolated let silence: Duration
     private nonisolated let timer: DemandTimer
     private nonisolated let gate: KeepaliveGate?
+    // concurrency-allow: whether a connection is open, checked and armed in one step by heard() from any thread (a pong handler, the gate's resume hook) and cleared by stop() (lock carve-out: one flag, no I/O; it only schedules the DemandTimer).
+    private nonisolated let running: Mutex<Bool>
     private var probe: (@MainActor () -> Void)?
 
     /// - Parameters:
@@ -27,6 +31,7 @@ public final class SilenceKeepalive {
         self.silence = silence
         self.gate = gate
         timer = DemandTimer(owner: owner, clock: clock)
+        running = Mutex(false)
     }
 
     /// True while a probe deadline is pending.
@@ -35,16 +40,21 @@ public final class SilenceKeepalive {
     /// A connection opened: `probe` runs after each ``silence`` with no ``heard()``, until ``stop()``.
     public func start(_ probe: @escaping @MainActor () -> Void) {
         self.probe = probe
+        running.withLock { $0 = true }
         heard()
     }
 
-    /// A frame went in or out: the probe waits a full ``silence`` from now. Safe from any thread.
+    /// A frame went in or out: the probe waits a full ``silence`` from now. Safe from any thread. It
+    /// does nothing while no connection is open, so a pong that lands after ``stop()`` arms nothing.
     public nonisolated func heard() {
         let arm = { [timer, silence] in
             // wakeup-allow: deadline: pushed back by every frame; it fires only after a full silence budget.
             timer.scheduleOnMain(after: silence) { [weak self] in self?.fire() }
         }
-        if let gate { gate.whileAwake(arm) } else { arm() }
+        running.withLock { running in
+            guard running else { return }
+            if let gate { gate.whileAwake(arm) } else { arm() }
+        }
     }
 
     /// The gate holds the keepalive: drops the deadline until the next ``heard()``. Safe from any thread.
@@ -55,7 +65,10 @@ public final class SilenceKeepalive {
     /// The connection closed: no probe runs again until the next ``start(_:)``.
     public func stop() {
         probe = nil
-        timer.cancel()
+        running.withLock { running in
+            running = false
+            timer.cancel()
+        }
     }
 
     /// The silence budget passed: runs the probe and waits another full budget, so an idle socket gets

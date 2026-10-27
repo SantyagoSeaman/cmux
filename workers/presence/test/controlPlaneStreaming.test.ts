@@ -155,7 +155,7 @@ class FakeSocket implements CtlSocket {
   }
 }
 
-type UpstreamHandler = (init: CtlUpstreamInit) => CtlUpstreamResult;
+type UpstreamHandler = (init: CtlUpstreamInit) => CtlUpstreamResult | Promise<CtlUpstreamResult>;
 
 class Harness {
   now = T0;
@@ -424,8 +424,9 @@ describe("hello fact streaming", () => {
     await harness.core.handleAlarm();
 
     expect(socket.closes).toEqual([]);
-    // The unacked directory's resend is the run's frame for it; no heartbeat after it.
-    expect(socket.types()).toEqual(["directory"]);
+    // Two silent hours: the heartbeat goes out first (before the upstream
+    // refresh, so a slow fetch never delays it), then the due ack resend.
+    expect(socket.types()).toEqual(["ping", "directory"]);
 
     // Acked and silent: the next run sends the heartbeat.
     await harness.send(socket, { v: 1, type: "ack", rev: 42, payload: {} });
@@ -844,8 +845,66 @@ describe("heartbeat after silence (p14-energy-121)", () => {
     expect(socket.getAttachment()?.lastSentAt).toBe(harness.now);
   });
 
-  it("keeps the longest silence of a live socket inside the client's 90 s receive timeout", () => {
-    expect(CONTROL_REFRESH_INTERVAL_MS + CONTROL_HEARTBEAT_SILENCE_MS).toBeLessThan(90_000);
+  it("heartbeats a skipped socket one refresh interval after its last frame, whatever the upstream takes", async () => {
+    const harness = new Harness();
+    const socket = await quietSocket(harness);
+    const peer = await harness.connectLongLived("s2");
+    await harness.hello(peer, { endpointId: ENDPOINT_B, haveRev: 42, wantPasses: false });
+    // Every discovery fetch takes 30 s.
+    harness.routes.set("/api/devices/iroh", () => {
+      harness.now += 30_000;
+      return { status: 200, json: discoveryResponse(42) };
+    });
+
+    // A frame reaches the socket 10 s before the refresh alarm, which skips its heartbeat.
+    const lastFrameAt = T0 + 50_000;
+    harness.now = lastFrameAt;
+    await harness.send(peer, { v: 1, type: "publish_hint", payload: { endpointId: ENDPOINT_B, homeRelayUrl: RELAY_2 } });
+    expect(socket.types()).toEqual(["hint_update"]);
+    harness.now = T0 + CONTROL_REFRESH_INTERVAL_MS;
+    let scheduled = harness.alarms.length;
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(0);
+
+    // The next alarm comes a refresh interval after that frame, not after the slow run.
+    const next = Math.min(...harness.alarms.slice(scheduled));
+    expect(next).toBe(lastFrameAt + CONTROL_REFRESH_INTERVAL_MS);
+    harness.now = next;
+    scheduled = harness.alarms.length;
+    await harness.core.handleAlarm();
+    expect(pings(socket)).toBe(1);
+    // The heartbeat went out before the 30 s fetch: the silence is one refresh interval.
+    const ping = socket.frames.find((frame) => frame.type === "ping") as { payload: { at: string } };
+    expect(Date.parse(ping.payload.at) - lastFrameAt).toBe(CONTROL_REFRESH_INTERVAL_MS);
+    expect(CONTROL_REFRESH_INTERVAL_MS).toBeLessThan(90_000); // IrxControlPlaneClient.receiveTimeout
+  });
+
+  it("keeps an ack that lands while a mint fetch is pending", async () => {
+    const harness = new Harness();
+    harness.serveDiscovery(() => discoveryResponse(42));
+    const socket = await harness.connectLongLived("s1");
+    await harness.hello(socket, { endpointId: ENDPOINT_A, haveRev: null, wantPasses: false });
+    expect(socket.getAttachment()?.ackRetry?.rev).toBe(42);
+
+    let entered = (): void => {};
+    const fetching = new Promise<void>((resolve) => { entered = resolve; });
+    let release = (_result: CtlUpstreamResult): void => {};
+    const answer = new Promise<CtlUpstreamResult>((resolve) => { release = resolve; });
+    harness.serveMint(() => {
+      entered();
+      return answer;
+    });
+    const mint = harness.send(socket, { v: 1, type: "mint_request", payload: { endpointId: ENDPOINT_A } });
+    await fetching;
+    await harness.send(socket, { v: 1, type: "ack", rev: 42, payload: {} });
+    release({ status: 200, json: mintResponse(ENDPOINT_A) });
+    await mint;
+
+    expect(socket.frame("relay_passes")).toBeDefined();
+    const attachment = socket.getAttachment();
+    expect(attachment?.lastAckedRev).toBe(42);
+    expect(attachment?.ackRetry).toBeUndefined();
+    expect(attachment?.lastSentAt).toBe(harness.now);
   });
 
   it("treats a socket attached before the stamp existed as silent", async () => {

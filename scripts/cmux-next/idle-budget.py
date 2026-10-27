@@ -1939,18 +1939,24 @@ def periodic_excuse(budget, name, field, entry, limit=0, seconds=None):
         return True
     if field != "network_bytes" or not rules or not isinstance(entry.get(field), (int, float)):
         return False
-    moved = entry.get("remote_bytes") or {}
-
-    def toward(remotes):
-        return sum(count for end, count in moved.items() if any(procs.remote_matches(remote, end) for remote in remotes))
-
+    # Each end's bytes are excused once: all of them when an uncapped rule names the end, else as much as the
+    # capped rules naming it still have (a rule's allowance is spent across its ends, the narrowest rule first).
     uncapped = [rule["remote"] for rule in rules if rule.get("bytes_per_period") is None]
-    left = entry[field] - toward(uncapped)
-    for rule in rules:
-        if rule.get("bytes_per_period") is None:
-            continue
+    unexcused = {end: count for end, count in (entry.get("remote_bytes") or {}).items()
+                 if not any(procs.remote_matches(remote, end) for remote in uncapped)}
+    left = entry[field] - sum((entry.get("remote_bytes") or {}).values()) + sum(unexcused.values())
+    capped = [(rule, [end for end in unexcused if procs.remote_matches(rule["remote"], end)])
+              for rule in rules if rule.get("bytes_per_period") is not None and rule.get("remote") is not None]
+    for rule, ends in sorted(capped, key=lambda pair: len(pair[1])):
         allowance = periodic_allowance(rule, seconds)
-        left -= allowance if rule.get("remote") is None else min(allowance, toward([rule["remote"]]))
+        for end in ends:
+            spent = min(allowance, unexcused[end])
+            unexcused[end] -= spent
+            allowance -= spent
+            left -= spent
+    # A capped rule with no `remote` covers any end, and bytes on no listed flow.
+    left -= sum(periodic_allowance(rule, seconds) for rule in rules
+                if rule.get("bytes_per_period") is not None and rule.get("remote") is None)
     return left <= limit
 
 

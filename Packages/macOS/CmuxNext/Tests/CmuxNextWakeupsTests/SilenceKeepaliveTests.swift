@@ -76,6 +76,20 @@ struct SilenceKeepaliveTests {
         #expect(await rig.count() == 0)
     }
 
+    @Test(.timeLimit(.minutes(1))) func aFrameOrPongAfterStopArmsNothing() async throws {
+        let rig = Rig()
+        rig.keepalive.heard()
+        #expect(!rig.keepalive.isArmed)
+        rig.start()
+        try await rig.clock.waitForSleeper()
+        rig.keepalive.stop()
+        // A pong of a ping that was in flight when the connection closed.
+        rig.keepalive.heard()
+        #expect(!rig.keepalive.isArmed)
+        rig.clock.advance(by: .seconds(60))
+        #expect(await rig.count() == 0)
+    }
+
     @Test(.timeLimit(.minutes(1))) func pauseDropsTheDeadlineUntilTheNextFrame() async throws {
         let rig = Rig()
         rig.start()
