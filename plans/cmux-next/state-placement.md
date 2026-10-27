@@ -338,35 +338,46 @@ Packages/macOS/CmuxNext/Sources --glob '!**/*Tests*'` at perf/chrome-parity 2272
 
 - **view** (stays in the app): a cache the app can rebuild or that only speeds its own first frame,
   a client outbox (prompts or drafts this app holds until their owner has them), this install's
-  identity, update, feature and diagnostic files, reads of macOS or other apps' files, one-time
-  imports, and path plumbing.
+  identity, update, feature and diagnostic files, the app's readable copy of a root-only record
+  that lets it skip the privileged helper, reads of macOS or other apps' files, one-time imports,
+  and path plumbing.
 - **shared** (not the app's to keep): a fact about a daemon object (workspace, chat), browser
-  profile data, a job ledger that guards a write another process owns, or a file another process
-  already owns that the app only locates. "Moves to" names where it goes; "done" means another
-  process is already the writer and the row stays as path code.
+  profile data, a job ledger that guards a write another process owns, a fallback or migration
+  source of a store the daemon already serves, or a file another process already owns that the app
+  only locates. "Moves to" names where it goes; "done" means another process is already the writer
+  and the row stays as path code.
 
 Kinds: cache, layout, outbox, install, diagnostics, os, external, import, job, plumbing for view;
 profile, session, job, done, plumbing (a seam of a shared store; it follows that store) for shared.
 
 Result: **55 view, 34 shared** (17 move, 13 done, 4 plumbing). The owner column is the OWNERS.md
 row of the file ("Performance Lead (no OWNERS row)" otherwise); it owns the app side of a move.
-"Moves to" names the receiving owner. Follow-ups, one per store (each a separate task, not done
-here):
+"Moves to" names the receiving owner. Follow-ups, one per store or store group (each a separate
+task, not done here):
 
-1. Browser profile store in the daemon: profile records (`BrowserProfileService`, a browser
-   profile table in the home daemon's `profiles-v1`), page history (`BrowserVisitLog`, through
-   `HistoryService`), ended downloads (`BrowserDownloadHistory`), site settings
-   (`SiteSettingsRegistry`), zoom levels (`SiteZoomLevels`, both made by `BrowserSharedStores`),
-   cookie backups (`CookieBackups`, one implementation with the headless host's
-   `cmux-tui/crates/cmux-browser-host/src/cookie_backups.rs`) and imported browser data
-   (`ImportedDataStore` in `OnboardingService`). Chrome keeps each of these in the profile:
-   `components/history/core/browser/history_backend.cc` (history and downloads),
+1. Browser profile store in the daemon, for the profile data that no daemon capability serves yet:
+   ended downloads (`BrowserDownloadHistory`), site settings (`SiteSettingsRegistry`), zoom levels
+   (`SiteZoomLevels`, both made by `BrowserSharedStores`), cookie backups (`CookieBackups`, one
+   implementation with the headless host's `cmux-tui/crates/cmux-browser-host/src/cookie_backups.rs`)
+   and imported browser data (`ImportedDataStore` in `OnboardingService`). Chrome keeps each of these
+   in the profile: `components/history/core/browser/history_backend.cc` (downloads),
    `components/content_settings/core/browser/host_content_settings_map.cc`,
    `components/zoom/zoom_controller.cc` (HostZoomMap, `partition.per_host_zoom_levels`). Section 9
    follow-up 7 (`BrowserExternalApps`) moves with it. Then the CLI, the TUI's browser and the phone
-   read the same profile as the app.
-2. Bookmarks: `BookmarkService` already uses the home daemon's `bookmarks-v1`; delete its
-   `bookmarks.json` fallback when every supported daemon serves the table.
+   read the same profile as the app. Profile records and page history are already in the daemon
+   (follow-up 2).
+2. Delete the app fallbacks of stores the home daemon already serves, each when every supported
+   daemon serves its capability (PL-daemon):
+   - bookmarks: `BookmarkService` uses `bookmarks-v1`; `bookmarks.json` is the fallback.
+   - browser profile records: `BrowserProfileService` uses `browser-profiles-v1`
+     (create/update/delete/move-browser-profile); `profiles.json` is the fallback and the source
+     that `homeRecordsChanged` copies to the daemon once (`BrowserProfileService+Records.swift`).
+   - page history: `HistoryService` routes visits to `history-v1` (`DaemonHistoryClient`, the owner
+     of page visits); each profile's `BrowserVisitLog` `History.sqlite` is the fallback sink.
+   - terminal themes: `ThemeCoordinator+Terminals` keeps them in `personal-terminals-v1`
+     (`set-personal-terminal`) and moves the file's entries there, emptying it;
+     `terminal-themes.json` (`TerminalThemeStore`) is the fallback, and its doc comment, which
+     still calls it per-client view state, goes with it.
 3. Chromium data root: `CEFProfileStorage` (`<bundle id>/Chromium`) becomes the Chromium host
    process's own root, as `ChromiumHost` already is (p01-process host model, PL-cefhost).
 4. Agent folders and uploads: acpmux makes the agent-home folder of a folderless workspace
@@ -382,13 +393,13 @@ here):
 7. Classic migration: the ledger of imported classic workspaces (`ClassicMigrationRepository`,
    written through `AppOnboardingServices+ClassicMigration`, read by `ImportSourceHelpers`) becomes
    an idempotency key on the daemon's workspace import.
-8. Server fixes: `ServerFixLedger` merges into the privileged helper's `ServerFixPriorStore`, the
-   writer of the fixes, so there is one ledger.
-9. Done already: 13 rows locate files that the daemon, the link, `cmux server`, the Tasks owner, the
+8. Done already: 13 rows locate files that the daemon, the link, `cmux server`, the Tasks owner, the
    Chromium host, the cmux-cua helper or the privileged helper write.
 
-Not moved, on purpose: `TerminalThemeStore` (its own rule: per-terminal themes are per-client view
-state, `profiles-v1` has no per-terminal column), `ImportSuggestionsCenter`'s job ledger (an import
+Not moved, on purpose: `ServerFixLedger` (the helper's `ServerFixPriorStore` is root-only, and this
+app-readable copy is what lets Stop Serving know, without the helper or its Login Items approval,
+that nothing needs reverting: an empty ledger never needs the helper, plans/cmux-next/server.md
+9.4), `ImportSuggestionsCenter`'s job ledger (an import
 reads other browsers' folders with the access the person gave this app, so the job runs here; its
 output is profile data, follow-up 1), and the two outboxes (`AgentPanePromptJournal`,
 `RecoveryDraftStore`), which hold what no other owner has yet.
@@ -404,25 +415,25 @@ Line numbers are at 22726d00344; re-run the query to find a row after the code m
 | 4 | `CmuxNextApp/AgentTabs+AgentFolder.swift:74` | 1 | shared | plumbing | reads `AgentHome.standard` once | with `AgentHome` | Performance Lead (no OWNERS row) |
 | 5 | `CmuxNextApp/Bookmarks/BookmarkService.swift:16` | 1 | shared | profile | `<bundle id>/BrowserProfiles/bookmarks.json`: fallback when the home daemon does not serve `bookmarks-v1` | delete the fallback; `bookmarks-v1` is the store (PL-daemon) | Performance Lead (no OWNERS row) |
 | 6 | `CmuxNextApp/BrowserDownloadHistory.swift:25` | 2 | shared | profile | `<bundle id>/downloads.json`: ended downloads of the Downloads list | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
-| 7 | `CmuxNextApp/BrowserProfiles/BrowserProfileService.swift:17` | 3 | shared | profile | `<bundle id>/BrowserProfiles/profiles.json`: profile records and the new-tab profile | browser profile table in `profiles-v1` (PL-daemon) | Performance Lead (no OWNERS row) |
+| 7 | `CmuxNextApp/BrowserProfiles/BrowserProfileService.swift:17` | 3 | shared | profile | `<bundle id>/BrowserProfiles/profiles.json`: profile records and the new-tab profile; fallback when the home daemon does not serve `browser-profiles-v1`, and the source copied there once when it does | delete the fallback; `browser-profiles-v1` is the store (PL-daemon) | Performance Lead (no OWNERS row) |
 | 8 | `CmuxNextApp/ChromiumRuntimeService.swift:86` | 1 | view | plumbing | passes Application Support to `ChromiumRuntimeStore` | stays | Performance Lead (no OWNERS row) |
 | 9 | `CmuxNextApp/Crash/AppRunMarker.swift:123` | 2 | view | diagnostics | `cmux-next/<bundle id>/`: run marker of this app process (unclean exit) | stays | Performance Lead (no OWNERS row) |
 | 10 | `CmuxNextApp/Crash/CrashReporter+Launch.swift:224` | 1 | shared | done | locates the daemon's `cmux-tui/sessions` folder for owner crash reports | done (daemon) | Performance Lead (no OWNERS row) |
 | 11 | `CmuxNextApp/ErrorJournal/ErrorJournalService.swift:14` | 3 | view | diagnostics | `<bundle id>/errors`: this build's error journal | stays | Performance Lead (no OWNERS row) |
 | 12 | `CmuxNextApp/Handlers/SettingsHandlers.swift:77` | 1 | view | external | doc comment: Ghostty's config in Application Support | stays | Performance Lead (no OWNERS row) |
-| 13 | `CmuxNextApp/History/HistoryService.swift:15` | 1 | shared | plumbing | passes `<bundle id>` to each profile's `BrowserVisitLog` | with `BrowserVisitLog` | Performance Lead (no OWNERS row) |
+| 13 | `CmuxNextApp/History/HistoryService.swift:15` | 1 | shared | plumbing | passes `<bundle id>` to each profile's `BrowserVisitLog`, the fallback sink when the home daemon does not serve `history-v1` | with `BrowserVisitLog`: delete the fallback (PL-daemon) | Performance Lead (no OWNERS row) |
 | 14 | `CmuxNextApp/Home/HomeService+ChiefMigration.swift:36` | 2 | view | import | one-time read of old Chiefs' folders | stays | Performance Lead (no OWNERS row) |
 | 15 | `CmuxNextApp/Onboarding/AppOnboardingServices+ClassicMigration.swift:32` | 3 | shared | job | `cmux-next/<bundle id>/classic-migration`: ledger of classic workspaces imported into the daemon session, and backups | idempotency key on the daemon's import (PL-daemon) | Performance Lead (no OWNERS row) |
 | 16 | `CmuxNextApp/Onboarding/OnboardingService.swift:43` | 3 | shared | profile | `<bundle id>/BrowserImport` (`ImportedDataStore`: imported history and bookmarks per source profile); classic migration folder seam | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
 | 17 | `CmuxNextApp/Pages/Files/TableWidths/MarkdownTableWidthRepository.swift:6` | 3 | view | cache | `<bundle id>/MarkdownTableWidths`: copy of a file's `com.cmux.markdown.tables` attribute for volumes without attributes | stays | PL-webui |
 | 18 | `CmuxNextApp/Permissions/SystemPermissionProbe.swift:98` | 1 | view | os | opens `com.apple.TCC/TCC.db` to probe Full Disk Access | stays | Performance Lead (no OWNERS row) |
 | 19 | `CmuxNextApp/Server/LocalServerSource.swift:105` | 1 | shared | done | watches `cmux/server/roles/status.json`, written by `cmux server` | done (`cmux server`) | Performance Lead (no OWNERS row) |
-| 20 | `CmuxNextApp/Server/ServerFixLedger.swift:38` | 3 | shared | job | `cmux/server-fix-ledger/<helper label>.json`: system fixes the privileged helper applied, kept for revert | the helper's `ServerFixPriorStore` (Performance Lead) | Performance Lead (no OWNERS row) |
+| 20 | `CmuxNextApp/Server/ServerFixLedger.swift:38` | 3 | view | job | `cmux/server-fix-ledger/<helper label>.json`: the app's readable record of the fixes the privileged helper applied, so Stop Serving knows without the root-only helper whether it needs the helper | stays (the helper's `ServerFixPriorStore` is root-only; server.md 9.4) | Performance Lead (no OWNERS row) |
 | 21 | `CmuxNextApp/Server/ServerReachPlan.swift:115` | 2 | shared | done | locates the link's `link/config.json` (`cmux link init` writes it) | done (link) | Performance Lead (no OWNERS row) |
 | 22 | `CmuxNextApp/Settings/DebugSettingsService.swift:136` | 2 | view | install | `cmux/<tag or builds/key>/debug-tunables.json` | stays | Performance Lead (no OWNERS row) |
 | 23 | `CmuxNextApp/SidebarSnapshot/SidebarSnapshotFile.swift:39` | 1 | view | cache | sidebar snapshot for the first frame before the daemon answers; folder of small per-build files | stays | Performance Lead (no OWNERS row) |
 | 24 | `CmuxNextApp/Tasks/TasksPageService.swift:14` | 1 | shared | done | doc comment: the Tasks owner's socket | done (Tasks owner) | Performance Lead (no OWNERS row) |
-| 25 | `CmuxNextApp/Themes/TerminalThemeStore.swift:8` | 2 | view | layout | `<bundle id>/terminal-themes.json`: per-terminal themes, per-client by the file's own rule | stays | Performance Lead (no OWNERS row) |
+| 25 | `CmuxNextApp/Themes/TerminalThemeStore.swift:8` | 2 | shared | session | `<bundle id>/terminal-themes.json`: per-terminal themes; fallback when the home daemon does not serve `personal-terminals-v1`, and the source moved there (then emptied) when it does | delete the fallback; `personal-terminals-v1` is the store (PL-daemon) | Performance Lead (no OWNERS row) |
 | 26 | `CmuxNextApp/Themes/WorkspaceBackgroundStore.swift:9` | 2 | shared | session | `<bundle id>/workspace-backgrounds.json` and `workspace-background-opacity.json`: each workspace's background and tint | personal workspace rows in `profiles-v1` (PL-daemon) | Performance Lead (no OWNERS row) |
 | 27 | `CmuxNextApp/Windows/IncognitoWorkspaceLedger.swift:49` | 2 | shared | session | `<bundle id>/incognito-workspaces.json`: incognito workspaces the daemon does not know as ephemeral (torn-off tabs) | daemon ephemeral flag, then delete (PL-daemon) | Performance Lead (no OWNERS row) |
 | 28 | `CmuxNextBrowser/CEF/CEFNativeMessaging.swift:7` | 4 | view | external | native messaging host folders (cmux's Chromium root, Chromium's and Chrome's) | stays | PL-cefhost |
@@ -458,7 +469,7 @@ Line numbers are at 22726d00344; re-run the query to find a row after the code m
 | 58 | `CmuxNextFeatures/FeatureSafeMode.swift:159` | 1 | view | install | crash streak file in `features` | stays | PL-perf-lab |
 | 59 | `CmuxNextFeatures/LowEntropySource.swift:79` | 1 | view | install | low-entropy value in `features` (Chrome: `components/metrics/entropy_state.cc`) | stays | PL-perf-lab |
 | 60 | `CmuxNextHangReports/HangReportStore.swift:4` | 1 | view | diagnostics | `<build>/HangReports` | stays | PL-telemetry |
-| 61 | `CmuxNextHistory/BrowserVisitLog.swift:51` | 1 | shared | profile | `<bundle id>/BrowserProfiles/<profile>/History.sqlite`: page history | daemon browser profile store (PL-daemon) | Performance Lead (no OWNERS row) |
+| 61 | `CmuxNextHistory/BrowserVisitLog.swift:51` | 1 | shared | profile | `<bundle id>/BrowserProfiles/<profile>/History.sqlite`: page history; fallback sink when the home daemon does not serve `history-v1` | delete the fallback; `history-v1` is the store (PL-daemon) | Performance Lead (no OWNERS row) |
 | 62 | `CmuxNextImportCards/ImportSourceHelpers.swift:15` | 1 | shared | plumbing | reads the classic migration ledger to count what is left | with the classic migration ledger | Performance Lead (no OWNERS row) |
 | 63 | `CmuxNextImportCards/ImportSuggestionsCenter.swift:56` | 2 | view | job | `cmux-next/<bundle id>/import-jobs.json`: import jobs saved after each step for Resume | stays (reads with this app's folder access) | Performance Lead (no OWNERS row) |
 | 64 | `CmuxNextImportSuggestions/ImportScanner.swift:189` | 1 | view | external | Ghostty's config, to list it as in use | stays | Performance Lead (no OWNERS row) |
