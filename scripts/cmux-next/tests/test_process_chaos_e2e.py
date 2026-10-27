@@ -14,6 +14,10 @@
    skip (exit 3).
 5. The holder fault: the killed holder's pane shows the ended state with Restart, Restart brings a shell back, the
    other holder and its terminal are untouched.
+6. gpu-crash-loop (p10-stability-164) runs only with --only. It kills each new GPU process 12 times and reports the
+   app pid and the GPU state: Chromium restarting every time passes, its last mode turning GPU off
+   (cmux-gpu-unusable-no-fatal) passes, Chromium's LOG(FATAL) ending the app fails with the app gone, and a loop
+   whose GPU process came back too late to reach the last mode fails with why.
 
 Runs on any host (Linux included): no app, no socket, no signal sent.
 
@@ -62,10 +66,15 @@ OTHER_WEBCONTENT = 950  # a WebContent of another app
 class FakeApp:
     """A tagged app's socket and process table. Kills change what the app reports the way the real one recovers."""
 
-    def __init__(self, holders=False, acpmux=True, recover=True, hang_on_kill=False, agent="open"):
+    def __init__(self, holders=False, acpmux=True, recover=True, hang_on_kill=False, agent="open", gpu_modes=None,
+                 gpu_last="off"):
         """`agent`: "open" (an agent page shows), "none" (none until New Agent Chat opens one in the focused pane)
-        or "several" (two panes show one and neither is focused: the reply names them, a pid needs `pane`)."""
+        or "several" (two panes show one and neither is focused: the reply names them, a pid needs `pane`).
+        `gpu_modes`: GPU process kills until Chromium has no GPU mode left (None: it always restarts one); then
+        `gpu_last` is "off" (the fork's cmux-gpu-unusable-no-fatal: no new GPU process) or "fatal" (Chromium's
+        LOG(FATAL) ends the app)."""
         self.recover, self.hang_on_kill, self.agent_mode = recover, hang_on_kill, agent
+        self.gpu_modes, self.gpu_last, self.gpu_kills = gpu_modes, gpu_last, 0
         self.next_pid = 1000
         self.procs = {
             APP: Proc(APP, 1, f"{BUNDLE}/Contents/MacOS/cmux DEV"),
@@ -118,8 +127,14 @@ class FakeApp:
             for tab, page in self.pages.items():
                 if page["engine"] == "cef":
                     page["gone" if self.shown(tab) else "dead_hidden"] = "1"
-        elif "--type=gpu-process" in command and self.recover:
-            self.spawn(APP, f"{BUNDLE}/Contents/Frameworks/Helper --type=gpu-process")
+        elif "--type=gpu-process" in command:
+            self.gpu_kills += 1
+            if self.gpu_modes is not None and self.gpu_kills >= self.gpu_modes:
+                if self.gpu_last == "fatal":  # every child of the app ends with it
+                    for child in [p for p, proc in self.procs.items() if p == APP or proc.ppid == APP]:
+                        self.procs.pop(child)
+            elif self.recover:
+                self.spawn(APP, f"{BUNDLE}/Contents/Frameworks/Helper --type=gpu-process")
         elif "--type=utility" in command and self.recover:
             self.spawn(APP, f"{BUNDLE}/Contents/Frameworks/Helper --type=utility")
         elif pid == self.agent:
@@ -178,6 +193,8 @@ class FakeApp:
     # -- the socket
     def rpc(self, method, params=None, timeout=60):
         params = params or {}
+        if APP not in self.procs:
+            return {"error": "Connection refused", "unreachable": True}
         if method == "system.identify":
             return {"bundle_id": BUNDLE_ID, "tag": "chaos", "pid": APP, "app_bundle_path": BUNDLE,
                     "socket_path": SOCKET, "methods": list(chaos.NEEDED_METHODS)}
@@ -582,6 +599,88 @@ class RunTests(unittest.TestCase):
         self.assertEqual(line["observed"]["untouched"], line["observed"]["other_holders"])
         self.assertNotIn(right["holder"], app.killed)
         self.assertEqual(left["link"], "connected")
+
+    def gpu_loop(self, app, **kw):
+        _, _, _, rows, lines = self.run_all(app, only={"gpu-crash-loop"}, gpu_loop_s=0, gpu_restart_s=2, **kw)
+        self.assertEqual([line["fault"] for line in lines], ["gpu-crash-loop"])
+        return rows, lines[0]
+
+    def test_gpu_crash_loop_runs_only_when_asked(self):
+        self.app = FakeApp()
+        run = make(self.app)
+        self.assertEqual(run.tour(), {})
+        faults, _ = run.plan(set())
+        self.assertNotIn("gpu-crash-loop", faults)
+        self.assertIn("chromium-gpu", faults)
+
+    def test_gpu_crash_loop_kills_each_new_gpu_process_and_keeps_the_app(self):
+        app = FakeApp()
+        rows, line = self.gpu_loop(app)
+        self.assertEqual(line["outcome"], "ok", line)
+        observed = line["observed"]
+        self.assertEqual((observed["app"], observed["gpu"]), ("unchanged", "running"))
+        self.assertEqual((observed["app_pid_before"], observed["app_pid_after"]), (APP, APP))
+        self.assertEqual(observed["kills"], chaos.GPU_LOOP_KILLS)
+        self.assertEqual(len(line["killed"]), chaos.GPU_LOOP_KILLS)
+        self.assertEqual(len(set(line["killed"])), chaos.GPU_LOOP_KILLS, "each kill is a new GPU process")
+        self.assertEqual(line["killed"][0], 602)
+        self.assertTrue(line["app_pid_kept"] and line["main_ping_ok"])
+        self.assertEqual(chaos.exit_status(rows, []), 0)
+
+    def test_the_last_gpu_mode_turning_gpu_off_passes(self):
+        # cmux-gpu-unusable-no-fatal: after the ninth crash Chromium starts no GPU process; the app and page stay.
+        rows, line = self.gpu_loop(FakeApp(gpu_modes=9, gpu_last="off"))
+        self.assertEqual(line["outcome"], "ok", line)
+        observed = line["observed"]
+        self.assertEqual((observed["app"], observed["gpu"], observed["kills"]), ("unchanged", "off", 9))
+        self.assertEqual(observed["slots_with_no_gpu"], chaos.GPU_LOOP_KILLS - 9)
+        self.assertTrue(observed["page_answers"])
+
+    def test_chromiums_fatal_at_the_last_gpu_mode_fails_and_says_the_app_is_gone(self):
+        # Stock Chromium: FallBackToNextGpuMode with no mode left LOG(FATAL)s the browser process, the app.
+        report = "/tmp/cmux DEV-fatal.ips"
+        rows, line = self.gpu_loop(FakeApp(gpu_modes=9, gpu_last="fatal"),
+                                   reports=lambda since: [report] if APP not in self.app.procs else [])
+        self.assertEqual(line["outcome"], "FAIL", line)
+        observed = line["observed"]
+        self.assertEqual((observed["app"], observed["app_pid_after"], observed["kills"]), ("gone", None, 9))
+        self.assertFalse(line["app_pid_kept"])
+        self.assertEqual(line["crash_reports"], [report])
+        self.assertEqual(chaos.exit_status(rows, []), 1)
+
+    def test_a_gpu_process_that_comes_back_after_missed_slots_is_an_incomplete_loop(self):
+        # Chromium restarted the GPU process, but too late for two slots: fewer kills than the loop needs and the
+        # GPU still running, so Chromium's last mode was never reached and the row says so.
+        app = FakeApp(gpu_modes=5, gpu_last="off")
+        run = make(app, gpu_loop_s=0, gpu_restart_s=2)
+        self.app = app
+        self.assertEqual(run.tour(), {})
+        misses = []
+        wait = run.wait
+
+        def late_wait(check, seconds):
+            found = wait(check, seconds)
+            if not found and app.gpu_kills == 5:
+                misses.append(1)
+                if len(misses) == 2:  # the GPU process starts again after two empty slots
+                    app.gpu_modes = None
+                    app.spawn(APP, f"{BUNDLE}/Contents/Frameworks/Helper --type=gpu-process")
+            return found
+
+        run.wait = late_wait
+        line = run.run(["gpu-crash-loop"], lambda row: None)[0]
+        self.assertEqual(line["outcome"], "FAIL", line)
+        observed = line["observed"]
+        self.assertEqual((observed["app"], observed["gpu"]), ("unchanged", "running"))
+        self.assertEqual((observed["kills"], observed["slots_with_no_gpu"]), (chaos.GPU_LOOP_KILLS - 2, 2))
+        self.assertIn("did not reach Chromium's last GPU mode", observed["why"])
+
+    def test_no_gpu_process_fails_the_loop(self):
+        app = FakeApp()
+        app.procs.pop(602)
+        _, line = self.gpu_loop(app)
+        self.assertEqual(line["outcome"], "FAIL")
+        self.assertEqual(line["observed"]["why"], "Chromium runs no GPU process")
 
     def test_holder_model_rules_out_terminal_host_by_default(self):
         app = FakeApp(holders=True)

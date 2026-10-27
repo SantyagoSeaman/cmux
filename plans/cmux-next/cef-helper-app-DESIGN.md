@@ -148,6 +148,32 @@ daemon talks CDP to the host through `--remote-debugging-pipe`), crash reports (
   passkey entitlements. Each needs a release check.
 - An accessory app that shows a window can become active; every host window must stay non-activating and off screen.
 
+### 3.6.1 GPU crash loop (p10-stability-164)
+
+Chrome restarts a crashed GPU process. After 3 crashes in one mode (`GpuProcessHost::RecordProcessCrash`,
+`GetFallbackCrashLimit`; one crash is forgiven per 5 min, 10 min in `DISPLAY_COMPOSITOR`) or a failed start
+(`DidFailInitialize`), it takes the next mode from the stack `GpuDataManagerImplPrivate::InitializeGpuModes` makes:
+Graphite, GL, SwiftShader where allowed, then `DISPLAY_COMPOSITOR`, which has no GPU access. When the stack is empty,
+`FallBackToNextGpuMode` (`content/browser/gpu/gpu_data_manager_impl_private.cc`, Chromium 154.0.8037.98) calls
+`IntentionallyCrashBrowserForUnusableGpuProcess`: `LOG(FATAL) << "GPU process isn't usable. Goodbye."`. In process,
+the browser process is cmux, so a GPU crash loop or a GPU helper that cannot start (the sandbox finding in 3.1) ends
+cmux and every terminal in it.
+
+- Until F2: the fork patch `cmux_gpu_unusable_no_fatal` (manaflow-ai/cef `cp/p10-stability-164`, on the fork train
+  tip `845d0aab`; a switch, no API number) turns that last step into GPU off when the browser process has
+  `--cmux-gpu-unusable-no-fatal` (`S/CEFSwitches.swift` `gpuUnusableNoFatal`, passed for every fork API >= 1). It logs
+  "GPU process isn't usable. GPU off (cmux).", marks the GPU process unusable (`GpuDataManagerImpl::IsGpuProcessUnusable`,
+  never cleared), and `GpuProcessHost::Get` makes no other sandboxed GPU process: it returns null, which its callers
+  already handle while the browser shuts down. Web content stops painting until cmux restarts; terminals, agents and
+  cmux's own UI keep running. Not built or run yet.
+- With F2: the host gets the same switch (`HostSwitches` passes the app's set on, ChromiumHost/src/host_switches.h).
+  A GPU crash loop then turns the host's GPU off, not the host, and the supervisor (3.2) has nothing to restart. A
+  host that ends in any other way restarts under `ChromiumHostRestartPolicy`. Owner: PL-cefhost for the host side,
+  p10-stability for the fork patch.
+- Check: `scripts/cmux-next/process-chaos-e2e.py --only gpu-crash-loop` on a bare metal lab mini kills the GPU process
+  12 times in 60 s, each new one as it starts. Its row reports `app` (unchanged, changed or gone) and `gpu` (running
+  or off). With the patch the app is unchanged; on a fork without it the app is gone with a crash report.
+
 ### 3.7 Why page focus must not make a page window key (fork API 30, issue #24913)
 
 Today `CEFTab.grantFocus` calls `CefBrowserHost::SetFocus(true)`, and the fork makes the page's child window key

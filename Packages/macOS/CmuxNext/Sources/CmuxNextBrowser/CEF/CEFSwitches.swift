@@ -78,6 +78,15 @@ nonisolated struct CEFSwitches: Equatable, Sendable {
     /// profile, extension background pages and the spare windows should never make one. The
     /// spare keeps Chrome desktop's lifetime. Older forks ignore the switch.
     static let spareRendererAfterFirstTab = "cmux-spare-renderer-after-first-tab"
+    /// Chrome restarts a crashed GPU process and, after 3 crashes in one mode (`GpuProcessHost::RecordProcessCrash`),
+    /// takes the next mode of its stack (Graphite, GL, then `DISPLAY_COMPOSITOR` with no GPU access). With no mode
+    /// left, `GpuDataManagerImplPrivate::FallBackToNextGpuMode` (content/browser/gpu/gpu_data_manager_impl_private.cc)
+    /// calls `IntentionallyCrashBrowserForUnusableGpuProcess` (`LOG(FATAL) << "GPU process isn't usable. Goodbye."`),
+    /// and the browser process is the app. With this fork switch (manaflow-ai/cef `cp/p10-stability-164`, patch
+    /// `cmux_gpu_unusable_no_fatal`) that last step turns GPU use off: `GpuProcessHost::Get` starts no GPU process
+    /// again, web content stops painting and cmux keeps running. Until Chromium runs in a helper process
+    /// (cef-helper-app-DESIGN.md, F2). No API number: older forks ignore the switch.
+    static let gpuUnusableNoFatal = "cmux-gpu-unusable-no-fatal"
 
     var arguments: [String] {
         var result: [String] = []
@@ -85,6 +94,8 @@ nonisolated struct CEFSwitches: Equatable, Sendable {
             // One Chromium Browser per pane host, Chromium's own UI hidden
             // (include/cef_cmux.h in the fork).
             result.append("cmux-tabbed-windows")
+            // A GPU crash loop ends GPU use, not the app (``gpuUnusableNoFatal``).
+            result.append(Self.gpuUnusableNoFatal)
         }
         // Non-official builds otherwise enable the field trial testing config
         // (features that need helpers cmux does not ship).
