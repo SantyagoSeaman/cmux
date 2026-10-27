@@ -145,6 +145,10 @@ async fn an_idle_session_hibernates_after_two_minutes_even_while_shown() {
     r.clock.advance(Duration::from_secs(2));
     r.hibernated(&id).await;
     let after = r.hub.events(&id, 0, 10_000).unwrap();
+    // The exit is marked a hibernation, which the transcript draws no row for (`transcript.rs`).
+    for e in after[before..].iter().filter(|e| e.kind == "stopped" || e.kind == "exited") {
+        assert_eq!(e.msg["hibernated"], true, "{}", e.msg);
+    }
     let new: Vec<&str> = after[before..].iter().map(|e| e.kind.as_str()).collect();
     assert!(new.iter().all(|k| ["status", "stopped"].contains(k)), "{new:?}");
 }
@@ -215,6 +219,9 @@ async fn a_prompt_wakes_a_hibernated_session_and_reaches_its_agent_once() {
         "the wake did not resume the conversation: {kinds:?}"
     );
     assert_eq!(r.status(&id), "ready");
+    let events = r.hub.events(&id, 0, 10_000).unwrap();
+    let resumed = events.iter().rev().find(|e| e.kind == "resumed").unwrap();
+    assert_eq!(resumed.msg["wake"], true, "{}", resumed.msg);
 }
 
 /// Typing into a hibernated chat wakes it before the prompt is sent, so the prompt finds its
@@ -300,8 +307,11 @@ async fn a_stop_after_typing_into_a_hibernated_chat_stays_stopped() {
     let id = new_session(&mut r.c, "stopped").await;
     r.c.request(method::SESSION_PROMPT, prompt(&id, "hi", None)).await.unwrap();
     r.hibernate(&id).await;
-    r.c.request(method::MUX_TYPING, json!({"sessionId": id, "on": true})).await.unwrap();
-    r.hub.kill(&r.hub.resolve(&id).unwrap(), false).await.unwrap();
+    // The wake is queued, then the Stop runs before this test yields to it (the test's runtime
+    // is one thread): the wake reads the stop count it was asked under, never the Stop's.
+    let session = r.hub.resolve(&id).unwrap();
+    r.hub.wake_for(&session, false, "typing");
+    r.hub.kill(&session, false).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(r.status(&id), "closed", "the typing wake reopened a stopped chat");
     let newest = *r.pids("harness").last().unwrap();

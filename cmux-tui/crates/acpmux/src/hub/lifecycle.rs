@@ -958,7 +958,12 @@ impl Hub {
                     session.fork_from.lock().unwrap().take();
                 }
                 if level != "new" {
-                    self.append(session, "mux", "resumed", json!({"level": level}));
+                    self.append(
+                        session,
+                        "mux",
+                        "resumed",
+                        json!({"level": level, "wake": self.waking(session)}),
+                    );
                 }
             }
             // Nor is it handed out in full access by any form it now reports (`cap_full_access`).
@@ -994,7 +999,12 @@ impl Hub {
                 match res {
                     Ok(v) => {
                         self.absorb_session_response(session, &v);
-                        self.append(session, "mux", "resumed", json!({"level": "exact"}));
+                        self.append(
+                            session,
+                            "mux",
+                            "resumed",
+                            json!({"level": "exact", "wake": self.waking(session)}),
+                        );
                         true
                     }
                     Err(e) => {
@@ -1034,7 +1044,12 @@ impl Hub {
             self.absorb_session_response(session, &res);
             if had_history {
                 session.rehydrate.store(true, Ordering::SeqCst);
-                self.append(session, "mux", "resumed", json!({"level": "rehydrate"}));
+                self.append(
+                    session,
+                    "mux",
+                    "resumed",
+                    json!({"level": "rehydrate", "wake": self.waking(session)}),
+                );
             }
         }
         if saved.agent_session_id.is_some() {

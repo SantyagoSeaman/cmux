@@ -743,6 +743,11 @@ impl Transcript {
             "stderr" => self.items.push(Item::Stderr {
                 text: msg.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
             }),
+            // A hibernation (the idle exit, `hub/idle.rs`) and its wake are not the person's to
+            // see: the chat reads as it did.
+            "exited" | "stopped"
+                if msg.get("hibernated").and_then(Value::as_bool) == Some(true) => {}
+            "resumed" if msg.get("wake").and_then(Value::as_bool) == Some(true) => {}
             "exited" => self.items.push(Item::Status {
                 text: if msg.get("code").and_then(Value::as_i64) == Some(0) {
                     "agent stopped".into()

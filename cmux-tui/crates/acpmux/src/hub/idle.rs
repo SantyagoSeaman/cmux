@@ -40,7 +40,7 @@ impl Hub {
 
     /// Something happened in `session`: its idle period starts again.
     pub(super) fn touch(&self, session: &Session) {
-        session.last_active.store(self.clock_now(), Ordering::Relaxed);
+        session.last_active.store(self.clock_now(), Ordering::SeqCst);
     }
 
     /// Unused right now, read while the caller holds its `turn_lock` and `spawn_lock` (so no
@@ -158,8 +158,18 @@ impl Hub {
                     None => false,
                 };
                 // Marked before the harness ends: typing or a click while it ends wakes it
-                // again, its start waiting for the spawn lock this pass holds.
+                // again, its start waiting for the spawn lock this pass holds. One that came
+                // between the deadline read above and the mark either sees the mark (and wakes
+                // it) or moved `last_active`, read again here after the mark (both SeqCst): then
+                // the session is in use and stays up.
+                let seen = session.last_active.load(Ordering::SeqCst);
                 session.hibernated_at.store(self.clock_now().max(1), Ordering::SeqCst);
+                if session.last_active.load(Ordering::SeqCst) != seen
+                    || seen.saturating_add(idle) > now
+                {
+                    session.hibernated_at.store(0, Ordering::SeqCst);
+                    continue;
+                }
                 self.detach_child(&session).await;
                 if link_lost {
                     self.end_unadopted_host(&session).await;
@@ -185,6 +195,12 @@ impl Hub {
         if session.hibernated_at.load(Ordering::SeqCst) != 0 {
             session.wake_cause.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(cause);
         }
+    }
+
+    /// Whether a start of `session`'s agent now is a wake from hibernation: its `resumed` record
+    /// says so, and the transcript draws no row for it (`transcript.rs`).
+    pub(super) fn waking(&self, session: &Session) -> bool {
+        session.hibernated_at.load(Ordering::SeqCst) != 0
     }
 
     /// A start of `session`'s agent begins (`ensure_child`): a wake when the idle exit hibernated
