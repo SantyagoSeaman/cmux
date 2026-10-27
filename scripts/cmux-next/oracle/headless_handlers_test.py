@@ -33,8 +33,9 @@ ag = hh.load_app_graph()
 ROOT_FILE = "Handlers/AppActionContext.swift"
 
 
-def layout(groups: dict[str, str], dests: dict[str, str], gate=None, order=None, ui=frozenset()):
-    return hh.Layout(group_of=groups, destination=dests, gate=gate or {}, order=order or {}, ui_modules=ui)
+def layout(groups: dict[str, str], dests: dict[str, str], gate=None, order=None, ui=frozenset(), tables=frozenset()):
+    return hh.Layout(group_of=groups, destination=dests, gate=gate or {}, order=order or {}, ui_modules=ui,
+                     string_tables=tables)
 
 
 def facts(files: dict[str, int], refs: list[tuple], types: dict[str, str], imports=None):
@@ -76,11 +77,48 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(b.needs, ["WindowManager.crossesIncognito (Handlers/Pane)"])
         self.assertEqual((a.lines, b.lines), (20, 5))
 
+    def test_app_string_table_is_a_need(self):
+        # after the move `.module` is the destination's bundle: the Handlers keys must move with the file
+        src = ('enum TabIconStrings {\n'
+               '    static var undoSet: String { String(localized: "tabIcon.undo.set", defaultValue: "Tab Icon Set", '
+               'table: "Handlers", bundle: .module) }\n}\n')
+        f = facts({"Handlers/A.swift": 3, "Handlers/B.swift": 2}, [], self.types)
+        rows = hh.classify(f, ["Handlers/A.swift", "Handlers/B.swift"],
+                           layout(self.groups, self.dests, tables=frozenset({"Handlers", "Localizable"})), frozenset(),
+                           {"Handlers/A.swift": src, "Handlers/B.swift": "struct Beta {}\n"})
+        self.assertEqual(rows["Handlers/A.swift"].needs, ["strings Handlers.xcstrings"])
+        self.assertEqual(rows["Handlers/B.swift"].needs, [])
+        queue = [hh.dataclasses.asdict(r) for r in hh.order(rows, ag.tarjan)]
+        self.assertEqual(hh.zero_dependency(queue), ["Handlers/B.swift"])
+
     def test_b5_last_by_stem(self):
         f = facts({"Handlers/A+More.swift": 3}, [], {})
         rows = hh.classify(f, ["Handlers/A+More.swift"],
                            layout({"Handlers/A+More.swift": "Handlers/Tab"}, self.dests), frozenset({"A"}))
         self.assertTrue(rows["Handlers/A+More.swift"].b5_last)
+
+
+class BundleTableTests(unittest.TestCase):
+    TABLES = frozenset({"Handlers", "Windows", "Localizable"})
+
+    def test_table_and_default(self):
+        text = (
+            'String(localized: "a", defaultValue: "A", table: "Handlers", bundle: .module)\n'
+            'String(\n    localized: "b",\n    defaultValue: "B (x)",\n    table: "Windows",\n    bundle: .module\n)\n'
+            'String(localized: "c", defaultValue: "C", bundle: Bundle.module)\n')
+        self.assertEqual(hh.bundle_tables(text, self.TABLES), ["Handlers", "Localizable", "Windows"])
+
+    def test_only_app_tables_and_module_bundle(self):
+        text = ('String(localized: "a", table: "Elsewhere", bundle: .module)\n'
+                'String(localized: "b", table: "Handlers", bundle: .main)\n'
+                'String(localized: "c", defaultValue: "C")\n')
+        self.assertEqual(hh.bundle_tables(text, self.TABLES), [])
+
+    def test_catalogs_of_a_resources_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("Handlers.xcstrings", "Localizable.xcstrings", "steps.json"):
+                (Path(tmp) / name).write_text("{}")
+            self.assertEqual(hh.string_tables(Path(tmp)), frozenset({"Handlers", "Localizable"}))
 
 
 def row(path, group="G", needs=(), after=(), host=(), lines=10, last=False, b5=None, role="move"):
@@ -112,6 +150,20 @@ class OrderTests(unittest.TestCase):
         self.assertIsNotNone(queue[0].unit)
         self.assertEqual(queue[0].unit, queue[1].unit)
         self.assertIsNone(queue[2].unit)
+
+
+class ZeroDependencyTests(unittest.TestCase):
+    def zero(self, rows):
+        return hh.zero_dependency([hh.dataclasses.asdict(r) for r in hh.order({r.path: r for r in rows}, ag.tarjan)])
+
+    def test_after_a_blocked_file_is_not_free(self):
+        rows = [row("blocked", needs=["X (Y)"]), row("toggle", after=["blocked"]),
+                row("deeper", after=["toggle"]), row("free"), row("chain", after=["free"]), row("s", role="stays")]
+        self.assertEqual(self.zero(rows), ["free", "chain"])
+
+    def test_cycle_of_free_files_is_free(self):
+        rows = [row("p", after=["q"]), row("q", after=["p"]), row("r", after=["q"], needs=["X (Y)"])]
+        self.assertEqual(self.zero(rows), ["p", "q"])
 
 
 class BatchTests(unittest.TestCase):
@@ -218,6 +270,13 @@ class LiveTests(unittest.TestCase):
                                 (r["path"], dep))
         moves = [r["role"] == "move" for r in q]
         self.assertEqual(moves, sorted(moves, reverse=True), "rows that stay come after the queue")
+
+    def test_zero_dependency_is_closed(self):
+        rows = {r["path"]: r for r in self.plan["queue"]}
+        zero = set(self.plan["zero_dependency"])
+        for path in zero:
+            self.assertEqual((rows[path]["role"], rows[path]["needs"]), ("move", []), path)
+            self.assertLessEqual(set(rows[path]["after"]), zero, path)
 
     def test_batches_cover_the_queue_in_order(self):
         moved = sorted(r["path"] for r in self.plan["queue"] if r["role"] == "move")

@@ -85,7 +85,7 @@ Paths are in chromium/src. Each row names what cmux takes from it.
 | Shared and iOS packages the Linux CI builds | 15 | `grep -hoE 'Packages/(Shared\|iOS\|macOS)/[A-Za-z]+' .github/workflows/swift-packages-linux.yml .github/workflows/cmux-next-terminal.yml \| sort -u \| wc -l` |
 | Settings files that import Design or Icons (block Settings on Linux) | 90 of 289 | `git grep -lE 'import CmuxNext(Design\|Icons)' -- Packages/macOS/CmuxNext/Sources/CmuxNextSettings \| wc -l; git ls-files 'Packages/macOS/CmuxNext/Sources/CmuxNextSettings/**.swift' \| wc -l` |
 | Handlers without a UI import (headless candidates) | 114 of 191 | `git grep -L -E 'import (AppKit\|SwiftUI\|WebKit\|QuartzCore)' -- 'Packages/macOS/CmuxNext/Sources/CmuxNextApp/Handlers/*.swift' \| wc -l; git ls-files 'Packages/macOS/CmuxNext/Sources/CmuxNextApp/Handlers/**.swift' \| wc -l` |
-| UI-free handlers that need no App type outside the composition root (the queue head, section 8) | 22 of 103 to move | `scripts/cmux-next/oracle/headless-handlers.py --summary` |
+| UI-free handlers with zero dependencies: no App type outside the composition root, no App string table, and the same for every `after` file (the batch of task 163, section 8) | 14 of 103 to move | `scripts/cmux-next/oracle/headless-handlers.py --summary` |
 
 Nondeterminism the oracle must normalize or remove at the source:
 
@@ -296,10 +296,15 @@ index store with `--index-store`. Each type is one of three kinds:
 - **after**: a type that another candidate declares. That candidate moves first. A cycle is one unit.
 - **needs**: a type that the rest of the App declares, or an import of a ui-layer module. It blocks the file until
   that type moves down or gets a host member. A member that an extension in another file adds is named
-  `Type.member`.
+  `Type.member`. A string table of the App bundle that the file reads with `bundle: .module` is also a need,
+  named `strings <Table>.xcstrings`. After a move, `.module` is the bundle of the destination. A lookup there
+  shows the English `defaultValue` in every locale and gives no compile error, so the batch must move the keys
+  of the table with the file (p15-oracle.md rule 8: a pure move does not change macOS behavior).
 
 The queue is a topological order of the `after` edges, leaf first. Among the ready files it takes the one with
-the fewest needs, then the fewest host members, then the earliest app-graph group order. The batches follow
+the fewest needs, then the fewest host members, then the earliest app-graph group order. The zero-dependency set
+is the batch of task 163: the files with no needs whose `after` files are also in the set, recursively. A file
+with no needs that comes after a blocked file is not in it. `--json` lists the set as `zero_dependency`. The batches follow
 PL-arch slice B5 ([architecture-refactor-DESIGN.md](architecture-refactor-DESIGN.md) section 9). Each batch has
 one app-graph group, so one destination target, and at most 400 lines. A batch comes after the batches it needs.
 The handlers that B5 says PL-cef-tab touches are queued last and are never put in an earlier batch. The script
@@ -309,7 +314,9 @@ reads their names from the B5 row, so the two plans stay one plan.
 | --- | --- |
 | UI-free handler files | 114 of 191 |
 | to move; stay in the App (Handlers/Infra, Host conformances) | 103; 11 |
-| no needs (the batch of task 163); also no `after` | 22; 20 |
+| read an App string table with `bundle: .module` | 16 |
+| no needs of their own | 16 |
+| zero-dependency: no needs here or in any `after` file (the batch of task 163) | 14 |
 | cycle units; B5 PL-cef-tab files (the other two import AppKit) | 4; 3 |
 | domain batches of at most 400 lines | 37 |
 

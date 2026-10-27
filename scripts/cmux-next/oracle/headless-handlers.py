@@ -13,12 +13,17 @@ index store with --index-store), sorted into three kinds:
            member of the domain's `<Domain>ActionHost` (architecture-refactor-DESIGN.md section 4), so it does
            not order the queue;
   after    a type another candidate declares: that candidate moves first (or in the same unit, for a cycle);
-  needs    a type the rest of the App declares, or a ui-layer module the file imports: it blocks the file until
-           that type moves down or gets a host member.
+  needs    a type the rest of the App declares, a ui-layer module the file imports, or a string table of the App
+           bundle the file looks up with `bundle: .module` (`strings Handlers.xcstrings`): it blocks the file until
+           that type moves down or gets a host member, or until the batch moves the table's keys with the file.
+           After the move `.module` is the destination's bundle, so a lookup there falls back to its English
+           defaultValue in every locale, with no compile error.
 
 The queue is a topological order of the `after` edges (cycles are one unit), and among the files that are ready it
 takes the one with the fewest `needs`, then the fewest host members, then the earliest PL-arch slice B5 order
-(app-graph.json group order), so zero-dependency handlers come first (task 163 moves them). PL-arch B5 asks for the
+(app-graph.json group order), so zero-dependency handlers come first. Task 163 moves the zero-dependency set:
+the files with no needs whose `after` files are, recursively, in the set too (a file that comes after a blocked
+file is not free, even with no needs of its own). PL-arch B5 asks for the
 handlers PL-cef-tab touches to go last; the script reads that list from the B5 row of
 architecture-refactor-DESIGN.md section 9, so the two plans stay one plan. Files whose own group stays in the App
 (Handlers/Infra, the AppActionContext+X Host conformances) are listed after the queue with role `stays`.
@@ -54,6 +59,10 @@ HANDLERS = "Packages/macOS/CmuxNext/Sources/CmuxNextApp/Handlers"
 PATHSPEC = f"{HANDLERS}/*.swift"
 UI_IMPORT = r"import (AppKit|SwiftUI|WebKit|QuartzCore)"
 ARCH_DESIGN = "plans/cmux-next/architecture-refactor-DESIGN.md"
+RESOURCES = "Resources"
+# String(localized:defaultValue:table:bundle:): `table:` comes right before `bundle:`; no table is Localizable
+BUNDLE_LOOKUP = re.compile(r'(?:\btable:\s*"(?P<table>[^"\\]+)"\s*,\s*)?\bbundle:\s*(?:Bundle)?\.module\b')
+DEFAULT_TABLE = "Localizable"
 B5_ROW = re.compile(r"^\|\s*B5\s*\|.*?PL-cef-tab\s*\(([^)]*)\)", re.M)
 MAX_LINES = 400
 
@@ -133,10 +142,25 @@ class Layout:
     order: dict[str, int]
     ui_modules: frozenset[str]
     app: str = "CmuxNextApp"
+    string_tables: frozenset[str] = frozenset()  # the App bundle's string catalogs (Resources/<Table>.xcstrings)
 
 
-def classify(facts, free: list[str], layout: Layout, last: frozenset[str]) -> dict[str, Row]:
-    """One Row per UI-free file (App-relative paths in FREE), with its host members, queue edges and needs."""
+def string_tables(resources: Path) -> frozenset[str]:
+    """Table names of the .xcstrings catalogs in RESOURCES (the App bundle's string tables)."""
+    return frozenset(p.stem for p in resources.glob("*.xcstrings"))
+
+
+def bundle_tables(text: str, tables: frozenset[str]) -> list[str]:
+    """The App string tables TEXT looks up with `bundle: .module`, sorted."""
+    used = {m.group("table") or DEFAULT_TABLE for m in BUNDLE_LOOKUP.finditer(text)}
+    return sorted(used & tables)
+
+
+def classify(facts, free: list[str], layout: Layout, last: frozenset[str],
+             texts: dict[str, str] | None = None) -> dict[str, Row]:
+    """One Row per UI-free file (App-relative paths in FREE), with its host members, queue edges and needs. TEXTS
+    holds the sources the App string-table lookups are read from."""
+    texts = texts or {}
     rows: dict[str, Row] = {}
     for rel in free:
         group = layout.group_of[rel]
@@ -168,7 +192,8 @@ def classify(facts, free: list[str], layout: Layout, last: frozenset[str]) -> di
         ui = sorted(m for m in facts.imports.get(rel, ()) if m in layout.ui_modules)
         row.host = sorted(host[rel])
         row.after = sorted(after[rel])
-        row.needs = sorted(needs[rel]) + [f"import {m}" for m in ui]
+        strings = bundle_tables(texts.get(rel, ""), layout.string_tables)
+        row.needs = sorted(needs[rel]) + [f"import {m}" for m in ui] + [f"strings {t}.xcstrings" for t in strings]
     return rows
 
 
@@ -210,6 +235,16 @@ def order(rows: dict[str, Row], tarjan) -> list[Row]:
         row.rank = len(out) + 1
         out.append(row)
     return out
+
+
+def zero_dependency(queue: list[dict]) -> list[str]:
+    """The movers that can move with nothing else: no needs, and every `after` file in the set too (the greatest
+    such set, so a cycle of free files is free). Queue order; task 163 moves these."""
+    rows = {r["path"]: r for r in queue if r["role"] == "move"}
+    free = {p for p, r in rows.items() if not r["needs"]}
+    while blocked := {p for p in free if not set(rows[p]["after"]) <= free}:
+        free -= blocked
+    return [r["path"] for r in queue if r["path"] in free]
 
 
 def batches(queue: list[Row], max_lines: int = MAX_LINES) -> list[dict]:
@@ -296,30 +331,35 @@ def build_queue(repo: Path, ag, facts=None) -> dict:
                     gate={g: d.gated for g, d in dests.items()},
                     order={g: v["order"] for g, v in graph["groups"].items()},
                     ui_modules=frozenset(m for m, layer in world.layers.items() if layer in ("ui", "app")),
-                    app=ag.APP)
+                    app=ag.APP, string_tables=string_tables(app_dir / RESOURCES))
     prefix = ag.APP_DIR + "/"
     rels = [p[len(prefix):] for p in free]
     missing = [r for r in rels if r not in facts.files]
     if missing:
         raise QueueError(f"git lists files the scan did not read: {', '.join(missing)}")
     last = b5_last((repo / ARCH_DESIGN).read_text())
-    rows = classify(facts, rels, layout, last)
+    texts = {r: (app_dir / r).read_text(encoding="utf-8") for r in rels}
+    rows = classify(facts, rels, layout, last, texts)
     queue = order(rows, ag.tarjan)
+    queue_rows = [dataclasses.asdict(r) for r in queue]
     return {"pattern": UI_IMPORT, "pathspec": PATHSPEC, "source": facts.source,
             "ui_free": len(free), "handlers": len(every), "b5_last": sorted(last),
-            "queue": [dataclasses.asdict(r) for r in queue], "batches": batches(queue)}
+            "queue": queue_rows, "zero_dependency": zero_dependency(queue_rows), "batches": batches(queue)}
 
 
 def summary(plan: dict) -> list[str]:
     q = plan["queue"]
     moves = [r for r in q if r["role"] == "move"]
-    zero = [r for r in moves if not r["needs"] and not r["after"]]
     free_of_needs = [r for r in moves if not r["needs"]]
+    strings = [r for r in moves if any(n.startswith("strings ") for n in r["needs"])]
     return [
         f"UI-free handler files: {plan['ui_free']} of {plan['handlers']} ({plan['source']} scan)",
         f"to move: {len(moves)}; stay in the App (composition root, Host conformances): {len(q) - len(moves)}",
-        f"no App type outside the composition root and no ui-layer import: {len(free_of_needs)} "
-        f"({len(zero)} also need no other queued handler)",
+        f"look up an App string table with bundle: .module (need its keys moved): {len(strings)}",
+        f"no needs (no App type outside the composition root, ui-layer import or App string table): "
+        f"{len(free_of_needs)}",
+        f"zero-dependency: no needs, and every `after` file recursively the same (the batch of task 163): "
+        f"{len(plan['zero_dependency'])}: {', '.join(short(p) for p in plan['zero_dependency']) or '-'}",
         f"cycle units: {len({r['unit'] for r in moves if r['unit'] is not None})}; "
         f"B5 PL-cef-tab files queued last: {sum(1 for r in moves if r['b5_last'])}",
         f"domain batches (<= {MAX_LINES} lines): {len(plan['batches'])}",
