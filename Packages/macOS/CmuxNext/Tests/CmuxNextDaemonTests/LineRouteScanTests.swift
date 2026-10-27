@@ -26,6 +26,9 @@ import Testing
         #"{"cause":"frontend","id":3}"#,
         #"{}"#,
         #"{"title":"é✓😀","event":"title-changed"}"#,
+        #"{"event":"agent-session-record","surface":12,"record":{"surface":3,"seq":1}}"#,
+        #"{"event":"tree-changed","surface":"12"}"#,
+        #"{"surface":18446744073709551616,"event":"agent-session-closed"}"#,
     ])
     func daemonLinesScanAsTheyDecode(line: String) throws {
         let scan = try #require(Self.scan(line), "the scan gave up \(line)")
@@ -36,6 +39,7 @@ import Testing
         #expect(scan.type == envelope.type)
         #expect(scan.streamID == envelope.streamID)
         #expect(scan.cause == envelope.cause)
+        #expect(scan.surface == envelope.surface)
     }
 
     /// Lines the scan could read differently from the decoder, or that are not one JSON object: given up.
@@ -47,6 +51,9 @@ import Testing
         #"{"id":-1,"ok":true}"#,
         #"{"id":1e2,"ok":true}"#,
         #"{"id":01,"ok":true}"#,
+        #"{"event":"agent-session-record","surface":-3}"#,
+        #"{"event":"agent-session-record","surface":3.0}"#,
+        #"{"surface":1,"surface":2}"#,
         #"{"ok":true,"x":"\ud800"}"#,
         #"{"ok":tru}"#,
         #"{"ok":true,}"#,

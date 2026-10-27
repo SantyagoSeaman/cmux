@@ -122,6 +122,25 @@ import Testing
         }
     }
 
+    /// A shared connection between two transports at the first ask (none ready in time), ready from the second.
+    final class Reconnecting: Sendable {
+        let asks = Mutex(0)
+        let carrier: AgentSessionCarrier
+
+        init(_ carrier: AgentSessionCarrier) { self.carrier = carrier }
+
+        var provider: AgentSessionAttachClient.CarrierProvider {
+            { [self] _ in
+                let ask = asks.withLock { count -> Int in
+                    count += 1
+                    return count
+                }
+                guard ask > 1 else { throw DaemonError.notConnected }
+                return carrier
+            }
+        }
+    }
+
     /// Every event that reached stream 0 (the control connection's consumer).
     final class StreamZero: Sendable {
         let names = Mutex<[String]>([])
@@ -155,9 +174,22 @@ import Testing
     }
 
     private func client(_ surface: UInt64, on carrier: AgentSessionCarrier, own: OwnConnections,
-                        limits: AgentSessionEventQueue.Limits = .init()) -> AgentSessionAttachClient {
-        AgentSessionAttachClient(surface: surface, requestTimeout: .seconds(5), mode: .attach, shared: { carrier },
+                        limits: AgentSessionEventQueue.Limits = .init(), timeout: Duration = .seconds(5)) -> AgentSessionAttachClient {
+        AgentSessionAttachClient(surface: surface, requestTimeout: timeout, mode: .attach, shared: { _ in carrier },
                                  queueLimits: limits, endpoint: own.endpoint)
+    }
+
+    /// A request the test sends on the shared connection after the pane's: the daemon reads it before any
+    /// later line of the pane.
+    private func probe(_ carrier: AgentSessionCarrier) -> Task<LineTransport.Response, any Error> {
+        Task { try await carrier.transport.request(cmd: "ping", timeout: .seconds(5)) { Data(#"{"id":\#($0),"cmd":"ping"}"#.utf8) } }
+    }
+
+    private func answerProbe(_ daemon: Daemon, _ probe: Task<LineTransport.Response, any Error>) async throws {
+        let request = try daemon.readRequest()
+        #expect(request["cmd"] as? String == "ping", "the pane sent \(request) before its attach's answer")
+        daemon.write([#"{"id":\#((request["id"] as? NSNumber)?.uint64Value ?? 0),"ok":true,"data":{}}"#])
+        _ = try await probe.value
     }
 
     private static func record(_ surface: UInt64, seq: Int) -> String {
@@ -289,6 +321,103 @@ import Testing
         #expect(request["cmd"] as? String == "ping")
         daemon.write([#"{"id":\#((request["id"] as? NSNumber)?.uint64Value ?? 0),"ok":true,"data":{}}"#])
         _ = try await probe.value
+    }
+
+    /// A pane closed while its attach waits for the daemon's answer sends no detach then (a daemon that is still
+    /// attaching would answer it and attach after it), and sends one after the answer: no attachment of a closed
+    /// pane is left on the shared connection.
+    @Test func aPaneClosedBeforeItsAttachAnswersDetachesAfterTheAnswer() async throws {
+        let daemon = try Daemon()
+        let carrier = try connect(daemon)
+        defer { carrier.transport.close() }
+        let pushes = Pushes()
+        let pane = client(6, on: carrier, own: OwnConnections())
+        let attached = Task { try await pane.attach(afterSeq: nil, beforeSeq: nil, limit: nil, kinds: nil, events: pushes.handler) }
+        let request = try daemon.readRequest()
+        #expect(request["cmd"] as? String == "agent-session-attach")
+        await pane.close()
+
+        // The next line the daemon reads is the probe's: the close sent nothing yet.
+        try await answerProbe(daemon, probe(carrier))
+        daemon.write([#"{"id":\#((request["id"] as? NSNumber)?.uint64Value ?? 0),"ok":true,"data":\#(Daemon.page)}"#])
+        let detach = try daemon.readRequest()
+        #expect(detach["cmd"] as? String == "agent-session-detach")
+        #expect((detach["surface"] as? NSNumber)?.uint64Value == 6)
+        await #expect(throws: AgentSessionAttachError.self) { try await attached.value }
+        #expect(carrier.transport.agentSessionCount == 0)
+        #expect(pushes.events.isEmpty)
+    }
+
+    /// An attach with no answer in time may still attach on the daemon: the pane detaches it, and lets go of its
+    /// surface on the connection.
+    @Test func anAttachWithNoAnswerInTimeDetaches() async throws {
+        let daemon = try Daemon()
+        let carrier = try connect(daemon)
+        defer { carrier.transport.close() }
+        let pane = client(8, on: carrier, own: OwnConnections(), timeout: .milliseconds(200))
+        let attached = Task { try await pane.attach(afterSeq: nil, beforeSeq: nil, limit: nil, kinds: nil) { _, _ in } }
+        let request = try daemon.readRequest()
+        #expect(request["cmd"] as? String == "agent-session-attach")
+        await #expect(throws: DaemonError.self) { try await attached.value }
+
+        // A probe after the timeout: the pane's detach is read before it.
+        let after = probe(carrier)
+        let detach = try daemon.readRequest()
+        #expect(detach["cmd"] as? String == "agent-session-detach", "the timed-out attach was forgotten with no detach")
+        #expect((detach["surface"] as? NSNumber)?.uint64Value == 8)
+        #expect(carrier.transport.agentSessionCount == 0)
+        if detach["cmd"] as? String == "ping" {
+            daemon.write([#"{"id":\#((detach["id"] as? NSNumber)?.uint64Value ?? 0),"ok":true,"data":{}}"#])
+        } else {
+            try await answerProbe(daemon, after)
+        }
+        await pane.close()
+    }
+
+    /// While the shared connection reconnects the pane waits for the next one: a provider with no connection in
+    /// time fails the attach (the page attaches again), and no pane opens a connection of its own for it.
+    @Test func aReconnectingSharedConnectionNeverOpensOneOfThePanesOwn() async throws {
+        let daemon = try Daemon()
+        let carrier = try connect(daemon)
+        defer { carrier.transport.close() }
+        let own = OwnConnections()
+        let reconnecting = Reconnecting(carrier)
+        let pane = AgentSessionAttachClient(surface: 3, requestTimeout: .seconds(5), mode: .attach, shared: reconnecting.provider,
+                                            queueLimits: .init(), endpoint: own.endpoint)
+        await #expect(throws: DaemonError.notConnected) {
+            _ = try await pane.attach(afterSeq: nil, beforeSeq: nil, limit: nil, kinds: nil) { _, _ in }
+        }
+        let attached = Task { try await pane.attach(afterSeq: nil, beforeSeq: nil, limit: nil, kinds: nil) { _, _ in } }
+        try daemon.answer("agent-session-attach", surface: 3)
+        _ = try await attached.value
+        #expect(own.calls.withLock { $0 } == 0, "a pane opened a connection of its own for a reconnect")
+        #expect(carrier.transport.agentSessionCount == 1)
+        await pane.close()
+    }
+
+    /// An agent record is routed by the `surface` the line's byte scan reads: however long the record, routing
+    /// it parses no JSON on the shared reader.
+    @Test func aLongRecordIsRoutedWithNoDecode() async throws {
+        let daemon = try Daemon()
+        let stats = DaemonWireStats()
+        let transport = try LineTransport(path: daemon.path, role: .control, stats: stats)
+        try daemon.accept()
+        transport.start(onEvent: { _, _, _ in }, onClose: { _ in })
+        defer { transport.close() }
+        let carrier = AgentSessionCarrier(transport: transport, identity: Self.identity, ownsConnection: false)
+        let pushes = Pushes()
+        let pane = client(11, on: carrier, own: OwnConnections(), limits: .init(events: 16, bytes: 8 << 20))
+        let attached = Task { try await pane.attach(afterSeq: nil, beforeSeq: nil, limit: nil, kinds: nil, events: pushes.handler) }
+        try daemon.answer("agent-session-attach", surface: 11)
+        _ = try await attached.value
+        let before = stats.snapshot().jsonDecodes
+
+        let text = String(repeating: "a", count: 4 << 20)
+        daemon.write([#"{"event":"agent-session-record","record":{"seq":1,"text":"\#(text)","surface":99},"surface":11}"#])
+        await pushes.waitFor(1)
+        #expect(pushes.events == ["agent-session-record"])
+        #expect(stats.snapshot().jsonDecodes == before, "routing the record decoded it on the reader")
+        await pane.close()
     }
 
     /// The shared connection's end ends every pane on it with `connection_lost`.

@@ -13,15 +13,20 @@ import os
 /// neither the tree nor another pane. A client takes a connection of its own (through `endpoint`)
 /// only where the shared one cannot carry it: no shared carrier, another pane holds the same tab's
 /// attachment there, or the daemon refuses it there (``sharedRefusals``: an older daemon's limit of
-/// 8 attachments per connection).
+/// 8 attachments per connection). While the shared connection reconnects, the client waits for the next
+/// one (`shared` is asked with the verb's deadline).
+///
+/// An attach the client gave up on (closed or detached before the answer, or no answer in time) is
+/// detached once the daemon may hold it: nothing is left attached on a connection that outlives the pane.
 ///
 /// Connects on the first verb. A dropped connection ends the attachment (`closed`), and the
 /// page reconnects with a fresh client and replays from the newest seq it holds. Nothing here
 /// names a session, a folder or a command: the daemon pins the session from its tab record.
 public actor AgentSessionAttachClient {
     public typealias EndpointProvider = @Sendable () async throws -> DaemonEndpoint
-    /// The machine's shared connection as an agent carrier; nil while it has none.
-    public typealias CarrierProvider = @Sendable () async -> AgentSessionCarrier?
+    /// The machine's shared connection as an agent carrier, waiting up to `limit` while it reconnects;
+    /// throws when none is ready in time.
+    public typealias CarrierProvider = @Sendable (_ limit: Duration) async throws -> AgentSessionCarrier
     /// One push for the attachment: `agent-session-record`, `-permission` or `-closed`, with
     /// the line's JSON object.
     public typealias EventHandler = @Sendable (_ event: String, _ line: Data) -> Void
@@ -45,6 +50,9 @@ public actor AgentSessionAttachClient {
     private var connecting: Task<AgentSessionCarrier, any Error>?
     /// This client's attachment: its stream on `carrier`.
     private var stream: AgentSessionStream?
+    /// The stream whose attach (or observe) request waits for its answer: a close or detach meanwhile leaves
+    /// its detach to that answer (``openAttachment(_:on:)``).
+    private var attaching: AgentSessionStream?
     /// The shared connection cannot carry this client: it uses a connection of its own from now on.
     private var ownConnection = false
     private let handler = HandlerBox()
@@ -193,6 +201,10 @@ public actor AgentSessionAttachClient {
     public func detach() async {
         guard let stream else { return }
         self.stream = nil
+        if stream === attaching {
+            stream.stopDelivery()  // its attach's answer sends the detach
+            return
+        }
         await stream.detach(timeout: requestTimeout)
     }
 
@@ -217,7 +229,11 @@ public actor AgentSessionAttachClient {
         connecting?.cancel()
         connecting = nil
         let owns = carrier?.ownsConnection == true
-        stream?.end(sendsDetach: !owns)
+        if let stream, stream === attaching {
+            stream.stopDelivery()  // its attach's answer sends the detach
+        } else {
+            stream?.end(sendsDetach: !owns)
+        }
         stream = nil
         if owns { carrier?.transport.close() }
         carrier = nil
@@ -235,32 +251,49 @@ public actor AgentSessionAttachClient {
     }
 
     /// Opens this client's stream on `carrier` and sends the attach (or observe). Nil when the
-    /// carrier cannot carry it: the transport closed, another stream holds the tab there, or a shared
-    /// connection's refusal (``sharedRefusals``). The stream is registered before the request, so
-    /// the records that follow the reply reach it.
+    /// carrier cannot carry it: another stream holds the tab there, or a shared connection's refusal
+    /// (``sharedRefusals``). The stream is registered before the request, so the records that follow
+    /// the reply reach it.
+    ///
+    /// Only the daemon's refusal says it attached nothing. An answer that comes after this client let
+    /// go of the stream (close, detach), and a request with no answer (a timeout), may leave an
+    /// attachment on the daemon: the stream detaches it, still holding its surface until then.
     private func openAttachment(_ params: [String: any Sendable], on carrier: AgentSessionCarrier) async throws -> Data? {
         let handler = handler
         let opened = AgentSessionStream.open(surface: surface, on: carrier.transport, limits: queueLimits) { name, line in
             handler.current?(name, line)
             if name == AgentSessionStream.closedEvent { handler.set(nil) }
         }
-        guard let opened else { return nil }
+        guard let opened else {
+            if carrier.transport.isClosed { throw DaemonError.connectionClosed(reason: "the agent attach connection closed") }
+            return nil
+        }
         stream = opened
+        attaching = opened
+        defer { if attaching === opened { attaching = nil } }
+        let page: Data
         do {
-            return try await call(mode.command, params, on: carrier)
-        } catch let refusal as AgentSessionAttachError where !carrier.ownsConnection && Self.sharedRefusals.contains(refusal.code) {
+            page = try await call(mode.command, params, on: carrier)
+        } catch let refusal as AgentSessionAttachError {
+            let abandoned = stream !== opened || closed
+            forget(opened, sendsDetach: false)
+            guard !abandoned, !carrier.ownsConnection, Self.sharedRefusals.contains(refusal.code) else { throw refusal }
             logger.info("agent attach refused on the shared connection: \(refusal.code, privacy: .public)")
-            dropStream(opened)
             return nil
         } catch {
-            dropStream(opened)
+            forget(opened, sendsDetach: true)
             throw error
         }
+        guard stream === opened, !closed else {
+            opened.end(sendsDetach: true)
+            throw AgentSessionAttachError(code: "agent_session.closed", message: "closed before the attach answered")
+        }
+        return page
     }
 
-    /// Forgets a stream whose attach failed: the daemon opened nothing for it.
-    private func dropStream(_ dropped: AgentSessionStream) {
-        dropped.end(sendsDetach: false)
+    /// Ends a stream whose attach did not complete; `sendsDetach` when the daemon may hold it.
+    private func forget(_ dropped: AgentSessionStream, sendsDetach: Bool) {
+        dropped.end(sendsDetach: sendsDetach)
         if stream === dropped { stream = nil }
     }
 
@@ -318,10 +351,11 @@ public actor AgentSessionAttachClient {
         return connected
     }
 
-    /// The machine's shared connection when there is one and the client may use it, else a
-    /// connection of the client's own.
+    /// The machine's shared connection when there is one and the client may use it (waiting for it
+    /// while it reconnects), else a connection of the client's own.
     private func connect() async throws -> AgentSessionCarrier {
-        if !ownConnection, let shared, let carrier = await shared(), !carrier.transport.isClosed {
+        if !ownConnection, let shared {
+            let carrier = try await shared(requestTimeout)
             try adopt(carrier.identity)
             return carrier
         }
@@ -340,7 +374,7 @@ public actor AgentSessionAttachClient {
     }
 
     /// A connection of this client's own. Its agent events route to the client's stream as the
-    /// shared connection's do (``LineTransport/routeAgentSession(name:line:decoder:)``).
+    /// shared connection's do (``LineTransport/routeAgentSession(name:surface:line:)``).
     private func connectOwn() async throws -> AgentSessionCarrier {
         let endpoint = try await self.endpoint()
         let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge,

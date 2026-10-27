@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 pub(super) const WAIT: Duration = Duration::from_secs(5);
 pub(super) const SESSION: &str = "acp_session_1";
+/// A session whose `_acpmux/attach` the fake answers only after 800 ms.
+const SLOW_ATTACH_SESSION: &str = "acp_session_slow";
 
 // MARK: Fake acpmux
 
@@ -121,6 +123,13 @@ fn serve(stream: UnixStream, frames: Sender<Value>) {
         let id = frame["id"].clone();
         let params = &frame["params"];
         let reply = match frame["method"].as_str().unwrap_or_default() {
+            "_acpmux/attach" if params["sessionId"] == json!(SLOW_ATTACH_SESSION) => {
+                std::thread::sleep(Duration::from_millis(800));
+                Some(json!({
+                    "session": {"sessionId": SLOW_ATTACH_SESSION, "status": "idle", "pending": []},
+                    "events": [], "hasMore": false, "lastSeq": 0,
+                }))
+            }
             "_acpmux/attach" => {
                 // A running turn: acpmux subscribes first, so a live record
                 // can reach the daemon before the attach reply.
@@ -967,6 +976,32 @@ fn detach_and_disconnect_close_the_acpmux_link() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(mux.control_clients.agent_sessions.attachment_count(), 0);
+}
+
+/// A detach that reaches the daemon while the attach still connects (the
+/// app's pane closed, or it stopped waiting for the answer) leaves no
+/// attachment on the connection: the attach answers `not_attached`, and the
+/// slot is free for the next attach.
+#[test]
+fn a_detach_before_the_attach_answers_leaves_no_attachment() {
+    let fake = FakeAcpmux::start("early-detach");
+    let mux = mux_with(&fake, "asa-early-detach");
+    let surface = agent_tab(&mux, Some(SLOW_ATTACH_SESSION));
+    let mut client = Client::connect(&mux, "early-detach");
+    let attaching = client.send(json!({"cmd":"agent-session-attach","surface":surface}));
+    // acpmux has the attach: the daemon holds the slot until it answers.
+    assert_eq!(fake.frame()["method"], json!("_acpmux/attach"));
+    assert_eq!(
+        client.request(json!({"cmd":"agent-session-detach","surface":surface}))["ok"],
+        json!(true)
+    );
+    assert_code(&client.answer(attaching), "agent_session.not_attached");
+    assert_eq!(mux.control_clients.agent_sessions.attachment_count(), 0);
+    assert_eq!(
+        client.request(json!({"cmd":"agent-session-attach","surface":surface}))["ok"],
+        json!(true)
+    );
+    assert_eq!(mux.control_clients.agent_sessions.attachment_count(), 1);
 }
 
 #[test]

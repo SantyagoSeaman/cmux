@@ -2,15 +2,21 @@ public import CmuxNextDaemon
 
 extension DaemonService {
     /// The carrier of this machine's agent attachments: its connection, shared by every agent pane of the
-    /// machine (``AgentSessionAttachClient``'s `shared`). Nil while an administrator turned the machine off
-    /// or it is not connected; the client then opens a connection of its own.
-    public func agentSessionCarrier() async -> AgentSessionCarrier? {
-        guard !policyBlock.isBlocked, let connection else { return nil }
-        return connection.agentSessionCarrier()
+    /// machine (``AgentSessionAttachClient``'s `shared`). While the connection reconnects it waits up to `limit`
+    /// for the next one, so a pane never opens a connection of its own for a reconnect. Throws when an
+    /// administrator turned the machine off, or no connection is ready in time.
+    public func agentSessionCarrier(within limit: Duration) async throws -> AgentSessionCarrier {
+        if policyBlock.isBlocked { throw DaemonError.endpointBlocked("turned off by your organization") }
+        if connection == nil, startup == .connecting, isStarting { await firstConnection() }
+        guard let connection else { throw DaemonError.notConnected }
+        return try await connection.agentSessionCarrier(within: limit)
     }
 
-    /// ``agentSessionCarrier()`` as the provider an ``AgentSessionAttachClient`` asks on each connect.
+    /// ``agentSessionCarrier(within:)`` as the provider an ``AgentSessionAttachClient`` asks on each connect.
     public var agentSessionCarrierProvider: AgentSessionAttachClient.CarrierProvider {
-        { [weak self] in await self?.agentSessionCarrier() }
+        { [weak self] limit in
+            guard let self else { throw DaemonError.notConnected }
+            return try await self.agentSessionCarrier(within: limit)
+        }
     }
 }

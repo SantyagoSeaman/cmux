@@ -38,17 +38,20 @@ extension LineTransport {
         var retryable: Bool?
         /// An event's `cause` (`frontend`, `program`, `automation`); scheduling only.
         var cause: String?
+        /// The tab an agent session event belongs to (``LineTransport/agentSessionEvents``): the stream it routes to.
+        var surface: UInt64?
 
         enum CodingKeys: String, CodingKey {
-            case id, ok, event, error, type, reason, retryable, data, cause
+            case id, ok, event, error, type, reason, retryable, data, cause, surface
             case errorCode = "error_code"
             case streamID = "stream_id"
         }
 
         /// The routing fields alone (``LineRouteScan/envelope``); a reply that is not `ok:true` is
         /// decoded whole for its error fields.
-        init(id: UInt64?, ok: Bool?, event: String?, type: String?, streamID: String?, cause: String?) {
+        init(id: UInt64?, ok: Bool?, event: String?, type: String?, streamID: String?, cause: String?, surface: UInt64?) {
             (self.id, self.ok, self.event, self.type, self.streamID, self.cause) = (id, ok, event, type, streamID, cause)
+            self.surface = surface
         }
 
         private struct ResourceError: Decodable {
@@ -68,6 +71,7 @@ extension LineTransport {
             ok = try? c.decodeIfPresent(Bool.self, forKey: .ok)
             (event, streamID) = (try? c.decodeIfPresent(String.self, forKey: .event), try? c.decodeIfPresent(String.self, forKey: .streamID))
             if event != nil { cause = try? c.decodeIfPresent(String.self, forKey: .cause) }
+            surface = try? c.decodeIfPresent(UInt64.self, forKey: .surface)
             type = try? c.decodeIfPresent(String.self, forKey: .type)
             errorCode = try? c.decodeIfPresent(String.self, forKey: .errorCode)
             if let text = try? c.decodeIfPresent(String.self, forKey: .error) {

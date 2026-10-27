@@ -1,14 +1,14 @@
 import Foundation
 
-/// The routing fields of one line (``LineTransport/Envelope``'s `id`, `ok`, `event`, `type`, `stream_id` and
-/// `cause`), read from its bytes, so a reply or an event is parsed once: by the code that reads its body. Mojo
+/// The routing fields of one line (``LineTransport/Envelope``'s `id`, `ok`, `event`, `type`, `stream_id`,
+/// `cause` and `surface`, the tab of an agent session event), read from its bytes, so a reply or an event is parsed once: by the code that reads its body. Mojo
 /// routes a message by its header and leaves the payload to the receiving stub
 /// (mojo/public/cpp/bindings/lib/message.cc, `Message::name()` and `Message::request_id()`); a JSON line has no
 /// header, so the scan walks the top-level object and checks the JSON grammar of every value it skips.
 ///
 /// The scan gives up (nil, and the reader decodes an ``LineTransport/Envelope``) wherever it could read the
 /// line differently from the decoder: a line that is not one JSON object, a key or a routing string with an
-/// escape, a routing key that comes twice, an `id` number that is not a plain non-negative integer, an escaped
+/// escape, a routing key that comes twice, an `id` or `surface` number that is not a plain non-negative integer, an escaped
 /// UTF-16 surrogate, or nesting deeper than ``maxDepth``. The line is valid UTF-8: the reader checked it.
 struct LineRouteScan: Equatable {
     var id: UInt64?
@@ -17,6 +17,7 @@ struct LineRouteScan: Equatable {
     var type: String?
     var streamID: String?
     var cause: String?
+    var surface: UInt64?
 
     /// Containers deeper than this are left to the decoder, so the scan's recursion stays shallow.
     static let maxDepth = 64
@@ -32,11 +33,11 @@ struct LineRouteScan: Equatable {
     /// The routing fields as an envelope with no error fields: a reply that is not `ok:true` is
     /// decoded whole for those.
     var envelope: LineTransport.Envelope {
-        LineTransport.Envelope(id: id, ok: ok, event: event, type: type, streamID: streamID, cause: cause)
+        LineTransport.Envelope(id: id, ok: ok, event: event, type: type, streamID: streamID, cause: cause, surface: surface)
     }
 
     private enum Field: UInt8 {
-        case id = 1, ok = 2, event = 4, type = 8, streamID = 16, cause = 32
+        case id = 1, ok = 2, event = 4, type = 8, streamID = 16, cause = 32, surface = 64
 
         init?(key: some Sequence<UInt8>) {
             if key.elementsEqual(Byte.idKey) {
@@ -51,6 +52,8 @@ struct LineRouteScan: Equatable {
                 self = .streamID
             } else if key.elementsEqual(Byte.causeKey) {
                 self = .cause
+            } else if key.elementsEqual(Byte.surfaceKey) {
+                self = .surface
             } else {
                 return nil
             }
@@ -134,14 +137,10 @@ struct LineRouteScan: Equatable {
                     fields.id = UInt64(text, radix: 10)
                     return true
                 }
-                guard first == Byte.minus || Byte.isDigit(first) else { return skipValue(depth: 1) }
-                let start = index
-                guard skipNumber() else { return false }
-                let digits = slice(start..<index)
-                // A sign, a fraction or an exponent: the decoder's integer rules decide, not the scan's.
-                guard digits.allSatisfy(Byte.isDigit) else { return false }
-                fields.id = UInt64(String(decoding: digits, as: UTF8.self), radix: 10)
-                return true
+                return plainInteger(into: &fields.id)
+            case .surface:
+                // The decoder reads a number only: a string surface is no surface.
+                return plainInteger(into: &fields.surface)
             case .ok:
                 if literal(Byte.trueWord) {
                     fields.ok = true
@@ -160,10 +159,24 @@ struct LineRouteScan: Equatable {
                 case .type: fields.type = text
                 case .streamID: fields.streamID = text
                 case .cause: fields.cause = text
-                case .id, .ok: break  // read above
+                case .id, .ok, .surface: break  // read above
                 }
                 return true
             }
+        }
+
+        /// An `id` or `surface` value that is not a string: a plain non-negative integer as `UInt64` (nil past its
+        /// range, as the decoder reads it), any other non-number skipped as nil. False gives the line up.
+        private mutating func plainInteger(into value: inout UInt64?) -> Bool {
+            guard let first = current else { return false }
+            guard first == Byte.minus || Byte.isDigit(first) else { return skipValue(depth: 1) }
+            let start = index
+            guard skipNumber() else { return false }
+            let digits = slice(start..<index)
+            // A sign, a fraction or an exponent: the decoder's integer rules decide, not the scan's.
+            guard digits.allSatisfy(Byte.isDigit) else { return false }
+            value = UInt64(String(decoding: digits, as: UTF8.self), radix: 10)
+            return true
         }
 
         /// A string with no escape and no control byte, as text; nil otherwise.
@@ -287,6 +300,7 @@ struct LineRouteScan: Equatable {
         static let typeKey = Array("type".utf8)
         static let streamIDKey = Array("stream_id".utf8)
         static let causeKey = Array("cause".utf8)
+        static let surfaceKey = Array("surface".utf8)
         /// The one-letter escapes after a backslash: `"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`.
         static let simpleEscapes: Set<UInt8> = Set("\"\\/bfnrt".utf8)
 

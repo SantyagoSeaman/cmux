@@ -90,9 +90,20 @@ struct AttachState {
     attachments: HashMap<(u64, SurfaceId), Arc<Attachment>>,
     /// Slots taken by attaches that are still connecting.
     reserved: HashSet<(u64, SurfaceId)>,
+    /// Connecting attaches their connection detached: each ends unattached
+    /// when it connects, so a detach sent before the attach's answer (a pane
+    /// closed meanwhile, a client that gave up waiting) leaves no attachment.
+    detached: HashSet<(u64, SurfaceId)>,
 }
 
 impl AttachState {
+    /// Frees a connecting attach's slot; true when its connection detached it
+    /// meanwhile.
+    fn release(&mut self, key: (u64, SurfaceId)) -> bool {
+        self.reserved.remove(&key);
+        self.detached.remove(&key)
+    }
+
     fn count(&self, client: u64) -> usize {
         self.attachments.keys().chain(self.reserved.iter()).filter(|(c, _)| *c == client).count()
     }
@@ -125,12 +136,21 @@ impl AgentSessions {
         let gone: Vec<Arc<Attachment>> = {
             let mut state = self.lock();
             state.reserved.retain(|(c, _)| *c != client);
+            state.detached.retain(|(c, _)| *c != client);
             let keys: Vec<_> =
                 state.attachments.keys().filter(|(c, _)| *c == client).copied().collect();
             keys.iter().filter_map(|key| state.attachments.remove(key)).collect()
         };
         for attachment in gone {
             attachment.end(None);
+        }
+    }
+
+    /// A detach of an attach of `surface` on `client` that is still connecting.
+    fn detach_connecting(&self, client: u64, surface: SurfaceId) {
+        let mut state = self.lock();
+        if state.reserved.contains(&(client, surface)) {
+            state.detached.insert((client, surface));
         }
     }
 
@@ -485,6 +505,8 @@ fn handle(line: &RouteLine<'_>) -> Option<bool> {
             if let Some(attachment) = sessions.attachment(client, surface) {
                 sessions.remove(&attachment);
                 attachment.end(None);
+            } else {
+                sessions.detach_connecting(client, surface);
             }
             ok(writer, id, json!({}))
         }
@@ -658,7 +680,7 @@ fn attach(
         );
     });
     if posted.is_err() {
-        sessions.lock().reserved.remove(&(client, surface));
+        sessions.lock().release((client, surface));
         return refuse(writer, id, Refusal::Limit);
     }
     true

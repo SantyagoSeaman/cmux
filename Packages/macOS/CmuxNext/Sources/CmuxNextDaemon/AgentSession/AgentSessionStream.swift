@@ -67,6 +67,12 @@ final class AgentSessionStream: AgentSessionReceiver {
         }
     }
 
+    /// Delivers nothing more to the page, and keeps the surface until ``end(sendsDetach:)``: an attach still
+    /// waiting for its answer detaches when it comes.
+    func stopDelivery() {
+        queue.cancel()
+    }
+
     /// Ends the stream from this side and waits for the daemon's answer to its `agent-session-detach`; sends
     /// none when the daemon already ended the attachment.
     func detach(timeout: Duration) async {

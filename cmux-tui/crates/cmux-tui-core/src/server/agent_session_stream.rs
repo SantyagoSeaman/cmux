@@ -15,7 +15,7 @@ pub(super) fn connect_and_attach(
     writer: MessageWriter,
 ) {
     let sessions = &mux.control_clients.agent_sessions;
-    let release = |sessions: &AgentSessions| sessions.lock().reserved.remove(&(client, surface));
+    let release = |sessions: &AgentSessions| sessions.lock().release((client, surface));
     let newest_first = params.get("afterSeq").is_none() || params.get("beforeSeq").is_some();
     let slot: Arc<Mutex<ReaderSlot>> = Arc::default();
     let reader_slot = slot.clone();
@@ -103,11 +103,18 @@ pub(super) fn connect_and_attach(
     }
     {
         let mut state = sessions.lock();
-        state.reserved.remove(&(client, surface));
+        let detached = state.release((client, surface));
         // The connection ended while connecting: the slot is gone with it.
         if !writer.is_open() {
             drop(state);
             link.close();
+            return;
+        }
+        // The connection detached this attach before its answer: nothing attaches.
+        if detached {
+            drop(state);
+            attachment.end(None);
+            refuse(&writer, id, Refusal::NotAttached);
             return;
         }
         state.attachments.insert((client, surface), attachment.clone());

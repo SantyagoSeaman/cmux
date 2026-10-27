@@ -85,10 +85,10 @@ extension LineTransport {
     /// Open agent attachments on this connection (diagnostics, tests).
     var agentSessionCount: Int { state.withLock { $0.agentSessions.count } }
 
-    /// Routes one agent session event to the attachment of its surface, on the reader thread. It never
+    /// Routes one agent session event to the attachment of its `surface` (read with the line's other routing
+    /// fields, ``LineRouteScan``: no parse of a record here, however long), on the reader thread. It never
     /// counts as a stream-0 event: an event for a surface nothing holds (one detached a moment ago) is dropped.
-    func routeAgentSession(name: String, line: Data, decoder: WireDecoder) {
-        let surface = (try? decoder.decode(SurfaceField.self, from: line))?.surface
+    func routeAgentSession(name: String, surface: UInt64?, line: Data) {
         let receiver = surface.flatMap { surface in
             state.withLock { $0.agentSessions.receiver(surface, ending: name == "agent-session-closed") }
         }
@@ -104,10 +104,5 @@ extension LineTransport {
     func endAgentSessions(_ reason: TransportCloseReason) {
         let ended = state.withLock { $0.agentSessions.removeAll() }
         for receiver in ended { receiver.receive(.closed(reason)) }
-    }
-
-    /// The one field an agent session event is routed by.
-    private struct SurfaceField: Decodable {
-        var surface: UInt64?
     }
 }
