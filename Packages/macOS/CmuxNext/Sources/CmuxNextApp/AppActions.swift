@@ -1,6 +1,7 @@
 import AppKit
 import CmuxNextActions
 import CmuxNextAgentLanes
+import CmuxNextAgentPane
 import CmuxNextBridge
 import CmuxNextDaemon
 import CmuxNextDesign
@@ -109,7 +110,7 @@ enum AppActions {
         BrowserProfileHandlers.bind(into: registry, context: context)
         OpenInHandlers.bind(into: registry, context: context)
         NotificationHandlers.bind(into: registry, context: context)
-        AttentionPalettePage.bind(into: registry, context: context)
+        bindAttention(services, context: context)
         AgentHandlers.bind(into: registry, context: context)
         AgentChatMenuHandlers.bind(into: registry, context: context)
         AgentConfigurationHandlers.bind(into: registry, context: context)
@@ -191,4 +192,23 @@ enum AppActions {
             window.focus.send(.focusTarget(.sidebar(keyboard: true), source: .keyboard))
         }
     }
+    private static func bindAttention(_ services: AppServices, context: AppActionContext) {
+        let tabs = services.attentionTabs
+        tabs.onOpen = { [weak services] key in
+            guard let services, let (daemon, tab) = AttentionTabsWatch.locate(key, in: services.machines.daemons, machineID: { $0.machineID }) else { return false }
+            return services.revealTab(tab, onMachine: daemon.machineID)
+        }
+        tabs.onChange = { [weak services] in
+            guard let model = services?.palette.model, model.currentPageID == AttentionPalettePage.pageID else { return }
+            model.reload()
+        }
+        services.palette.sources.actionPages[AttentionPalettePage.id] = { AttentionPalettePage(tabs: tabs).page() }
+        services.registry.bindEffect(AttentionPalettePage.id, effect: { invocation in
+            guard invocation.allowsViewChange else { return .refused(AttentionPalettePage.needsFocus) }
+            guard !tabs.items.isEmpty else { return .refused(AttentionPalettePage.nothing) }
+            services.palette.show(page: AttentionPalettePage(tabs: tabs).page(), relativeTo: context.activeWindow?.window)
+            return .done
+        })
+    }
+
 }

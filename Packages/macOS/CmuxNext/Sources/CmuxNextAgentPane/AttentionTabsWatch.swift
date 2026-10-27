@@ -1,7 +1,5 @@
-import CmuxNextAgentPane
 import CmuxNextCompat
 import CmuxNextDaemon
-import CmuxNextDaemonService
 import CryptoKit
 import Foundation
 
@@ -11,20 +9,18 @@ import Foundation
 /// change; nothing polls. Only a marked tab's titles are read, so a title change of any other tab
 /// wakes nothing.
 @MainActor
-final class AttentionTabsWatch {
+public final class AttentionTabsWatch {
     /// The observation loop. ``AppServices/attentionTabsWatch`` owns this watch; letting it go
     /// (or the services going) cancels the loop, which ends the stream.
     private let task: Task<Void, Never>
 
-    /// Starts the watch. Go to's jump is bound with the action (``AttentionPalettePage/bind(into:context:)``).
-    init(_ services: AppServices) {
-        // task-owner: AppServices.attentionTabsWatch; cancelled in deinit, and it returns once the services are gone
-        task = Task { [weak services] in
-            for await marked in ObservationStream({ [weak services] in
-                services.map { AttentionTabsWatch.items(in: $0.machines.allWorkspaces.map { ($0.0, machine: $0.1.machineID) }) } ?? []
-            }) {
-                guard services != nil else { return }
-                services?.attentionTabs.items = marked
+    /// Follows the composition root's workspace projection and publishes changed lists.
+    public init(workspaces: @escaping @MainActor () -> [(WorkspaceModel, machine: String)],
+                publish: @escaping @MainActor ([AgentPaneAttentionTabs.Item]) -> Void) {
+        // task-owner: the application retains this watch; deinit cancels the stream
+        task = Task {
+            for await marked in ObservationStream({ Self.items(in: workspaces()) }) {
+                publish(marked)
             }
         }
     }
@@ -35,7 +31,7 @@ final class AttentionTabsWatch {
     /// The marked tabs of `workspaces` (each with the id of the machine that holds it), newest
     /// mark first: the agent's reason, the workspace and tab titles the person knows them by (never
     /// an id), and when it was marked. Each row's key is ``key(machine:tab:)``.
-    static func items(in workspaces: [(WorkspaceModel, machine: String)]) -> [AgentPaneAttentionTabs.Item] {
+    public static func items(in workspaces: [(WorkspaceModel, machine: String)]) -> [AgentPaneAttentionTabs.Item] {
         var items: [AgentPaneAttentionTabs.Item] = []
         for (workspace, machine) in workspaces {
             for screen in workspace.screens {
@@ -56,19 +52,19 @@ final class AttentionTabsWatch {
     /// its machine's id, `/`, and its tab id, since tabs on two machines can share an id. The
     /// digest keeps the key inside ``AgentPaneAttentionTabs/maximumTabID`` however long the
     /// machine id is, and a tab id holds no `/`.
-    static func key(machine: String, tab: String) -> String { "\(machineDigest(machine))/\(tab)" }
+    public static func key(machine: String, tab: String) -> String { "\(machineDigest(machine))/\(tab)" }
 
     /// The first 8 bytes of SHA-256 of `machine`, in hex.
-    static func machineDigest(_ machine: String) -> String {
+    public static func machineDigest(_ machine: String) -> String {
         SHA256.hash(data: Data(machine.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The machine (of `daemons`) and tab id that row key `key` names; nil for a key that names
     /// no connected machine.
-    static func locate(_ key: String, in daemons: [DaemonService]) -> (daemon: DaemonService, tab: String)? {
+    public static func locate<Daemon>(_ key: String, in daemons: [Daemon], machineID: (Daemon) -> String) -> (daemon: Daemon, tab: String)? {
         guard let slash = key.lastIndex(of: "/") else { return nil }
         let digest = key[..<slash], tab = String(key[key.index(after: slash)...])
-        guard !tab.isEmpty, let daemon = daemons.first(where: { machineDigest($0.machineID) == digest }) else { return nil }
+        guard !tab.isEmpty, let daemon = daemons.first(where: { machineDigest(machineID($0)) == digest }) else { return nil }
         return (daemon, tab)
     }
 }

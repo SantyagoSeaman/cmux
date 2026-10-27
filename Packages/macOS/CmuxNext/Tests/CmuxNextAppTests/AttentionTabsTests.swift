@@ -64,7 +64,7 @@ struct AttentionTabsTests {
         #expect(items.count == 2)
         #expect(Set(items.map(\.tabId)).count == 2, "two machines' rows share a key")
         for item in items {
-            let found = try #require(AttentionTabsWatch.locate(item.tabId, in: services.machines.daemons))
+            let found = try #require(AttentionTabsWatch.locate(item.tabId, in: services.machines.daemons, machineID: { $0.machineID }))
             let tab = try #require(found.daemon.store.tab(idOrResource: found.tab))
             #expect(tab.attention?.reason == item.reason, "\(item.reason)'s row found the other machine's tab")
             #expect(item.tabId.utf8.count <= AgentPaneAttentionTabs.maximumTabID)
@@ -80,8 +80,8 @@ struct AttentionTabsTests {
         #expect(services.windows.controllers.count == windowsBefore, "a refused Go to opened a window")
         let long = AttentionTabsWatch.key(machine: String(repeating: "m", count: 1_000), tab: "tab_forked")
         #expect(long.utf8.count <= AgentPaneAttentionTabs.maximumTabID, "a long machine id made a key Go to refuses")
-        #expect(AttentionTabsWatch.locate("tab_forked", in: services.machines.daemons) == nil, "a bare tab id names no machine")
-        #expect(AttentionTabsWatch.locate("0000000000000000/tab_forked", in: services.machines.daemons) == nil)
+        #expect(AttentionTabsWatch.locate("tab_forked", in: services.machines.daemons, machineID: { $0.machineID }) == nil, "a bare tab id names no machine")
+        #expect(AttentionTabsWatch.locate("0000000000000000/tab_forked", in: services.machines.daemons, machineID: { $0.machineID }) == nil)
     }
 
     @Test func thePaletteListsEachMarkAndItsRowJumpsToTheTab() async throws {
@@ -116,7 +116,7 @@ struct AttentionTabsTests {
         let refusal = services.registry.capturingRefusal {
             _ = services.registry.perform(AttentionPalettePage.id, invocation: ActionInvocation(origin: .cli))
         }
-        #expect(refusal == AttentionPaletteStrings.needsFocus, "an agent's run must not take the person's focus")
+        #expect(refusal == AttentionPalettePage.needsFocus, "an agent's run must not take the person's focus")
     }
 
     /// The page reads the marks at each load, so an open page's reload on a change drops a
