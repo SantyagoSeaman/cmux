@@ -29,7 +29,7 @@ struct TerminalAttachFrame: Sendable {
     var offset: UInt64
     var payload: TerminalFrameBytes
     /// The descriptor that rode on this frame (`SCM_RIGHTS`); only a RING has one.
-    var descriptor: TerminalRingDescriptor? = nil
+    var descriptor: TerminalRingDescriptor?
 }
 
 /// What one attach frame gives the view, in stream order (``TerminalAttachment/FrameDecoder``).

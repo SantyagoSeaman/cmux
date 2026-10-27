@@ -29,7 +29,7 @@ struct TerminalRingSpan: Sendable {
     let count: Int
 
     /// The offset just past the last byte.
-    var end: UInt64 { offset + UInt64(count) }
+    var end: UInt64 { offset &+ UInt64(truncatingIfNeeded: count) }
 
     /// The bytes of `[start, end)` cut from `ring` after `reserve` was loaded: one span, or two when the range
     /// wraps. Nil when bytes of it are gone or may be being overwritten: more than the capacity behind, or the
@@ -38,12 +38,12 @@ struct TerminalRingSpan: Sendable {
                     reserve: UInt64) -> (head: TerminalRingSpan, wrapped: TerminalRingSpan?)? {
         let capacity = ring.capacity
         guard capacity > 0, end > start, end - start <= capacity,
-              !lapped(start: start, capacity: capacity, reserve: reserve) else { return nil }
-        let total = end - start
-        let first = min(total, capacity - start % capacity)
-        let head = TerminalRingSpan(ring: ring, laps: laps, offset: start, count: Int(first))
+              !lapped(start: start, capacity: capacity, reserve: reserve),
+              let total = Int(exactly: end - start), let first = Int(exactly: min(end - start, capacity - start % capacity))
+        else { return nil }
+        let head = TerminalRingSpan(ring: ring, laps: laps, offset: start, count: first)
         guard first < total else { return (head, nil) }
-        return (head, TerminalRingSpan(ring: ring, laps: laps, offset: start + first, count: Int(total - first)))
+        return (head, TerminalRingSpan(ring: ring, laps: laps, offset: head.end, count: total - first))
     }
 
     /// The seqlock rule: the writer may have overwritten the byte at `start` once it started a byte past
