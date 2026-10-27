@@ -216,6 +216,7 @@ impl<J: Send + 'static> StreamLanes<J> {
                     if remaining.is_zero() {
                         return false;
                     }
+                    // wakeup-allow: deadline close_and_wait's own bound, once, while the connection ends
                     self.shared.exited.wait_timeout(state, remaining).recover_poison().0
                 }
             };
