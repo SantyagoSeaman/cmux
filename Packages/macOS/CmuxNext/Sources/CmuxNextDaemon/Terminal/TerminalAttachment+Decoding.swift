@@ -3,7 +3,7 @@ import os
 import CmuxNextCompat
 
 /// Attach-connection lines to channel events (byte replay and snapshot
-/// attach). Attach frames go through ``TerminalAttachFrameDecoder``.
+/// attach), and the meta of a RING frame. Attach frames go through ``TerminalAttachFrameDecoder``.
 extension TerminalAttachment {
     private static let decodeLogger = Logger(subsystem: "com.cmuxterm.app.next", category: "daemon.attach")
     /// Attach lines and frames of a known event kind that failed to decode
@@ -116,6 +116,21 @@ extension TerminalAttachment {
             noteUndecodable(name)
             return nil
         }
+    }
+
+    /// The meta of a RING frame, checked before anything maps it: a layout this reader does not know, or a
+    /// capacity of zero or over ``TerminalRingGrant/maxCapacity``, is refused (design section 4.3).
+    static func decodeRingGrant(_ payload: TerminalFrameBytes,
+                                decoder: WireDecoder) throws(TerminalRingRefusal) -> TerminalRingGrant {
+        guard let grant = try? decoder.decode(TerminalRingGrant.self, from: payload.data) else {
+            noteUndecodable("ring frame")
+            throw TerminalRingRefusal.badMeta
+        }
+        guard grant.layout == TerminalRingGrant.knownLayout else { throw TerminalRingRefusal.unknownLayout(grant.layout) }
+        guard grant.capacity > 0, grant.capacity <= TerminalRingGrant.maxCapacity else {
+            throw TerminalRingRefusal.badCapacity(grant.capacity)
+        }
+        return grant
     }
 
     /// Never silent: a known event the view cannot decode is a contract

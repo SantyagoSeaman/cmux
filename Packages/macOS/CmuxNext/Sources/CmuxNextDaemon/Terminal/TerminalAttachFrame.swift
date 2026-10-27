@@ -18,11 +18,18 @@ struct TerminalAttachFrame: Sendable {
         case snapshotMore = 5
         /// A `vt-state` replay, `meta_len u32 | meta | replay | pending`; every chunk has the cut's offset.
         case replay = 6
+        /// A terminal's output ring, JSON meta `{capacity, base, layout}` with its read-only descriptor; the aux
+        /// is the ring's end when sent (terminal-output-ring-v1, p05-ipc-113).
+        case ring = 7
+        /// Empty: the ring's bytes up to the aux (its new end) are published.
+        case ringAdvance = 8
     }
 
     var kind: Kind
     var offset: UInt64
     var payload: TerminalFrameBytes
+    /// The descriptor that rode on this frame (`SCM_RIGHTS`); only a RING has one.
+    var descriptor: TerminalRingDescriptor? = nil
 }
 
 /// What one attach frame gives the view, in stream order (``TerminalAttachment/FrameDecoder``).
@@ -32,8 +39,12 @@ enum TerminalFrameAdmission: Sendable {
     case nothing
     /// Live PTY bytes, still in the read buffer.
     case output(TerminalOutputSpan)
+    /// Live PTY bytes, still in the output ring: one span, or two when they wrap (a RING_ADVANCE).
+    case ringOutput(TerminalRingSpan, wrapped: TerminalRingSpan?)
     /// Any other event; `flow` names the key press that the output just before it echoes.
     case event(TerminalChannelEvent, flow: UInt64?)
     /// Bytes were lost: ask the host for a fresh READY (`snapshot-request`); screen bytes are dropped until it comes.
     case resync(SnapshotRequestReason)
+    /// A RING or RING_ADVANCE the stream cannot use: a protocol error that ends the connection.
+    case refused(TerminalRingRefusal)
 }

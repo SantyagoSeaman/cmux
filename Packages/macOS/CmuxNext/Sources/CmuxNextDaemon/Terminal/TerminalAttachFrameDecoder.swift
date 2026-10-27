@@ -18,6 +18,12 @@ import Foundation
 ///   also ends the stream with `overflow`, so a view never waits on a READY that will not come.
 /// - SNAPSHOT/SNAPSHOT_MORE and REPLAY chunks are put back together by the lengths in their meta; an event
 ///   whose raw bytes all came in one frame is a slice too.
+/// - A RING maps the terminal's output ring (terminal-output-ring-v1, p05-ipc-113); a RING_ADVANCE then
+///   publishes ring bytes up to its aux, which continue the stream like OUTPUT and reach the view as at most
+///   two spans of the mapping (two when they wrap), never copied. A range more than the ring behind, or one the
+///   writer has started to overwrite, is a gap; so is a span the writer lapped while the view parsed it
+///   (``TerminalRingLaps``), seen at the next screen frame. A RING or RING_ADVANCE the stream cannot use is a
+///   protocol error (app-daemon-connection-DESIGN.md sections 4.3 and 4.4).
 ///
 /// JSON lines of the same stream go through ``admit(line:named:decoder:)``, so one ``TerminalSnapshotSequencer``
 /// orders both and one surface scopes both.
@@ -40,9 +46,14 @@ struct TerminalAttachFrameDecoder: Sendable {
     private var outputRun: OutputRun?
     private var sequencer = TerminalSnapshotSequencer()
     private var bulk: PendingBulk?
+    /// Maps a RING's descriptor; nil when this view asked for no rings, so a RING is refused.
+    private let ringMapper: TerminalRingMapper?
+    /// The stream's mapped output ring, once a RING came.
+    private var ring: RingReader?
 
-    init(surface: SurfaceID) {
+    init(surface: SurfaceID, ringMapper: TerminalRingMapper? = nil) {
         self.surface = surface
+        self.ringMapper = ringMapper
     }
 
     /// What `frame` gives the view. `decoder` is the connection's (it counts each meta decode).
@@ -67,6 +78,10 @@ struct TerminalAttachFrameDecoder: Sendable {
             return appendBulk(frame.payload, decoder: decoder)
         case .snapshotMore:
             return lost()  // a continuation of no SNAPSHOT
+        case .ring:
+            return mapRing(frame, decoder: decoder)
+        case .ringAdvance:
+            return advanceRing(to: frame.offset, payload: frame.payload, after: precedingRun)
         }
     }
 
@@ -102,6 +117,7 @@ struct TerminalAttachFrameDecoder: Sendable {
     /// first byte (cmux-ipc `lane_writer.rs` `chunk_frame`), so `run` is the output this chunk may continue.
     private mutating func output(_ span: TerminalOutputSpan, after run: OutputRun?) -> TerminalFrameAdmission {
         guard !resyncing else { return .nothing }
+        guard !ringLapped else { return lost() }
         var current = run.flatMap { $0.end == span.offset ? $0 : nil }
             ?? OutputRun(start: span.offset, end: span.offset)
         current.end = span.end
@@ -126,6 +142,7 @@ struct TerminalAttachFrameDecoder: Sendable {
     /// `meta_len | meta | replay | pending`: the `resized` event without `replay` and `pending`.
     private mutating func grid(_ frame: TerminalAttachFrame, decoder: WireDecoder) -> TerminalFrameAdmission {
         guard !resyncing else { return .nothing }
+        guard !ringLapped else { return lost() }
         if let next = nextOffset {
             guard frame.offset <= next else { return lost() }
             // The screen that set `next` (a READY or REPLAY cut after this resize) already has it.
@@ -241,6 +258,7 @@ struct TerminalAttachFrameDecoder: Sendable {
         outputRun?.deliveredEnd = nil  // output before the cut is on the restored screen
         resyncing = false
         snapshots = snapshot
+        ring?.laps = TerminalRingLaps()  // a lap of the replaced screen's bytes no longer matters
     }
 
     /// Bytes were lost: a snapshot stream asks for a fresh READY once. A byte-replay stream cannot be repaired
@@ -250,6 +268,53 @@ struct TerminalAttachFrameDecoder: Sendable {
         guard snapshots, !resyncing else { return Self.reattach }
         resyncing = true
         return .resync(.gap)
+    }
+
+    /// RING: decode its meta and map its descriptor. The mapping is kept even while a resync is due, since the
+    /// READY that ends it is followed by RING_ADVANCEs. A second RING replaces the first (the stream's
+    /// reference to the old mapping goes; spans of it that the view still holds keep it mapped).
+    private mutating func mapRing(_ frame: TerminalAttachFrame, decoder: WireDecoder) -> TerminalFrameAdmission {
+        do throws(TerminalRingRefusal) {
+            guard let ringMapper else { throw TerminalRingRefusal.unsupported }  // the frame's descriptor closes with it
+            let grant = try TerminalAttachment.decodeRingGrant(frame.payload, decoder: decoder)
+            guard let descriptor = frame.descriptor?.take() else { throw TerminalRingRefusal.noDescriptor }
+            let mapped = try ringMapper(descriptor, grant)
+            ring = RingReader(ring: mapped, base: grant.base, sentEnd: frame.offset, laps: TerminalRingLaps())
+            return .nothing
+        } catch {
+            return .refused(error)
+        }
+    }
+
+    /// RING_ADVANCE to `end`: the ring bytes from the next output byte up to `end`, cut while they are still
+    /// whole. Bytes before the next output byte are on the screen already; a READY-less stream starts at the
+    /// ring's end when it was sent. A sidecar after it may name any of the bytes it delivered.
+    private mutating func advanceRing(to end: UInt64, payload: TerminalFrameBytes,
+                                      after run: OutputRun?) -> TerminalFrameAdmission {
+        guard let reader = ring, payload.count == 0 else { return .refused(.strayAdvance) }
+        guard !resyncing else { return .nothing }
+        guard !reader.laps.isMarked else { return lost() }
+        let start = nextOffset ?? reader.sentEnd
+        var current = run.flatMap { $0.end == start ? $0 : nil } ?? OutputRun(start: start, end: start)
+        guard end > start else {
+            outputRun = current
+            return .nothing
+        }
+        // Bytes before the ring's first one were never in it.
+        guard start >= reader.base,
+              let cut = TerminalRingSpan.cut(reader.ring, laps: reader.laps, from: start, to: end,
+                                             reserve: reader.ring.reserveAfterReading())
+        else { return lost() }
+        nextOffset = end
+        current.end = end
+        current.deliveredEnd = end
+        outputRun = current
+        return .ringOutput(cut.head, wrapped: cut.wrapped)
+    }
+
+    /// The writer lapped ring bytes of this screen after they were cut: the screen may be torn.
+    private var ringLapped: Bool {
+        ring?.laps.isMarked == true
     }
 
     /// A READY that does not decode or names another surface: the screen it should restore stays unknown.
@@ -269,68 +334,5 @@ struct TerminalAttachFrameDecoder: Sendable {
     private mutating func adopt(_ id: SurfaceID?) -> Bool {
         if surface == TerminalAttachment.unresolvedSurface, let id { surface = id }
         return scoped(id)
-    }
-}
-
-extension TerminalAttachFrameDecoder {
-    /// Contiguous OUTPUT frames back to back: the chunks of one output, or outputs with no sidecar between.
-    /// An output's sidecar comes after its last chunk with the aux of its first (cmux-tui `attach_frames.rs`).
-    struct OutputRun: Sendable {
-        /// The aux of the run's first OUTPUT.
-        var start: UInt64
-        /// The offset after the run's last byte.
-        var end: UInt64
-        /// The offset after the last byte of the run that reached the view; nil while none has.
-        var deliveredEnd: UInt64?
-
-        /// Whether the sidecar with aux `offset` is of output in this run that reached the view.
-        func carries(sidecarAt offset: UInt64) -> Bool {
-            guard let deliveredEnd else { return false }
-            return start <= offset && offset < deliveredEnd
-        }
-    }
-
-    /// What the view's attachment does with the admissions the queue does not take itself.
-    struct Delivery: Sendable {
-        /// A `size-state` and this view's participant in it (the attachment orders them by generation).
-        var sizeState: @Sendable (TerminalSizeState, String?) -> Void
-        /// Sends `snapshot-request` for this stream, and calls the second argument (once, on any thread) when
-        /// the request cannot be sent or the host refuses it (`LineTransport.sendNoReply`'s `onError`).
-        var requestSnapshot: @Sendable (SnapshotRequestReason, _ failed: @escaping @Sendable () -> Void) -> Void
-        /// The typing probe's decode mark for output, and for the key press it echoes when known.
-        var outputDecoded: @Sendable (UInt64?) -> Void
-    }
-
-    /// Reader thread. Hands one admission to the view's queue in stream order, as a decoded attach line is:
-    /// output stays a slice of its read buffer, a key press's echo rides behind its chunk, `closed` ends the
-    /// stream, and a gap asks the host for a fresh READY; when that request fails no READY is due, so the
-    /// stream ends with `overflow` and the view reattaches.
-    static func deliver(_ admission: TerminalFrameAdmission, to queue: TerminalEventQueue, delivery: Delivery) {
-        switch admission {
-        case .nothing:
-            return
-        case .output(let span):
-            delivery.outputDecoded(nil)
-            queue.push(span)
-        case .event(.sizeState(let state, let participant), _):
-            delivery.sizeState(state, participant)
-        case .event(.closed(let reason), _):
-            queue.finish(.closed(reason))
-        case .event(.inputEcho(let flow), _):
-            delivery.outputDecoded(flow)
-            queue.pushWithoutWaiting(.inputEcho(flow: flow))
-        case .event(.output(let data, let colors), let flow):  // an `output` line
-            delivery.outputDecoded(flow)
-            queue.push(.output(data, colors: colors))
-            guard let flow else { return }
-            queue.pushWithoutWaiting(.inputEcho(flow: flow))
-        case .event(let event, let flow):
-            queue.push(event)
-            guard let flow else { return }
-            delivery.outputDecoded(flow)
-            queue.pushWithoutWaiting(.inputEcho(flow: flow))
-        case .resync(let reason):
-            delivery.requestSnapshot(reason) { queue.finish(.closed(.overflow)) }
-        }
     }
 }

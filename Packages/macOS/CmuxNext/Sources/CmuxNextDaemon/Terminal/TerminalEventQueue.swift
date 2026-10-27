@@ -22,6 +22,15 @@ import Foundation
 /// Blink coalesces queued input only while its main thread is behind the same
 /// way (third_party/blink/renderer/platform/widget/input/main_thread_event_queue.cc).
 /// Nothing merges across a grid replacement or any other event.
+///
+/// Ring output (``TerminalRingSpan``, p05-ipc-113) is queued as ranges of the
+/// mapping, not bytes: spans of one mapping and screen that continue each other
+/// in the PTY stream and in memory merge into one wider range, never across the
+/// wrap, and each reaches the consumer as `Data` that points into the mapping.
+/// Its bound is the ring itself, so it never parks the reader: a consumer more
+/// than the ring behind finds its spans lapped. A span lapped before the
+/// consumer takes it is dropped and marks its screen, and the stream resyncs
+/// (app-daemon-connection-DESIGN.md sections 3.3 and 4.4).
 final class TerminalEventQueue: Sendable {
     let highWater: Int
     let lowWater: Int
@@ -38,23 +47,28 @@ final class TerminalEventQueue: Sendable {
     // connection's dedicated reader thread (LineTransport) waits on it, never the main thread or a pool thread.
     private let readerWake = DispatchSemaphore(value: 0)
 
-    /// One queued item: an event, or live output still in its read buffer (attach frames).
+    /// One queued item: an event, live output still in its read buffer (attach frames), or live output still
+    /// in the stream's output ring.
     private enum Item {
         case event(TerminalChannelEvent)
         case span(TerminalOutputSpan)
+        case ring(TerminalRingSpan)
 
-        /// The event the consumer gets.
-        var event: TerminalChannelEvent {
+        /// The event the consumer gets; nil for a ring span the writer lapped before the consumer took it.
+        var event: TerminalChannelEvent? {
             switch self {
             case .event(let event): event
             case .span(let span): .output(span.bytes.data, colors: nil)
+            case .ring(let span): span.dataUnlessLapped().map { .output($0, colors: nil) }
             }
         }
 
+        /// Bytes that count toward `highWater`; ring output holds none of the queue's memory.
         var outputSize: Int {
             switch self {
             case .event(let event): TerminalEventQueue.outputSize(event)
             case .span(let span): span.bytes.count
+            case .ring: 0
             }
         }
     }
@@ -82,11 +96,32 @@ final class TerminalEventQueue: Sendable {
         }
 
         /// Next event, merging consecutive plain output chunks up to `mergeLimit`; nil when none is queued.
+        /// Lapped ring spans are skipped.
         mutating func popMerged(mergeLimit: Int, recorder: DaemonWireStats.Recorder?) -> TerminalChannelEvent? {
-            guard let item = items[checked: head] else { return nil }
-            head += 1
+            while let item = items[checked: head] {
+                head += 1
+                if let event = take(item, mergeLimit: mergeLimit, recorder: recorder) {
+                    compact()
+                    return event
+                }
+            }
+            compact()
+            return nil
+        }
+
+        /// The event `item` (just popped) gives, merged with the items after it; nil for a lapped ring span.
+        private mutating func take(_ item: Item, mergeLimit: Int,
+                                   recorder: DaemonWireStats.Recorder?) -> TerminalChannelEvent? {
             let event: TerminalChannelEvent
             switch item {
+            case .ring(let first):
+                var joined = first  // one range of one mapping: merging copies nothing
+                while joined.count < mergeLimit, case .ring(let next)? = items[checked: head],
+                      let wider = joined.joined(with: next) {
+                    joined = wider
+                    head += 1
+                }
+                return Item.ring(joined).event
             case .span(let first):
                 var joined: TerminalOutputSpan? = first  // the merged bytes while they are one slice of one buffer
                 var copied = Data()  // the merged bytes once they are not
@@ -125,11 +160,13 @@ final class TerminalEventQueue: Sendable {
                 event = other
                 outputBytes -= TerminalEventQueue.outputSize(other)
             }
-            if head > 256, head * 2 > items.count {
-                items.removeFirst(head)
-                head = 0
-            }
             return event
+        }
+
+        private mutating func compact() {
+            guard head > 256, head * 2 > items.count else { return }
+            items.removeFirst(head)
+            head = 0
         }
     }
 
@@ -158,15 +195,26 @@ final class TerminalEventQueue: Sendable {
         enqueue(.span(span))
     }
 
+    /// Reader thread. Live output still in the stream's output ring; it reaches the consumer as `Data` that
+    /// points into the mapping. Never blocks: the ring bounds it.
+    func push(_ span: TerminalRingSpan) {
+        enqueue(.ring(span))
+    }
+
     private func enqueue(_ item: Item) {
-        let (waiter, blocked) = state.withLock { state -> (OnceContinuation<TerminalChannelEvent?, OnceContinuationError>?, Bool) in
+        typealias Handoff = (waiter: OnceContinuation<TerminalChannelEvent?, OnceContinuationError>, event: TerminalChannelEvent)
+        let (handoff, blocked) = state.withLock { state -> (Handoff?, Bool) in
             guard !state.finished else { return (nil, false) }
-            if let waiter = state.waiter.take() { return (waiter, false) }
+            if state.waiter != nil {
+                // The consumer waits, so nothing is queued: it takes this item now (a lapped ring span is dropped).
+                guard let event = item.event, let waiter = state.waiter.take() else { return (nil, false) }
+                return ((waiter, event), false)
+            }
             state.items.append(item)
             state.outputBytes += item.outputSize
             return (nil, state.parkReader(above: highWater))
         }
-        waiter?.resume(returning: item.event)
+        handoff?.waiter.resume(returning: handoff?.event)
         guard blocked else { return }
         onReaderBlocked?()
         var parked = blocked
