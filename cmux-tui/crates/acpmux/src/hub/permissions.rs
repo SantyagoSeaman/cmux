@@ -105,8 +105,9 @@ impl Hub {
                     self.processes_lost(&session, processes::HARNESS_EXIT);
                     // So did its background subagents (`work_below.rs`).
                     self.end_background_subagents(&session);
-                    // The idle exit (`idle.rs`) marks the session while it ends the harness.
-                    let hibernating = session.hibernating.load(Ordering::SeqCst);
+                    // The idle exit marked it before it ended the harness (`idle.rs`); a stop clears the mark.
+                    let hibernating = session.hibernated_at.load(Ordering::SeqCst) != 0
+                        && session.status() != SessionStatus::Closed;
                     let intentional = hibernating
                         || matches!(session.status(), SessionStatus::Idle | SessionStatus::Closed);
                     // An agent host's exit was logged before its ack.

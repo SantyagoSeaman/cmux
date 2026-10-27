@@ -186,9 +186,6 @@ pub struct Session {
     /// What asked for the agent the next wake starts (`idle.rs` `wake_cause`): `typing`, `prompt`,
     /// else a request that needs the agent.
     pub(super) wake_cause: StdMutex<Option<&'static str>>,
-    /// The idle exit is ending this session's harness right now: its exit records say
-    /// `hibernated` (`idle.rs`).
-    pub(super) hibernating: AtomicBool,
     /// The agent's own requests (a file read, a terminal, a permission) whose task has not
     /// ended: the idle exit waits for none of them, it keeps the agent (`idle.rs`).
     pub(super) agent_requests: std::sync::atomic::AtomicUsize,

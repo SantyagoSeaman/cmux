@@ -887,7 +887,6 @@ impl Hub {
             last_active: AtomicU64::new(self.clock_now()),
             hibernated_at: AtomicU64::new(0),
             wake_cause: StdMutex::new(None),
-            hibernating: AtomicBool::new(false),
             agent_requests: std::sync::atomic::AtomicUsize::new(0),
             web_control_ended: AtomicBool::new(false),
             floor: Default::default(),

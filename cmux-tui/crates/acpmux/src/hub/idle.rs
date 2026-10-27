@@ -196,12 +196,10 @@ impl Hub {
                     session.hibernated_at.store(0, Ordering::SeqCst);
                     continue;
                 }
-                session.hibernating.store(true, Ordering::SeqCst);
                 self.detach_child(&session).await;
                 if link_lost {
                     self.end_unadopted_host(&session).await;
                 }
-                session.hibernating.store(false, Ordering::SeqCst);
                 // Stopped meanwhile (`kill` clears the mark): its next start is no wake.
                 if session.status() == SessionStatus::Closed {
                     session.hibernated_at.store(0, Ordering::SeqCst);
