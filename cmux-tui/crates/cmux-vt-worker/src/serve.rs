@@ -90,8 +90,13 @@ pub fn run(socket: OwnedFd) -> Result<(), WorkerError> {
     let mut shard = Shard::new();
     let mut events = Vec::new();
     loop {
+        // Each command's events go out before the next command runs: when
+        // one terminal's ATTACH crashes the parser, the terminals attached
+        // before it were reported parsed, and the daemon's strike rule
+        // counts the death against the one whose parse was in flight.
         while let Some(frame) = reader.next_frame()? {
             dispatch(&mut shard, decode_command(frame)?, &mut events)?;
+            flush(fd, &mut events)?;
         }
         flush(fd, &mut events)?;
         let busy = shard.has_work();

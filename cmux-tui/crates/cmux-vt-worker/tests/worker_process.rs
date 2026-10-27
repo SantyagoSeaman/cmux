@@ -149,6 +149,8 @@ fn attach(worker: &Worker, id: u64, kitty_limits: KittyGraphicsLimits) -> Attach
     worker.send(&WorkerCommand::Attach(Attach {
         id,
         start: 0,
+        prologue: Vec::new(),
+        gap: false,
         ring: ring.segment().expect("a shared ring").try_clone().expect("dup ring"),
         ring_capacity: RING_CAPACITY as u64,
         page: page.try_clone().expect("dup page"),

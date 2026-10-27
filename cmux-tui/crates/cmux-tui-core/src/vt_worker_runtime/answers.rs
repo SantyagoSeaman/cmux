@@ -12,7 +12,9 @@
 
 use std::fmt;
 
-use super::wire::MAX_ANSWER;
+/// The longest answer of the fixed set, with room: a worker's PTY_WRITE
+/// longer than this is not one answer.
+pub const MAX_ANSWER: usize = 64;
 
 /// Parameters a DA1 or DA2 answer may carry.
 const MAX_PARAMS: usize = 16;
@@ -65,6 +67,21 @@ impl fmt::Display for AnswerRejected {
 impl std::error::Error for AnswerRejected {}
 
 impl QueryAnswer {
+    /// Every answer in `bytes`, in order: a worker sends the answers one
+    /// parse slice made as one PTY_WRITE. Each sequence is checked on its
+    /// own; bytes that start no sequence end the split as one rejection.
+    pub fn parse_all(bytes: &[u8], cols: u16, rows: u16) -> Vec<Result<Self, AnswerRejected>> {
+        let mut answers = Vec::new();
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let len = sequence_len(rest).unwrap_or(rest.len());
+            let (one, after) = rest.split_at(len);
+            answers.push(Self::parse(one, cols, rows));
+            rest = after;
+        }
+        answers
+    }
+
     /// The answer `bytes` say, for a terminal of `cols` x `rows`.
     pub fn parse(bytes: &[u8], cols: u16, rows: u16) -> Result<Self, AnswerRejected> {
         if bytes.len() > MAX_ANSWER {
@@ -130,6 +147,22 @@ impl QueryAnswer {
                 csi("?", &[*row, *col, *page], 'R')
             }
         }
+    }
+}
+
+/// The length of the escape sequence `bytes` start with: a CSI to its
+/// final byte, a DCS to its ST. `None` when they start none, or it does not
+/// end within [`MAX_ANSWER`] bytes.
+fn sequence_len(bytes: &[u8]) -> Option<usize> {
+    let window = &bytes[..bytes.len().min(MAX_ANSWER + 1)];
+    match window {
+        [0x1b, b'[', body @ ..] => {
+            body.iter().position(|byte| (0x40..=0x7e).contains(byte)).map(|at| at + 3)
+        }
+        [0x1b, b'P', body @ ..] => {
+            body.windows(2).position(|pair| pair == b"\x1b\\").map(|at| at + 4)
+        }
+        _ => None,
     }
 }
 
@@ -210,6 +243,30 @@ mod tests {
         assert_eq!(parse(b"\x1b[1;81R"), Err(AnswerRejected::CursorOutside { row: 1, col: 81 }));
         assert_eq!(parse(b"\x1b[0;1R"), Err(AnswerRejected::CursorOutside { row: 0, col: 1 }));
         assert_eq!(parse(b"\x1b[?9;99;1R"), Err(AnswerRejected::CursorOutside { row: 9, col: 99 }));
+    }
+
+    #[test]
+    fn the_answers_of_one_slice_are_split_and_checked_one_by_one() {
+        let all = |bytes: &[u8]| QueryAnswer::parse_all(bytes, 80, 24);
+        assert_eq!(
+            all(b"\x1b[?62;22c\x1bP!|0000abcd\x1b\\\x1b[0n\x1b[3;4R"),
+            [
+                Ok(QueryAnswer::PrimaryAttributes(vec![62, 22])),
+                Ok(QueryAnswer::TertiaryAttributes(*b"0000abcd")),
+                Ok(QueryAnswer::OperatingStatus),
+                Ok(QueryAnswer::CursorPosition { row: 3, col: 4 }),
+            ]
+        );
+        // A bad sequence is refused on its own; bytes that start none end the split.
+        assert_eq!(
+            all(b"\x1b[?1$y\x1b[0nrm -rf ~\r\x1b[0n"),
+            [
+                Err(AnswerRejected::NotAnAnswer),
+                Ok(QueryAnswer::OperatingStatus),
+                Err(AnswerRejected::NotAnAnswer),
+            ]
+        );
+        assert!(all(b"").is_empty());
     }
 
     #[test]

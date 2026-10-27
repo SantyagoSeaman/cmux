@@ -105,6 +105,27 @@ impl Slot {
     fn has_work(&self) -> bool {
         self.parsed < self.target && !self.stream.awaiting_media()
     }
+
+    /// Parse the screen the terminal starts from (the daemon's own VT
+    /// replay, so no Kitty file command) and, after a gap, a CAN. Its
+    /// queries were answered when their output was first parsed, so its
+    /// PTY answers are dropped; its title and status events are kept.
+    fn replay_prologue(&mut self, id: u64, prologue: &[u8], gap: bool, events: &mut Vec<Event>) {
+        if !prologue.is_empty() {
+            let _ =
+                cmux_vt_stream::write_output(&mut self.terminal, prologue, &mut self.stream.marks);
+        }
+        if gap {
+            self.terminal.vt_write(CANCEL);
+        }
+        let from = events.len();
+        drain_effects(id, self, events);
+        let mut index = 0;
+        events.retain(|event| {
+            index += 1;
+            index <= from || !matches!(event, Event::PtyWrite { .. })
+        });
+    }
 }
 
 /// One worker's terminals.
@@ -156,7 +177,7 @@ impl Shard {
             events.push(Event::AttachFailed { id, reason: AttachFailure::Parser });
             return;
         };
-        let slot = Slot {
+        let mut slot = Slot {
             terminal,
             render,
             ring,
@@ -168,6 +189,7 @@ impl Shard {
             frame: 0,
             pwd: None,
         };
+        slot.replay_prologue(id, &attach.prologue, attach.gap, events);
         self.slots.insert(id, slot);
         self.publish(id, events);
     }

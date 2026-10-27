@@ -8,7 +8,6 @@
 //! (`holder_runtime`, ATTACH with the prologue).
 
 use super::strikes::ReseedMode;
-use super::wire::SeedFrame;
 
 /// A VT replay of a terminal's screen at output offset `base`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -31,8 +30,9 @@ pub struct Reseed {
     pub ring: RingSpan,
 }
 
-/// The seed a worker gets: replay `prologue` (the screen at `base`), then
-/// the ring from `replay_from` to `end`.
+/// The seed a worker gets in its ATTACH: replay `prologue` (the screen at
+/// `base`), then the ring from `replay_from` (the ATTACH's `start`; its
+/// `gap` is `skipped`) to `end`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeedPlan {
     pub base: u64,
@@ -67,17 +67,6 @@ impl SeedPlan {
             ReseedMode::Blank => {
                 Self { base: end, prologue: Vec::new(), replay_from: end, end, skipped: true }
             }
-        }
-    }
-
-    /// The [`super::wire::Kind::Seed`] fields.
-    pub fn frame(&self) -> SeedFrame<'_> {
-        SeedFrame {
-            base: self.base,
-            replay_from: self.replay_from,
-            end: self.end,
-            skipped: self.skipped,
-            prologue: &self.prologue,
         }
     }
 }

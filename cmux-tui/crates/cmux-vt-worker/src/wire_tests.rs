@@ -111,6 +111,8 @@ fn commands_round_trip_with_their_descriptors() {
         &Command::Attach(Attach {
             id: 5,
             start: 100,
+            prologue: b"\x1b[H\x1b[2Jscreen".to_vec(),
+            gap: true,
             ring: segment(),
             ring_capacity: 1 << 20,
             page: segment(),
@@ -162,6 +164,7 @@ fn commands_round_trip_with_their_descriptors() {
     );
     assert_eq!(attach.geometry, geometry);
     assert_eq!(attach.kitty_limits, LIMITS);
+    assert_eq!((attach.prologue.as_slice(), attach.gap), (&b"\x1b[H\x1b[2Jscreen"[..], true));
     assert_ne!(attach.ring.as_fd().as_raw_fd(), attach.page.as_fd().as_raw_fd());
     assert!(matches!(
         next(),

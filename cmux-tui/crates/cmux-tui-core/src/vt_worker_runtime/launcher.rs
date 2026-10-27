@@ -8,13 +8,9 @@ use std::path::PathBuf;
 
 use cmux_process::{Command, Stdio};
 
-/// The descriptor number of the worker's link socket in the worker.
+/// The descriptor number of the worker's link socket in the worker
+/// (`cmux-vt-worker`'s `main.rs` serves the socket it finds there).
 pub const WORKER_FD: RawFd = 3;
-/// The env entry that tells a worker its link descriptor ([`WORKER_FD`]).
-pub const WORKER_FD_ENV: &str = "CMUX_VT_WORKER_FD";
-/// The env entry that tells a worker its shard (for its logs and crash
-/// reports; the broker's HELLO says it too).
-pub const WORKER_SHARD_ENV: &str = "CMUX_VT_WORKER_SHARD";
 
 /// A started worker, as the broker owns it.
 pub trait WorkerProcess: Send {
@@ -41,7 +37,8 @@ pub trait WorkerLauncher: Send + 'static {
 /// Starts `cmux-vt-worker` processes through `cmux_process`: the child gets
 /// descriptors 0-2 (null, null, the daemon's stderr) and its link socket at
 /// [`WORKER_FD`], nothing else, and an environment of only the entries
-/// named here. Rings reach it later, one descriptor per ASSIGN.
+/// named here. Its sandbox policy comes as the link's first frame; rings
+/// and pages reach it later, as the descriptors of each ATTACH.
 pub struct ProcessLauncher {
     exe: PathBuf,
     args: Vec<OsString>,
@@ -65,7 +62,7 @@ impl ProcessLauncher {
 }
 
 impl WorkerLauncher for ProcessLauncher {
-    fn launch(&mut self, shard: usize) -> io::Result<LaunchedWorker> {
+    fn launch(&mut self, _shard: usize) -> io::Result<LaunchedWorker> {
         let (ours, theirs) = UnixStream::pair()?;
         cmux_holder::wire::tune_socket(ours.as_raw_fd());
         cmux_holder::wire::tune_socket(theirs.as_raw_fd());
@@ -74,8 +71,6 @@ impl WorkerLauncher for ProcessLauncher {
             .args(&self.args)
             .env_clear()
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .env(WORKER_FD_ENV, WORKER_FD.to_string())
-            .env(WORKER_SHARD_ENV, shard.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())

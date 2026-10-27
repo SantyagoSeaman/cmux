@@ -31,6 +31,8 @@ fn attach(shard: &mut Shard, id: u64, fixture: &Fixture, events: &mut Vec<Event>
         Attach {
             id,
             start: 0,
+            prologue: Vec::new(),
+            gap: false,
             ring,
             ring_capacity: fixture.capacity,
             page: fixture.page.try_clone().expect("dup page"),
@@ -76,6 +78,72 @@ fn a_terminal_parses_its_ring_into_its_page() {
         PageReader::open(&fixture.page, fixture.page_len).expect("reader").read().expect("screen");
     assert_eq!(screen.cells, reference(bytes));
     assert_eq!(screen.parsed, bytes.len() as u64);
+}
+
+fn attach_with_prologue(
+    shard: &mut Shard,
+    fixture: &Fixture,
+    prologue: &[u8],
+    gap: bool,
+    events: &mut Vec<Event>,
+) {
+    let ring = fixture.ring.segment().expect("shared ring").try_clone().expect("dup ring");
+    shard.attach(
+        Attach {
+            id: 1,
+            start: fixture.ring.end(),
+            prologue: prologue.to_vec(),
+            gap,
+            ring,
+            ring_capacity: fixture.capacity,
+            page: fixture.page.try_clone().expect("dup page"),
+            page_len: fixture.page_len as u64,
+            scrollback: 100_000,
+            geometry: GEOMETRY,
+            kitty_limits: KittyGraphicsLimits::default(),
+        },
+        events,
+    );
+}
+
+#[test]
+fn a_prologue_is_the_screen_the_parse_starts_from_and_its_queries_are_not_answered_again() {
+    let mut fixture = fixture(1 << 16);
+    fixture.ring.push(b"before the prologue");
+    let mut shard = Shard::new();
+    let mut events = Vec::new();
+    let prologue = b"\x1b]0;restored\x07\x1b[cscreen\x1b[6n";
+    attach_with_prologue(&mut shard, &fixture, prologue, false, &mut events);
+    assert!(
+        !events.iter().any(|event| matches!(event, Event::PtyWrite { .. })),
+        "a prologue's queries were answered when their output first ran: {events:?}"
+    );
+    assert!(events.contains(&Event::Title { id: 1, title: "restored".to_owned() }));
+    let start = fixture.ring.end();
+    assert_eq!(events.last(), Some(&Event::Parsed { id: 1, offset: start, frame: 1 }));
+    // Output after the prologue is parsed on it, and its queries answered.
+    fixture.ring.push(b" then\x1b[c");
+    shard.advance(1, fixture.ring.end());
+    events.clear();
+    run(&mut shard, &mut events);
+    assert!(events.iter().any(|event| matches!(event, Event::PtyWrite { id: 1, .. })));
+    let screen =
+        PageReader::open(&fixture.page, fixture.page_len).expect("reader").read().expect("screen");
+    assert_eq!(screen.cells, reference(b"\x1b[cscreen\x1b[6n then\x1b[c"));
+}
+
+#[test]
+fn a_gap_after_the_prologue_cancels_the_sequence_it_left_open() {
+    let mut fixture = fixture(1 << 16);
+    let mut shard = Shard::new();
+    let mut events = Vec::new();
+    attach_with_prologue(&mut shard, &fixture, b"ok\x1b[3", true, &mut events);
+    fixture.ring.push(b"1mX");
+    shard.advance(1, fixture.ring.end());
+    run(&mut shard, &mut events);
+    let screen =
+        PageReader::open(&fixture.page, fixture.page_len).expect("reader").read().expect("screen");
+    assert_eq!(screen.cells, reference(b"ok\x1b[3\x181mX"));
 }
 
 #[test]
@@ -160,6 +228,8 @@ fn a_bad_ring_or_a_duplicate_id_fails_the_attach() {
         Attach {
             id: 2,
             start: 0,
+            prologue: Vec::new(),
+            gap: false,
             // A page is not a ring.
             ring: create_page(page_len).expect("page"),
             ring_capacity: (page_len - crate::ring_view::RING_HEADER) as u64,
