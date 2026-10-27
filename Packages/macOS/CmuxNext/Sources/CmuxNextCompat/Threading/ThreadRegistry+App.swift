@@ -29,6 +29,7 @@ extension ThreadRegistry {
         // Daemon.
         ThreadDeclaration("cmux-tui reader ", match: .prefix, qos: .userInteractive),
         ThreadDeclaration("com.cmuxterm.next.daemon.write", qos: .userInteractive),
+        ThreadDeclaration("com.cmuxterm.next.daemon.loopback", qos: .default),
         ThreadDeclaration("com.cmuxterm.next.daemon.bridge-dial", qos: .userInitiated),
         ThreadDeclaration("com.cmuxterm.next.daemon.bridge-reap", qos: .utility),
         ThreadDeclaration("com.cmuxterm.next.daemon.path.", match: .prefix, qos: .utility),
