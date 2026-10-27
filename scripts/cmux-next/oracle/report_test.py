@@ -228,8 +228,9 @@ class RunDirTests(unittest.TestCase):
         self.assertIsNone(report.message_invariant("expected ok, got I/O error"))
 
 
-def fleet_dir(tmp: Path, *, sides=("head",), missing=(), head_value=None) -> Path:
-    """A fleet.py out dir: shards/<side>/<i>/{step.log, run/}, <side>/ merged, compare/ for two sides."""
+def fleet_dir(tmp: Path, *, sides=("head",), missing=(), head_value=None, shards=2) -> Path:
+    """A fleet.py out dir as Fleet.fetch and merge_side write it: shards/<side>/<i>/{step.log, unpacked/run/},
+    <side>/ merged (a one-shard side's merged dir is its shard's run dir), compare/ for two sides."""
     out = tmp / "fleet-run"
     cases, _ = oracle.load_corpus(tmp / "corpus")
     record_sides = []
@@ -239,24 +240,24 @@ def fleet_dir(tmp: Path, *, sides=("head",), missing=(), head_value=None) -> Pat
                               if side == "head" and head_value is None else {},
                               value=head_value if side == "head" and head_value else (lambda cid: "v-" + cid))
         record = fleet.Side(side, SHA)
-        for i in range(2):
+        for i in range(shards):
             shard_dir = out / "shards" / side / str(i)
-            shard = fleet.Shard(side, i, 2, SHA, f"oracle-r-{side}-s{i}of2", [], shard_dir, step_id=f"step-{side}-{i}",
-                                state="succeeded" if (side, i) not in missing else "failed", worker="aws-m4pro-3")
+            shard = fleet.Shard(side, i, shards, SHA, f"oracle-r-{side}-s{i}of{shards}", [], shard_dir,
+                                step_id=f"step-{side}-{i}", worker="aws-m4pro-3",
+                                state="succeeded" if (side, i) not in missing else "failed")
             shard_dir.mkdir(parents=True)
             (shard_dir / "step.log").write_text(f"step {side} {i}\n")
             if (side, i) in missing:
                 shard.error = "build failed"
             else:
-                shard.run_dir = shard_dir / "run"
-                oracle.perform_run(options(tmp, product="app", build="bench", shard=(i, 2), out=shard.run_dir,
+                shard.run_dir = shard_dir / "unpacked" / "run"
+                oracle.perform_run(options(tmp, product="app", build="bench", shard=(i, shards), out=shard.run_dir,
                                            run_id=f"{side}{i}"), cases, driver.open_session, None, {})
                 (shard.run_dir / "app" / "a1x").mkdir(parents=True)
                 (shard.run_dir / "app" / "a1x" / "app.log").write_text("launched\n")
             shard.save()
             record.shards.append(shard)
-        if not missing:
-            fleet.merge_side(record, out)
+        fleet.merge_side(record, out)
         record_sides.append(record)
     comparison = None
     if len(sides) == 2 and not missing:
@@ -269,30 +270,61 @@ def fleet_dir(tmp: Path, *, sides=("head",), missing=(), head_value=None) -> Pat
     return out
 
 
+def move(directory: Path, tmp: Path) -> Path:
+    """The dir copied to another host: the absolute paths its records name are gone, its own layout is not."""
+    moved = tmp / "copied" / directory.name
+    moved.parent.mkdir(exist_ok=True)
+    shutil.move(str(directory), str(moved))
+    return moved
+
+
+def edit_json(path: Path, change) -> None:
+    data = json.loads(path.read_text())
+    change(data)
+    path.write_text(json.dumps(data))
+
+
 class FleetDirTests(unittest.TestCase):
     def test_fleet_run_maps_the_failure_to_its_shard_after_a_copy(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             write_corpus(tmp / "corpus")
-            out = fleet_dir(tmp)
-            # The dir moves to another host: fleet.json's absolute paths are gone, its own layout is not.
-            moved = tmp / "copied" / out.name
-            moved.parent.mkdir()
-            shutil.move(str(out), str(moved))
+            moved = move(fleet_dir(tmp), tmp)
             code, receipt, index = make_report(moved, tmp)
             self.assertEqual(code, report.EXIT_FAIL)
             self.assertEqual([r["label"] for r in receipt["runs"]], ["head"])
+            self.assertEqual(receipt["counts"], {"unexpected": 1})
             first = receipt["first_failure"]
             self.assertEqual((first["case"], first["step"]["id"], first["pointer"]["pointer"]),
                              ("beta/c3", "create", "/value/id"))
             shard = oracle.shard_of("beta/c3", 2)
             kinds = {a["kind"]: a for a in first["artifacts"]}
-            self.assertEqual(kinds["shard-run"]["path"], f"shards/head/{shard}/run")
+            self.assertEqual(kinds["shard-run"]["path"], f"shards/head/{shard}/unpacked/run")
             self.assertEqual(kinds["step-log"]["path"], f"shards/head/{shard}/step.log")
             self.assertEqual(kinds["event"]["path"], "head/events.jsonl")
             self.assertTrue(first["replay"].startswith(f"python3 scripts/cmux-next/oracle/fleet.py run --ref {SHA}"))
-            self.assertIn({"kind": "log", "path": "shards/head/0/run/app/a1x/app.log", "bytes": 9}, receipt["artifacts"])
+            self.assertIn({"kind": "log", "path": "shards/head/0/unpacked/run/app/a1x/app.log", "bytes": 9},
+                          receipt["artifacts"])
             self.assertIn("step-log: shards/head", index.split("## Runs")[0])
+
+    def test_one_shard_run_keeps_its_shard_and_step_log_on_the_host_and_after_a_copy(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            out = fleet_dir(tmp, shards=1)
+            # fleet.py's merged dir of a one-shard side is the shard's run dir: no head/, no shard_runs.
+            self.assertFalse((out / "head").exists())
+            for where in ("host", "copy"):
+                directory = out if where == "host" else move(out, tmp)
+                code, receipt, _ = make_report(directory, tmp)
+                self.assertEqual(code, report.EXIT_FAIL, where)
+                self.assertEqual([r["label"] for r in receipt["runs"]], ["head"], where)
+                first = receipt["first_failure"]
+                self.assertEqual((first["kind"], first["case"]), ("unexpected", "beta/c3"), where)
+                kinds = {a["kind"]: a for a in first["artifacts"]}
+                self.assertEqual(kinds["shard-run"]["path"], "shards/head/0/unpacked/run", where)
+                self.assertEqual(kinds["step-log"]["path"], "shards/head/0/step.log", where)
+                self.assertEqual(kinds["event"]["path"], "shards/head/0/unpacked/run/events.jsonl", where)
 
     def test_missing_shard_is_incomplete_with_its_step_log(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -301,18 +333,41 @@ class FleetDirTests(unittest.TestCase):
             out = fleet_dir(tmp, missing={("head", 1)})
             code, receipt, index = make_report(out, tmp)
             self.assertEqual(code, report.EXIT_FAIL if receipt["counts"].get("unexpected") else report.EXIT_INCOMPLETE)
-            shard = next(f for f in receipt["failures"] if f["kind"] == "shard")
-            self.assertIn("shard 1/2 failed: build failed", shard["message"])
-            self.assertEqual(shard["artifacts"], [{"kind": "step-log", "path": "shards/head/1/step.log"}])
+            # fleet.py also records the missing shard as a side error; it is one finding, not two.
+            shards = [f for f in receipt["failures"] if f["kind"] == "shard"]
+            self.assertEqual(len(shards), 1, shards)
+            self.assertIn("shard 1/2 failed: build failed", shards[0]["message"])
+            self.assertEqual(shards[0]["artifacts"], [{"kind": "step-log", "path": "shards/head/1/step.log"}])
             self.assertEqual([r["label"] for r in receipt["runs"]], ["head shard 0"])
 
-    def test_fleet_diff_first_divergence(self):
+    def test_side_fleet_py_did_not_merge_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            out = fleet_dir(tmp, head_value=lambda cid: "v-" + cid)
+            shutil.rmtree(out / "head")
+
+            def refuse(record):
+                record["sides"]["head"].update(merged=None, ok=None, errors=["shard receipts have different configs: x"])
+                record["ok"] = False
+            edit_json(out / "fleet.json", refuse)
+            code, receipt, _ = make_report(out, tmp)
+            self.assertEqual(code, report.EXIT_INCOMPLETE)
+            self.assertEqual(receipt["verdict"], "incomplete")
+            self.assertEqual([r["label"] for r in receipt["runs"]], ["head shard 0", "head shard 1"])
+            first = receipt["first_failure"]
+            self.assertEqual(first["kind"], "shard")
+            self.assertEqual(first["message"], "head not merged: shard receipts have different configs: x")
+            self.assertEqual(first["artifacts"], [{"kind": "fleet", "path": "fleet.json"}])
+
+    def test_fleet_diff_first_divergence_after_a_copy(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             write_corpus(tmp / "corpus")
             out = fleet_dir(tmp, sides=("base", "head"),
                             head_value=lambda cid: "changed" if cid == "alpha/c1" else "v-" + cid)
-            code, receipt, index = make_report(out, tmp)
+            moved = move(out, tmp)
+            code, receipt, index = make_report(moved, tmp)
             self.assertEqual(code, report.EXIT_FAIL)
             first = receipt["first_failure"]
             self.assertEqual(first["kind"], "divergence")
@@ -322,9 +377,35 @@ class FleetDirTests(unittest.TestCase):
             self.assertEqual(first["pointer"], {"pointer": "/value", "from": "divergence", "a": "v-alpha/c1", "b": "changed"})
             paths = [a["path"] for a in first["artifacts"]]
             self.assertIn("compare/divergence.json", paths)
-            self.assertTrue(any(a["kind"] == "checkpoint" and a.get("line") for a in first["artifacts"]))
+            checkpoints = [a for a in first["artifacts"] if a["kind"] == "checkpoint"]
+            self.assertEqual([a["path"] for a in checkpoints],
+                             ["compare/a-merged/checkpoints.jsonl", "compare/b-merged/checkpoints.jsonl"])
+            self.assertTrue(all(a.get("line") for a in checkpoints))
+            for artifact in first["artifacts"]:
+                self.assertTrue((moved / artifact["path"]).exists(), artifact)
             self.assertEqual(receipt["comparison"]["verdict"], "divergent")
             self.assertIn("## Comparison", index)
+
+    def test_fleet_diff_without_a_comparison_result_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            out = fleet_dir(tmp, sides=("base", "head"), head_value=lambda cid: "v-" + cid)
+            # oracle.py diff made compare/ and then refused its input (exit 2) before it wrote a result.
+            for name in ("comparison.json", "divergence.json"):
+                (out / "compare" / name).unlink()
+
+            def crashed(record):
+                record["comparison"]["exit"] = 2
+                record["ok"] = False
+            edit_json(out / "fleet.json", crashed)
+            code, receipt, index = make_report(out, tmp)
+            self.assertEqual(code, report.EXIT_INCOMPLETE)
+            first = receipt["first_failure"]
+            self.assertEqual(first["kind"], "infra")
+            self.assertIn("no comparison.json", first["message"])
+            self.assertIn("the fleet diff exited 2", first["message"])
+            self.assertNotIn("None found", index)
 
 
 class ComparisonDirTests(unittest.TestCase):
@@ -341,6 +422,124 @@ class ComparisonDirTests(unittest.TestCase):
             self.assertEqual(receipt["source"]["kind"], "comparison")
             self.assertEqual(receipt["first_failure"]["case"], "beta/c2")
             self.assertEqual(len(receipt["runs"]), 2)
+
+    def test_copied_comparison_dir_keeps_its_sides_and_evidence(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            argv = ["diff", "--out", str(tmp / "cmp"), "--expectations-root", str(tmp / "expectations")]
+            for side, flag, driver in (("base", "--base-run", ScriptDriver()),
+                                       ("head", "--head-run", ScriptDriver(value=lambda c: "x" if c == "beta/c2" else "v-" + c))):
+                for i in range(2):
+                    run(tmp, driver, shard=(i, 2), out=tmp / f"{side}{i}", run_id=f"{side}{i}")
+                    argv += [flag, str(tmp / f"{side}{i}")]
+            quiet(oracle.main, argv)
+            # The shard dirs stay; the merged sides are only in the comparison dir, which moves.
+            moved = move(tmp / "cmp", tmp)
+            code, receipt, _ = make_report(moved, tmp)
+            self.assertEqual(code, report.EXIT_FAIL)
+            self.assertEqual([r["path"] for r in receipt["runs"]], ["a-merged", "b-merged"])
+            first = receipt["first_failure"]
+            self.assertEqual((first["kind"], first["case"]), ("divergence", "beta/c2"))
+            for artifact in first["artifacts"]:
+                self.assertTrue((moved / artifact["path"]).exists(), artifact)
+
+    def test_divergence_document_without_a_result_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            documents = {
+                "host-mismatch": ({"verdict": "host-mismatch", "hostPolicy": "strict", "a": {"path": "/gone/a"},
+                                   "b": {"path": "/gone/b"}, "mismatched": {"*": ["osVersion 26.1 != 27.0"]}},
+                                  "refused", "host-mismatch: *: osVersion 26.1 != 27.0"),
+                "bad-input": ({"verdict": "bad-input", "error": "no cases to compare", "a": {"path": None},
+                               "b": {"path": None}}, "infra", "diff.py bad-input: no cases to compare"),
+                "internal-error": ({"verdict": "internal-error", "error": "KeyError: 'x'", "a": {"path": None},
+                                    "b": {"path": None}}, "infra", "diff.py internal-error: KeyError: 'x'"),
+            }
+            for name, (document, kind, message) in documents.items():
+                directory = tmp / name
+                directory.mkdir()
+                (directory / "divergence.json").write_text(json.dumps({"schema": report.DIVERGENCE_SCHEMA, **document}))
+                code, receipt, _ = make_report(directory, tmp)
+                self.assertEqual(code, report.EXIT_INCOMPLETE, name)
+                first = receipt["first_failure"]
+                self.assertEqual(first["kind"], kind, name)
+                self.assertIn(message, first["message"], name)
+                self.assertEqual(first["artifacts"], [{"kind": "divergence", "path": "divergence.json"}], name)
+
+    def test_diff_internal_error_is_incomplete_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            run(tmp, ScriptDriver(), out=tmp / "base", run_id="b")
+            run(tmp, ScriptDriver(), out=tmp / "head", run_id="h")
+            quiet(oracle.main, ["diff", "--out", str(tmp / "cmp"), "--expectations-root", str(tmp / "expectations"),
+                                "--base-run", str(tmp / "base"), "--head-run", str(tmp / "head")])
+            # What compare_views records when diff.py exits DIFF_INTERNAL: no refusal, no divergence, ok false.
+            edit_json(tmp / "cmp" / "comparison.json", lambda r: r.update(diff_exit=oracle.DIFF_INTERNAL, ok=False))
+            edit_json(tmp / "cmp" / "divergence.json",
+                      lambda d: d.update(verdict="internal-error", error="TypeError: boom", divergences=[]))
+            code, receipt, _ = make_report(tmp / "cmp", tmp)
+            self.assertEqual(code, report.EXIT_INCOMPLETE)
+            first = receipt["first_failure"]
+            self.assertEqual(first["kind"], "infra")
+            self.assertEqual(first["message"], "diff.py exited 4: TypeError: boom")
+            self.assertIn({"kind": "comparison", "path": "comparison.json"}, first["artifacts"])
+
+    def test_order_parity_leak_is_a_failure_that_names_the_leaking_side(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            common = dict(product="headless", batch_limit=4, jobs=1)
+            run(tmp, ResetDriver(leaks={"alpha/c2"}), out=tmp / "base", run_id="b", **common)
+            run(tmp, ResetDriver(), out=tmp / "head", run_id="h", **common)
+            quiet(oracle.main, ["diff", "--order-parity", "--out", str(tmp / "cmp"),
+                                "--expectations-root", str(tmp / "expectations"),
+                                "--base-run", str(tmp / "base"), "--head-run", str(tmp / "head")])
+            record = json.loads((tmp / "cmp" / "comparison.json").read_text())
+            self.assertEqual(record["leaks_differ"], ["alpha/c2"], record)
+            code, receipt, index = make_report(tmp / "cmp", tmp)
+            self.assertEqual(code, report.EXIT_FAIL)
+            leak = next(f for f in receipt["failures"] if f["kind"] == "order-leak")
+            self.assertEqual((leak["case"], leak["side"]), ("alpha/c2", "a"))
+            self.assertIn("LeakedState on base only", leak["message"])
+            self.assertEqual(leak["pointer"]["from"], "leak")
+            self.assertIn({"kind": "comparison", "path": "comparison.json"}, leak["artifacts"])
+            self.assertTrue(any(a["kind"] == "event" for a in leak["artifacts"]), leak["artifacts"])
+            self.assertNotIn("None found", index)
+
+
+class OrderAndArmTests(unittest.TestCase):
+    def test_a_leak_before_an_unexpected_result_is_the_first_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            common = dict(product="headless", batch_limit=4, jobs=1)
+            run(tmp, ResetDriver(), out=tmp / "probe", run_id="p", **common)
+            order = json.loads((tmp / "probe" / "receipt.json").read_text())["order"]
+            leaking, failing = order[1], order[-1]
+            run(tmp, ResetDriver(leaks={leaking}, script={failing: ["Failure"]}), **common)
+            self.assertEqual(json.loads((tmp / "out" / "receipt.json").read_text())["order"], order)
+            code, receipt, _ = make_report(tmp / "out", tmp)
+            self.assertEqual(code, report.EXIT_FAIL)
+            self.assertEqual([(f["kind"], f["case"]) for f in receipt["failures"]],
+                             [("leaked", leaking), ("unexpected", failing)])
+            self.assertEqual(receipt["first_failure"]["case"], leaking)
+
+    def test_an_arm_never_exercised_is_a_failure_with_a_finding(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            write_corpus(tmp / "corpus")
+            run(tmp, ScriptDriver(), switch="f6", arm="new")
+            self.assertIs(json.loads((tmp / "out" / "receipt.json").read_text())["arm_exercised"], False)
+            code, receipt, index = make_report(tmp / "out", tmp)
+            self.assertEqual(code, report.EXIT_FAIL)
+            first = receipt["first_failure"]
+            self.assertEqual((first["kind"], first["switch"], first["arm"]), ("arm", "f6", "new"))
+            self.assertEqual(first["artifacts"], [{"kind": "receipt", "path": "receipt.json"}])
+            self.assertEqual(receipt["counts"], {"arm": 1})
+            self.assertIn("switch f6 arm new never ran", index.split("## Runs")[0])
 
 
 if __name__ == "__main__":
