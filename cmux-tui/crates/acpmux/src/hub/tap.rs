@@ -118,8 +118,8 @@ impl Hub {
                     if method == crate::agent::HOST_EXIT =>
                 {
                     let code = params.as_ref().and_then(|p| p.get("code")).cloned();
-                    // The idle exit (`idle.rs`) marks the session before it ends the harness.
-                    let hibernating = tap_session.hibernated_at.load(Ordering::SeqCst) != 0;
+                    // The idle exit (`idle.rs`) marks the session while it ends the harness.
+                    let hibernating = tap_session.hibernating.load(Ordering::SeqCst);
                     let intentional = hibernating
                         || matches!(
                             tap_session.status(),

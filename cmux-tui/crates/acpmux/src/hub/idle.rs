@@ -32,6 +32,23 @@
 
 use super::*;
 
+/// One agent request on its way to its answer (`Session::agent_requests`): counted from when the
+/// inbound loop reads it until its task ends.
+pub(super) struct AgentRequest(Arc<Session>);
+
+impl AgentRequest {
+    pub(super) fn new(session: &Arc<Session>) -> Self {
+        session.agent_requests.fetch_add(1, Ordering::SeqCst);
+        Self(session.clone())
+    }
+}
+
+impl Drop for AgentRequest {
+    fn drop(&mut self) {
+        self.0.agent_requests.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Hub {
     /// The hub clock's time, as stored in `Session::last_active`.
     pub(super) fn clock_now(&self) -> u64 {
@@ -54,6 +71,10 @@ impl Hub {
             && session.turn().is_none()
             && session.queued() == 0
             && session.pending_permissions().is_empty()
+            // Nor one whose agent waits on a request of its own (a permission not shown yet).
+            && session.agent_requests.load(Ordering::SeqCst) == 0
+            // Nor one with a sub-session or background subagent at work (`work_below.rs`).
+            && session.work_below_since.lock().map_or(true, |v| *v == 0)
             // A Claude chat with turns but none stored would wake as a fresh conversation with
             // its transcript restored into the prompt (`claude_resume_refusal`): kept awake.
             && !(session.meta().claude_unstored && session.meta().turn_count > 0)
@@ -175,9 +196,15 @@ impl Hub {
                     session.hibernated_at.store(0, Ordering::SeqCst);
                     continue;
                 }
+                session.hibernating.store(true, Ordering::SeqCst);
                 self.detach_child(&session).await;
                 if link_lost {
                     self.end_unadopted_host(&session).await;
+                }
+                session.hibernating.store(false, Ordering::SeqCst);
+                // Stopped meanwhile (`kill` clears the mark): its next start is no wake.
+                if session.status() == SessionStatus::Closed {
+                    session.hibernated_at.store(0, Ordering::SeqCst);
                 }
                 tracing::info!(
                     session = %session.id,
@@ -281,3 +308,7 @@ impl Hub {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "idle_tests.rs"]
+mod idle_tests;

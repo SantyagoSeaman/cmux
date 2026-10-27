@@ -35,7 +35,7 @@ mod handoff;
 mod harness_view;
 mod harness_watch;
 mod health_view;
-mod idle;
+pub(super) mod idle;
 mod launch_roots;
 mod launchers;
 pub mod lineage;
@@ -887,6 +887,8 @@ impl Hub {
             last_active: AtomicU64::new(self.clock_now()),
             hibernated_at: AtomicU64::new(0),
             wake_cause: StdMutex::new(None),
+            hibernating: AtomicBool::new(false),
+            agent_requests: std::sync::atomic::AtomicUsize::new(0),
             web_control_ended: AtomicBool::new(false),
             floor: Default::default(),
             subagents: StdMutex::new(Default::default()),

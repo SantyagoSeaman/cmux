@@ -1698,7 +1698,9 @@ async fn dispatch_request(
         method::MUX_VIEW => {
             let done = view::view(hub, conn, &params)?;
             // Showing a hibernated chat wakes its agent (`hub/idle.rs`).
+            // The person's own view only: an authored one is a collaborator's presence.
             if params.get("visible").and_then(Value::as_bool) == Some(true)
+                && crate::author::author(&params).ok().flatten().is_none()
                 && let Ok(session) = hub.resolve(session_key(&params)?)
             {
                 hub.wake_for(&session, super::trust_gate::for_web(conn.origin, &params), "click");

@@ -58,8 +58,12 @@ impl Hub {
                     // of its own.
                     let ask = (m == method::SESSION_REQUEST_PERMISSION)
                         .then(|| super::permission_groups::AskInFlight::new(&session));
+                    // Counted until its task ends: the idle exit never ends an agent that
+                    // waits on an answer to one of its own requests (`idle.rs`).
+                    let busy = super::idle::AgentRequest::new(&session);
                     tokio::spawn(async move {
-                        hub.on_agent_request(s, id, m, params, epoch, turn_id, ask).await
+                        hub.on_agent_request(s, id, m, params, epoch, turn_id, ask).await;
+                        drop(busy);
                     });
                 }
                 Inbound::Stderr(line, host_seq) => {
@@ -101,8 +105,8 @@ impl Hub {
                     self.processes_lost(&session, processes::HARNESS_EXIT);
                     // So did its background subagents (`work_below.rs`).
                     self.end_background_subagents(&session);
-                    // The idle exit (`idle.rs`) marks the session before it ends the harness.
-                    let hibernating = session.hibernated_at.load(Ordering::SeqCst) != 0;
+                    // The idle exit (`idle.rs`) marks the session while it ends the harness.
+                    let hibernating = session.hibernating.load(Ordering::SeqCst);
                     let intentional = hibernating
                         || matches!(session.status(), SessionStatus::Idle | SessionStatus::Closed);
                     // An agent host's exit was logged before its ack.

@@ -1337,6 +1337,8 @@ impl Hub {
         // Counted first: a start for a request from before this stop ends (`ensure_child`).
         session.stops.fetch_add(1, Ordering::SeqCst);
         session.closing.store(true, Ordering::SeqCst);
+        // Stopped, not hibernated: its next start is no wake (`idle.rs`).
+        session.hibernated_at.store(0, Ordering::SeqCst);
         self.stop_auto_resume(session);
         self.stop_subagent_retries(session, true);
         self.revoke_permission_chat(session);
