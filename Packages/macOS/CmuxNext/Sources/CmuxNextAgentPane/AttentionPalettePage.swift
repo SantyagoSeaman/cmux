@@ -1,5 +1,5 @@
-import CmuxNextActions
-import CmuxNextPalette
+public import CmuxNextActions
+public import CmuxNextPalette
 import Foundation
 
 /// Go to What Needs Me (`attention.goTo`): the command palette's page of the tabs an agent marked as
