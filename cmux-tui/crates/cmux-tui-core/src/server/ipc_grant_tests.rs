@@ -106,6 +106,13 @@ impl Connection {
             .collect()
     }
 
+    /// Whether a ring attach on this connection would get the ring.
+    fn gets_output_ring(&self) -> bool {
+        let state = self.mux.control_clients.state.lock().unwrap();
+        let record = state.clients.get(&self.client).unwrap();
+        grants_output_ring(record, &self.mux.control_clients.ipc_transports)
+    }
+
     /// What the registry keeps for this connection, rule or not.
     fn recorded(&self) -> Vec<&'static str> {
         let state = self.mux.control_clients.state.lock().unwrap();
@@ -269,6 +276,60 @@ fn ipc_grant_needs_what_each_capability_requires() {
         "capabilities":["ipc-frames-v2","attach-streams-v1","attach-frames-v1"]}));
     assert_eq!(reply["ok"], true);
     assert_eq!(local.granted(), &ALL[..3], "an earlier grant counts; the ring was not asked again");
+    mux.shutdown();
+}
+
+/// p05-ipc-111: the ring's descriptor goes only to a direct same-user
+/// process on the Unix socket that holds the grant. Remote, WebSocket,
+/// bridges, pages and unverified peers never get it, whatever they ask for.
+#[test]
+fn ipc_grant_output_ring_attach_only_a_local_same_user_peer_gets_the_ring() {
+    let mux = mux("ipc-grant-ring");
+    let local = Connection::local(&mux);
+    assert!(!local.gets_output_ring(), "not before it asked");
+    assert_eq!(local.ask(13)["ok"], true);
+    assert!(local.gets_output_ring());
+
+    let lane = Connection::local(&mux);
+    origin_gate::set_mobile_host_peer_for_test(&mux, lane.client);
+    let page = Connection::local(&mux);
+    assert!(origin_gate::set_hello(&mux, page.client, HelloRole::PageRelay, None, false, None));
+    let others = [
+        Connection::open(&mux, ClientTransport::WebSocket, PeerProcess::SameUser),
+        Connection::open(&mux, ClientTransport::Remote, PeerProcess::SameUser),
+        Connection::open(&mux, ClientTransport::Unix, PeerProcess::ByteBridge),
+        Connection::open(&mux, ClientTransport::Unix, PeerProcess::Unverified),
+        lane,
+        page,
+    ];
+    for (index, other) in others.iter().enumerate() {
+        other.ask(13);
+        assert!(!other.gets_output_ring(), "connection {index}");
+        assert!(!other.granted().contains(&"terminal-output-ring-v1"));
+    }
+
+    // A later revision ends the grant, and with it the ring.
+    let reply = local.request(json!({"id":3,"cmd":"set-client-info","api_revision":12}));
+    assert_eq!(reply["ok"], true);
+    assert!(!local.gets_output_ring());
+    mux.shutdown();
+}
+
+/// A ring announces its spans in attach frames: a bound ring transport
+/// without bound attach frames is neither advertised nor granted.
+#[test]
+fn ipc_grant_output_ring_attach_needs_its_frames_transport_bound() {
+    let mux = Mux::new_for_test("ipc-grant-ring-alone", crate::SurfaceOptions::default());
+    mux.control_clients.ipc_transports.bind_for_test(IpcCapability::OutputRing);
+    let transports = &mux.control_clients.ipc_transports;
+    assert_eq!(
+        IpcCapability::offered(IpcPeer::Local, true, transports),
+        [IpcCapability::AttachStreams]
+    );
+    let local = Connection::local(&mux);
+    assert_eq!(local.ask(13)["ok"], true);
+    assert_eq!(local.granted(), ["attach-streams-v1"]);
+    assert!(!local.gets_output_ring());
     mux.shutdown();
 }
 

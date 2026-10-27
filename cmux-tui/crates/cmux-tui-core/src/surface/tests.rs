@@ -20,6 +20,8 @@ mod lifecycle;
 mod local_resize_order;
 mod lock_order;
 #[cfg(unix)]
+mod output_ring_attach;
+#[cfg(unix)]
 mod read_loop;
 mod render_geometry;
 #[cfg(unix)]

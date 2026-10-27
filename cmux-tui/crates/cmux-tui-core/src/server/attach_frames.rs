@@ -26,6 +26,14 @@
 //! OUTPUT offsets contiguous across chunks (cmux-ipc/src/lane_writer.rs).
 //! Decoding the frames gives back the JSON events byte for byte; only the
 //! base64 is gone.
+//!
+//! A ring stream (`terminal-output-ring-v1`, p05-ipc-111) carries no output
+//! bytes. Its first frame is one RING, `{"capacity","base","layout"}` with
+//! aux the ring's end when granted, and the ring's read-only descriptor
+//! rides with it (SCM_RIGHTS): [`RingAnnouncement`]. Then each published end
+//! is one empty RING_ADVANCE whose aux is the new end; colors or an echoed
+//! flow follow as the same `output` sidecar EVENT, at that end. The viewer
+//! queue merges advances, so one waits per stream (surface/attach_tap.rs).
 
 use super::AttachWireShape;
 use super::render_service::{
@@ -36,6 +44,9 @@ use crate::AttachFrame;
 use crate::SurfaceId;
 use crate::TerminalColors;
 use crate::surface::AttachResize;
+#[cfg(unix)]
+use crate::surface::OutputRingGrant;
+use crate::surface::RingAdvance;
 use cmux_ipc::{Aux, BadMessage, FrameHeader, FrameKind, MAX_FRAME_PAYLOAD};
 use serde::Serialize;
 use std::io::Write;
@@ -54,6 +65,12 @@ pub(super) enum AttachFrameError {
     Write(std::io::Error),
     /// The payload does not fit one frame.
     Frame(BadMessage),
+    /// A RING_ADVANCE on a stream that announced no ring.
+    NoRing,
+    /// A second RING on one stream: a stream maps one ring.
+    RingAgain,
+    /// A RING_ADVANCE behind the stream's offset: ring ends only grow.
+    RingBehind { end: u64, offset: u64 },
 }
 
 impl std::fmt::Display for AttachFrameError {
@@ -62,6 +79,11 @@ impl std::fmt::Display for AttachFrameError {
             Self::ControlStream => write!(f, "attach frames need a stream other than 0"),
             Self::Write(error) => write!(f, "attach frame payload: {error}"),
             Self::Frame(error) => write!(f, "attach frame: {error}"),
+            Self::NoRing => write!(f, "ring advance on a stream without a ring"),
+            Self::RingAgain => write!(f, "a second ring on one stream"),
+            Self::RingBehind { end, offset } => {
+                write!(f, "ring advance to {end}, behind the stream's offset {offset}")
+            }
         }
     }
 }
@@ -110,7 +132,10 @@ impl From<AttachFrameError> for std::io::Error {
     fn from(error: AttachFrameError) -> Self {
         match error {
             AttachFrameError::Write(error) => error,
-            AttachFrameError::ControlStream => {
+            AttachFrameError::ControlStream
+            | AttachFrameError::NoRing
+            | AttachFrameError::RingAgain
+            | AttachFrameError::RingBehind { .. } => {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
             }
             AttachFrameError::Frame(_) => {
@@ -118,6 +143,37 @@ impl From<AttachFrameError> for std::io::Error {
             }
         }
     }
+}
+
+/// A [`RingAdvance`] that was not encoded, handed back as a
+/// [`RefusedAttachFrame`] is: the stream's offset did not move.
+#[derive(Debug)]
+pub(super) struct RefusedRingAdvance {
+    pub(super) advance: RingAdvance,
+    pub(super) error: AttachFrameError,
+}
+
+impl std::fmt::Display for RefusedRingAdvance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for RefusedRingAdvance {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// A stream's RING frame and the ring's read-only descriptor, which the
+/// writer passes with the frame's first byte (SCM_RIGHTS), so the reader
+/// gets both together and in stream order (app-daemon-connection-DESIGN.md
+/// 4.3). Only a connection granted `terminal-output-ring-v1` gets one
+/// (server/capabilities.rs, `grants_output_ring`).
+#[cfg(unix)]
+pub(super) struct RingAnnouncement {
+    pub(super) frame: BudgetedFrame,
+    pub(super) descriptor: std::os::fd::OwnedFd,
 }
 
 /// A frame payload charged to an outbound byte budget until it drops, as a
@@ -241,6 +297,8 @@ pub(super) struct AttachFrameEncoder {
     shape: AttachWireShape,
     /// Offset of the next output byte.
     offset: u64,
+    /// The stream announced its ring: its output is RING_ADVANCE frames.
+    ring: bool,
 }
 
 impl AttachFrameEncoder {
@@ -255,7 +313,7 @@ impl AttachFrameEncoder {
         if stream == 0 {
             return Err(AttachFrameError::ControlStream);
         }
-        Ok(Self { stream, surface, shape, offset })
+        Ok(Self { stream, surface, shape, offset, ring: false })
     }
 
     /// Offset of the next output byte.
@@ -329,6 +387,81 @@ impl AttachFrameEncoder {
                 .map(EncodedAttachFrame::single),
         };
         encoded.map_err(|error| RefusedAttachFrame { frame: Box::new(frame), error })
+    }
+
+    /// The stream's RING frame for `grant`, which it consumes: the
+    /// descriptor leaves with the frame. Once per stream, before any
+    /// [`Self::ring_advance`].
+    #[cfg(unix)]
+    pub(super) fn ring(
+        &mut self,
+        grant: OutputRingGrant,
+        budget: &Arc<OutboundByteBudget>,
+    ) -> Result<RingAnnouncement, AttachFrameError> {
+        if self.ring {
+            return Err(AttachFrameError::RingAgain);
+        }
+        let mut meta = BudgetedJsonWriter::new(budget.clone());
+        write!(
+            meta,
+            "{{\"capacity\":{},\"base\":{},\"layout\":{}}}",
+            grant.capacity, grant.base, grant.layout
+        )?;
+        let payload = BudgetedBytes::finish(meta);
+        let header = self.header(FrameKind::Ring, payload.bytes.len(), grant.end)?;
+        let frame = BudgetedFrame::new(header, payload)?;
+        self.ring = true;
+        Ok(RingAnnouncement { frame, descriptor: grant.descriptor })
+    }
+
+    /// One RING_ADVANCE to `advance.end`, then the `output` sidecar EVENT of
+    /// its colors or flow at the same offset. The offset moves to the end
+    /// only when every frame of it was encoded.
+    pub(super) fn ring_advance(
+        &mut self,
+        advance: RingAdvance,
+        budget: &Arc<OutboundByteBudget>,
+    ) -> Result<EncodedAttachFrame, RefusedRingAdvance> {
+        match self.encode_ring_advance(&advance, budget) {
+            Ok(encoded) => {
+                self.offset = advance.end;
+                Ok(encoded)
+            }
+            Err(error) => Err(RefusedRingAdvance { advance, error }),
+        }
+    }
+
+    fn encode_ring_advance(
+        &self,
+        advance: &RingAdvance,
+        budget: &Arc<OutboundByteBudget>,
+    ) -> Result<EncodedAttachFrame, AttachFrameError> {
+        if !self.ring {
+            return Err(AttachFrameError::NoRing);
+        }
+        if advance.end < self.offset {
+            return Err(AttachFrameError::RingBehind { end: advance.end, offset: self.offset });
+        }
+        let end = advance.end;
+        let sidecar = if advance.colors.is_some() || advance.flow != 0 {
+            let (surface, shape) = (self.surface, self.shape);
+            Some(self.json_event(end, budget, |writer| {
+                write!(writer, "{{\"event\":\"output\",\"surface\":{surface}")?;
+                write_output_sidecar_fields(
+                    writer,
+                    advance.colors.as_deref(),
+                    advance.flow,
+                    shape,
+                )?;
+                writer.write_all(b"}")
+            })?)
+        } else {
+            None
+        };
+        let header = self.header(FrameKind::RingAdvance, 0, end)?;
+        let frame =
+            BudgetedFrame::new(header, BudgetedBytes::share(&bytes::Bytes::new(), budget)?)?;
+        Ok(EncodedAttachFrame { frame, sidecar })
     }
 
     /// Another attach event (`detached`, `overflow`) as an EVENT frame at
@@ -436,3 +569,7 @@ impl AttachFrameEncoder {
 #[cfg(test)]
 #[path = "attach_frames_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "output_ring_attach_tests.rs"]
+mod output_ring_attach_tests;

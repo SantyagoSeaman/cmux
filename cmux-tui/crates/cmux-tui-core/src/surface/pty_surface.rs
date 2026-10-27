@@ -121,14 +121,16 @@ impl PtySurface {
     /// [`Self::broadcast_attach_output`] of PTY output that echoes the key
     /// press `flow` (0: none): the read that took it from its
     /// [`crate::input_flow::InputFlowSlot`], or the flow the host sent with it.
+    ///
+    /// The bytes are counted in the snapshot offset and then, under the
+    /// `pty.taps` lock, written into the terminal's output ring (when a ring
+    /// viewer made one) before any viewer hears of them: the ring holds the
+    /// parser's bytes in output order at the snapshot offsets.
     pub(super) fn broadcast_attach_output_flow(&self, bytes: &[u8], flow: u64) -> bool {
         cmux_flow_trace::hop("daemon.output.attach", flow, self.flow_terminal_id());
         self.snapshot_position.add_output(bytes.len());
         let mut taps = self.taps.lock().unwrap();
-        let Some(chunk) = taps.output_chunk(bytes) else { return false };
-        let frame = AttachFrame::with_flow(chunk, flow);
-        taps.retain(|tap| tap.try_send(frame.clone()));
-        let sent = !taps.is_empty();
+        let sent = taps.broadcast_output(bytes, flow);
         drop(taps);
         if sent {
             self.mark_attach_output_sent();
@@ -190,7 +192,8 @@ impl PtySurface {
         }
         self.snapshot_position.observe_frame(&frame);
         let mut taps = self.taps.lock().unwrap();
-        taps.retain(|tap| tap.try_send(frame.clone()));
+        // Output it carries goes into the ring at the offset just counted.
+        taps.broadcast_frame(&frame);
         let sent_output = matches!(frame, AttachFrame::OutputWithColors { .. }) && !taps.is_empty();
         drop(taps);
         if sent_output {
