@@ -1,4 +1,5 @@
 import CmuxNextCompat
+public import CmuxNextDaemon
 public import CmuxNextWakeups
 import class CmuxSafeConcurrency.OnceContinuation
 import enum CmuxSafeConcurrency.OnceContinuationError
@@ -95,13 +96,21 @@ public final class AgentPaneShell {
     /// Runs whose spawn is in flight (``run(_:cwd:)`` awaits it): they count against ``maximumRunning``.
     private var spawning = 0
     /// ``terminateAll()`` ran (the pane closed): a run whose spawn returns after it is hung up at once.
-    private var terminated = false
+    var terminated = false
     private var order: [String] = []
-    private let shell: String
-    private let environment: [String: String]
+    let shell: String
+    let environment: [String: String]
     private let home: String
     /// The app's one deadline placer (`AppServices.mainDeadlines`).
-    private let deadlines: MainDeadlineScheduler
+    let deadlines: MainDeadlineScheduler
+    /// The local daemon's app children when `appChildrenInDaemon` is on (AgentPaneShell+Daemon.swift); nil, or a
+    /// daemon that does not serve them: a run is this app's child.
+    public var daemonChildren: (@MainActor () -> (any AppChildServing)?)?
+    /// The daemon's tag for this pane's jobs (`app-child-list`).
+    public var daemonOwner = "agent-pane"
+    /// This pane's daemon jobs by id, and their order.
+    var daemonRuns: [String: DaemonRun] = [:]
+    var daemonOrder: [String] = []
     /// Spawns this pane's commands, in order, off the main actor: a command a person started shows soon.
     let launcher = ChildProcessLauncher(label: "com.cmuxterm.next.child-launcher.agent-shell", priority: .userVisible)
 
@@ -132,10 +141,16 @@ public final class AgentPaneShell {
     /// Starts `command` in `cwd` (the home folder when nil) and returns its id. The spawn runs on
     /// ``launcher``, never on the main actor.
     public func run(_ command: String, cwd: String?) async throws(Failure) -> String {
-        guard runs.values.filter({ $0.exit == nil }).count + spawning < Self.maximumRunning else { throw .tooMany }
+        let running = runs.values.filter({ $0.exit == nil }).count + daemonRuns.values.filter(\.running).count
+        guard running + spawning < Self.maximumRunning else { throw .tooMany }
         let folder = cwd ?? home
         guard AcpmuxPathPolicy.isDirectory(folder) else {
             throw .folderMissing
+        }
+        if let children = daemonChildren?() {
+            spawning += 1
+            defer { spawning -= 1 }
+            if await children.isServed { return try await runInDaemon(command, folder: folder, children: children) }
         }
         var pipe: [Int32] = [-1, -1]
         // SAFETY: pipe writes its two descriptors into the array's own storage (two Int32), lent for the call.
@@ -204,7 +219,11 @@ public final class AgentPaneShell {
 
     /// Output after `after`, waiting up to ``readWait`` for some when there is none yet.
     public func read(_ id: String, after: Int) async throws(Failure) -> Chunk {
-        guard let run = runs[id] else { throw .unknownRun }
+        guard let run = runs[id] else {
+            // A daemon job: this pane's, or one the page started before the app relaunched.
+            guard let children = daemonChildren?() else { throw .unknownRun }
+            return try await readInDaemon(id, after: after, children: children)
+        }
         if !run.hasNews(after: after) {
             let token = UUID()
             let deadline = MainDeadline(owner: "agent-pane.shell.read", workClass: .visible, scheduler: deadlines)
@@ -223,6 +242,9 @@ public final class AgentPaneShell {
     /// Interrupts the command's process group, as Ctrl-C in a terminal does; what ignores it is
     /// terminated, then killed.
     public func stop(_ id: String) {
+        if daemonRuns[id]?.running == true, let children = daemonChildren?() {
+            return stopInDaemon(id, mode: .interrupt, children: children)
+        }
         guard let run = runs[id], run.exit == nil, !run.stopping else { return }
         run.stopping = true
         let group = -run.pid
@@ -242,13 +264,16 @@ public final class AgentPaneShell {
 
     /// A command ran in this pane (running, starting, or its output kept): closing the pane ends it or drops
     /// its output.
-    public var hasRuns: Bool { !runs.isEmpty || spawning > 0 }
+    public var hasRuns: Bool { !runs.isEmpty || !daemonRuns.isEmpty || spawning > 0 }
 
     /// Ends every running command (the pane closed): hangup, as a closed terminal sends. A command whose
     /// spawn is still in flight is hung up when it returns.
     public func terminateAll() {
         terminated = true
         for run in runs.values where run.exit == nil { hangUp(run) }
+        if let children = daemonChildren?() {
+            for (id, run) in daemonRuns where run.running { stopInDaemon(id, mode: .hangup, children: children) }
+        }
     }
 
     private func hangUp(_ run: Run) {

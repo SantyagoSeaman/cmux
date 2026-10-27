@@ -607,6 +607,9 @@ impl ClientRegistry {
         // record still goes, so a fail-closed close never panics here.
         let mut state = self.state.lock().recover_poison();
         let record = state.clients.remove(&client)?;
+        #[cfg(unix)]
+        let last_app_left = super::app_children::is_app(&record)
+            && !state.clients.values().any(super::app_children::is_app);
         // After the record goes: a start that ends later sees the connection gone.
         #[cfg(unix)]
         self.browser_runtimes.disconnect(client);
@@ -624,6 +627,10 @@ impl ClientRegistry {
             }
         }
         drop(state);
+        #[cfg(unix)]
+        if last_app_left {
+            self.app_children.last_app_left();
+        }
         if detached {
             self.notify_detach();
         }

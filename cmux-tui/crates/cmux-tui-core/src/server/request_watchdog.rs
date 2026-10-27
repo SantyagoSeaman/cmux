@@ -188,11 +188,12 @@ pub(crate) enum FrameStage {
     Scripts,
     Fs,
     RemoteRelay,
+    AppChildren,
 }
 
 impl FrameStage {
     /// Every stage, in declaration order (`stage as usize` is its index).
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Route,
         Self::PageRouter,
         Self::LoopbackForward,
@@ -208,6 +209,7 @@ impl FrameStage {
         Self::Scripts,
         Self::Fs,
         Self::RemoteRelay,
+        Self::AppChildren,
     ];
 
     const fn name(self) -> &'static str {
@@ -227,6 +229,7 @@ impl FrameStage {
             Self::Scripts => "frame:scripts",
             Self::Fs => "frame:fs",
             Self::RemoteRelay => "frame:remote-relay",
+            Self::AppChildren => "frame:app-children",
         }
     }
 }

@@ -9847,6 +9847,69 @@ answers `{stopped:true}`; a host still running 5 s later is killed with its
 process group. A runtime of another connection, or one already stopped, is
 `browser-runtime.unknown`.
 
+## App children
+
+`app-children-v1` (advertised by `identify`) lets the cmux app run its
+long-lived child processes under the daemon: an agent pane's shell-mode
+command, the VS Code `serve-web` server. They outlive an app crash, and the
+relaunched app finds them with `app-child-list`. Only the verified app
+connection (a Unix connection whose `client-hello` declared role `main` and
+passed its proof) may use these commands; every other connection gets
+`app-child.forbidden`, and the remote relay refuses them. The children belong
+to the app, not to one connection.
+
+The lifeline rule: when the last verified app connection ends, a 30 s grace
+starts. Any `app-child-*` command from an app in the grace adopts the
+children; otherwise, at its end, every child is terminated. The daemon's own
+end terminates every child. Each child runs in its own process group with
+stdout and stderr in one pipe; the daemon keeps its last 1 MiB of output.
+Limits: 32 running children, 96 kept (finished ones dropped oldest first),
+16 parked reads per child (`app-child.limit`).
+
+### app-child-start
+
+`{id, cmd:"app-child-start", name, owner?, executable, args?, env?, cwd?,
+stdin?, secret?, ready?, ready_timeout_ms?}` starts `executable` (an
+absolute path) with `args` and exactly the environment `env` (an object of
+strings; nothing of the daemon's is inherited) in `cwd`. `stdin` is `null`
+(/dev/null, the default) or `lifeline` (a pipe the daemon keeps open; the
+child sees its end when it is stopped or the daemon ends). `secret:true`
+(only with `lifeline`) writes a fresh 64-hex-character secret as its first
+line. Without `ready` the reply comes once the child runs; with `ready`, once
+an output line contains that text (at most `ready_timeout_ms`, default 60 s,
+at most 120 s), or the start fails with `app-child.not-ready` and the child
+is stopped. Reply: `{child, pid, secret?, ready_line?}`. Errors:
+`app-child.bad-request`, `app-child.folder-missing`,
+`app-child.spawn-failed`, `app-child.not-ready`, `app-child.limit`.
+
+### app-child-read
+
+`{id, cmd:"app-child-read", child, after?, wait_ms?, until_exit?}` answers
+`{output, next, truncated?, exit?}`: the output from offset `after` (at most
+256 KiB, whole UTF-8 characters only while the child runs), the offset to
+read from next, `truncated` when output before `after` was dropped, and
+`exit` (`{code?, signal?}`) once the child ended and every byte was read. With
+no news it waits up to `wait_ms` (at most 10 s) for output or the end;
+`until_exit:true` answers only once the child finished, with no deadline.
+
+### app-child-stop
+
+`{id, cmd:"app-child-stop", child, mode?}` answers `{stopped:true}`.
+`terminate` (default) closes the lifeline and sends SIGTERM to the group,
+then SIGKILL after 5 s; `interrupt` sends SIGINT, then SIGTERM and SIGKILL
+2 s apart; `hangup` sends SIGHUP and SIGCONT. A child that already ended is
+not an error; an unknown one is `app-child.unknown`.
+
+### app-child-list
+
+`{id, cmd:"app-child-list", owner?}` answers `{children}`, oldest first:
+`{child, pid, name, owner, running, secret?, ready_line?}`.
+
+### app-child-release-all
+
+`{id, cmd:"app-child-release-all"}` terminates every running child (a clean
+quit) and answers `{stopped}`, how many were running.
+
 ## Agent session attach
 
 `agent-session-attach-v1` lets a trusted local (Unix) client show and drive an

@@ -113,6 +113,8 @@ pub(super) const MODULE_ROUTES: &[&[Route]] = &[
     #[cfg(unix)]
     super::scripts::ROUTES,
     #[cfg(unix)]
+    super::app_children::ROUTES,
+    #[cfg(unix)]
     super::fs_wire::ROUTES,
 ];
 

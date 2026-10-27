@@ -1,0 +1,14 @@
+{
+  "$schema": "../features.schema.json",
+  "name": "appChildrenInDaemon",
+  "owner": "PL-daemon",
+  "description": "The app's long-lived children (agent pane shell-mode commands, the VS Code serve-web server) run as children of the cmux-tui daemon (app-children-v1), so they keep running and keep their output and URL when the app crashes; the daemon ends them when the app quits or does not come back within 30 s.",
+  "defaults": { "dev": false, "nightly": false, "release": false },
+  "kind": "perfPath",
+  "expires": "2026-12-20",
+  "process": "app",
+  "params": [],
+  "stories": ["memory-hidden"],
+  "sticky": false,
+  "runtimeMutable": false
+}

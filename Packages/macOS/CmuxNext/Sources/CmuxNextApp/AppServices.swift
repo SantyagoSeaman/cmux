@@ -706,12 +706,10 @@ final class AppServices {
     let launchValues = LaunchValueMarks { LaunchMarkSink.shared.writeValue(name: $0, value: $1) }
     /// Every tab switch's `switch.tab` trace pair, in every build (`DebugTabSwitch`); tests replace it.
     var tabSwitch = TabSwitchSignpost()
-    /// The inline VS Code server (`serve-web`) behind VS Code (Inline); starts on first use.
-    let vscodeServeWeb = VSCodeServeWebService(
-        planner: VSCodeServeWebLaunchPlanner(homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
-                                             environment: ProcessInfo.processInfo.environment),
-        launcher: VSCodeServeWebProcessLauncher(), tokenDirectory: FileManager.default.temporaryDirectory
-    )
+    /// The local daemon's app children (`appChildrenInDaemon`, p01-process-239): serve-web and shell mode run there.
+    let appChildren = AppChildSlot()
+    /// The inline VS Code server (`serve-web`) behind VS Code (Inline); starts on first use, in the daemon when it can.
+    let vscodeServeWeb: VSCodeServeWebService
     /// The browser host's engine provider (idle until the daemon offers the endpoint).
     private(set) var browserHost: AppBrowserHost?
     /// Remote-terminal tabs: mount, placeholder, snapshot, moves.
@@ -764,6 +762,9 @@ final class AppServices {
         (mainDeadlines, appVisibility) = (MainDeadlineScheduler(work: mainWork), AppVisibilitySource(appEvents: appEvents, workspaceEvents: workspaceEvents, isAppHidden: NSApp?.isHidden ?? false))
         updater = UpdaterService(work: work, deadlines: mainDeadlines, checkNode: appVisibility.node)
         let launchFeatures = features ?? Self.launchFeatures(environment)
+        vscodeServeWeb = VSCodeServeWebService(
+            planner: VSCodeServeWebLaunchPlanner(homeDirectory: FileManager.default.homeDirectoryForCurrentUser, environment: ProcessInfo.processInfo.environment),
+            launcher: VSCodeServeWebDaemonLauncher(children: appChildren, fallback: VSCodeServeWebProcessLauncher()), tokenDirectory: FileManager.default.temporaryDirectory)
         // In host mode one Chromium Host serves every tab of every profile (p01-process-080).
         let hostSupervisor = Self.chromiumHostSupervisor(work: work, mainWork: mainWork, features: launchFeatures)
         chromiumRuntime = ChromiumRuntimeService.make(work: work, hostSupervisor: hostSupervisor)
@@ -815,6 +816,9 @@ final class AppServices {
         pages.findWindow = { [weak self] key in self.flatMap { $0.pages.window(showing: key, among: $0.windows.controllers) } }  // a page tab whose window closed
         pages.showsStandIns = self.features.isEnabled(.pageStandIn)
         pages.sharesChromiumWindows = self.features.isEnabled(.pageTabsShareChromiumWindow)
+        if self.features.isEnabled(.appChildrenInDaemon) {
+            appChildren.resolve { [weak daemon = self.daemon] in daemon?.connection.map(AppChildClient.init(connection:)) }
+        }
         DebugTimings.markLaunch("services.cache")
         let runtime = GhosttyRuntime.shared
         let previousConfigChange = runtime.onConfigChange

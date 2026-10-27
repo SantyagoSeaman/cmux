@@ -325,6 +325,10 @@ pub(crate) struct ClientRegistry {
     /// Connection-scoped browser hosts (`browser-runtime-v1`).
     #[cfg(unix)]
     pub(super) browser_runtimes: super::browser_runtime::BrowserRuntimes,
+    /// The app's long-lived children (`app-children-v1`), owned by the
+    /// daemon under the lifeline rule (app_children.rs).
+    #[cfg(unix)]
+    pub(crate) app_children: Arc<super::app_children::AppChildren>,
     /// Chief engine-file writes queued by registry commits (chief_engine_mirror.rs).
     pub(super) engine_mirror: super::chief_engine_mirror::EngineMirror,
     /// Size leases of connections with `size-lease-v1` (size_lease.rs).
@@ -400,6 +404,8 @@ impl ClientRegistry {
             loopback: loopback_forward::LoopbackForwarder::default(),
             #[cfg(unix)]
             browser_runtimes: Default::default(),
+            #[cfg(unix)]
+            app_children: Default::default(),
             engine_mirror: Default::default(),
             size_leases: Default::default(),
             #[cfg(unix)]

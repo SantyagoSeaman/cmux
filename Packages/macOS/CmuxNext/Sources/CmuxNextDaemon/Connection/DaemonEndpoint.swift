@@ -181,6 +181,9 @@ public enum DaemonCapability: String, CaseIterable, Sendable {
     /// (`browser-runtime-*`, cx-2cob slice 2); the app reaches it through
     /// `loopbackForward` on the same connection (`LoopbackForwardClient`).
     case browserRuntime = "browser-runtime-v1"
+    /// The daemon runs the app's long-lived children (`app-child-*`, p01-process-239):
+    /// shell-mode commands and `serve-web` outlive an app crash (``AppChildClient``).
+    case appChildren = "app-children-v1"
     /// `source` on notifications (cli, terminal, agent, daemon), and OSC 9,
     /// OSC 777 and OSC 99 parsed by the daemon from every terminal's output
     /// (plans/cmux-next/notifications.md).

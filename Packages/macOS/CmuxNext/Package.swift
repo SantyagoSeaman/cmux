@@ -1006,12 +1006,13 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
         // (Inline) and Stop/Restart VS Code Inline Server. The App opens its URL in a browser tab.
         .target(
             name: "CmuxNextVSCodeServer",
-            dependencies: ["CmuxNextCompat", "CmuxNextWakeups"],
+            // CmuxNextDaemon: serve-web as a daemon child (`app-children-v1`, p01-process-239).
+            dependencies: ["CmuxNextCompat", "CmuxNextDaemon", "CmuxNextWakeups"],
             swiftSettings: daemonSwiftSettings
         ),
         .testTarget(
             name: "CmuxNextVSCodeServerTests",
-            dependencies: ["CmuxNextVSCodeServer"],
+            dependencies: ["CmuxNextVSCodeServer", "CmuxNextDaemon"],
             swiftSettings: daemonSwiftSettings
         ),
         // Chromium warm start: maps the framework and runs CefInitialize and the

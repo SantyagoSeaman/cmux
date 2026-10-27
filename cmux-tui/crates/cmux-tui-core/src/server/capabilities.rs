@@ -377,6 +377,8 @@ fn always_identified() -> Vec<&'static str> {
     capabilities.push(crate::apps::AGENT_INVENTORY_INVALIDATION_CAPABILITY);
     #[cfg(unix)]
     capabilities.push(client_registry::machine_catalog::CAPABILITY);
+    #[cfg(unix)]
+    capabilities.push(app_children::CAPABILITY);
     capabilities
 }
 

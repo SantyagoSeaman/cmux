@@ -206,6 +206,7 @@ impl BrowserRuntimes {
 impl super::ClientRegistry {
     /// Binds the mux whose work stops browser hosts.
     pub(crate) fn bind_browser_runtime_owner(&self, mux: Weak<Mux>) {
+        self.app_children.bind(mux.clone());
         let _ = self.browser_runtimes.owner.set(mux);
     }
 }
