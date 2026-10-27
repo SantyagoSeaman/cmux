@@ -17,6 +17,7 @@ struct QuitCompletionDrainTests {
         QuitSteps(
             remember: { _ in log.steps.append("remember") },
             prepareWindows: { log.steps.append("prepareWindows") },
+            releaseAppChildren: { log.steps.append("releaseAppChildren") },
             endLocalSessions: { _ in
                 log.steps.append("endLocalSessions")
                 return failures
@@ -44,7 +45,7 @@ struct QuitCompletionDrainTests {
     @Test func keepDrainsOnceAfterTheLastSaveInsideTheDeadline() async {
         let log = Log()
         await QuitCompletion.run(.keep, remember: true, Self.steps(log))
-        #expect(log.steps == ["remember", "prepareWindows"] + Self.tail)
+        #expect(log.steps == ["remember", "prepareWindows", "releaseAppChildren"] + Self.tail)
     }
 
     @Test func anEndWithARetryStillDrainsOnceAtTheEnd() async {
@@ -52,8 +53,21 @@ struct QuitCompletionDrainTests {
         let failure = EndSessionsFailure(step: .shutdownDaemon, message: "busy")
         await QuitCompletion.run(.endKeepLayout, remember: false, Self.steps(log, failures: [failure]))
         let end = ["endLocalAgents", "endLocalSessions", "confirm"]
-        #expect(log.steps == ["prepareWindows"] + end + end + Self.tail)
+        #expect(log.steps == ["prepareWindows", "releaseAppChildren"] + end + end + Self.tail)
         #expect(log.steps.filter { $0 == "beginDrain" }.count == 1)
         #expect(log.steps.filter { $0 == "finishDrain" }.count == 1)
+    }
+
+    /// p01-process-239: every clean quit, kept sessions too, ends the app's daemon children once, before the
+    /// sessions end and before the deadline, so none waits out the daemon's grace.
+    @Test func everyCleanQuitReleasesTheAppChildrenOnceBeforeTheEnd() async {
+        for choice in [QuitSessionsChoice.keep, .endKeepLayout] {
+            let log = Log()
+            await QuitCompletion.run(choice, remember: false, Self.steps(log))
+            #expect(log.steps.filter { $0 == "releaseAppChildren" }.count == 1)
+            let release = log.steps.firstIndex(of: "releaseAppChildren") ?? .max
+            #expect(release < (log.steps.firstIndex(of: "endLocalSessions") ?? .max))
+            #expect(release < (log.steps.firstIndex(of: "armDeadline") ?? .max))
+        }
     }
 }

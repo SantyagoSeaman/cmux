@@ -48,6 +48,30 @@ struct AgentPaneShellDaemonTests {
         #expect(stops.contains(FakeShellChildren.Stop(child: second, mode: .hangup)))
     }
 
+    /// After a relaunch the page reads a job the new shell never started: Stop interrupts it and closing the pane
+    /// hangs it up, as for the jobs this shell started.
+    @Test func aFreshShellStopsAndHangsUpAJobItDidNotStart() async throws {
+        let children = FakeShellChildren()
+        await children.answer("old", AppChildChunk(output: "tick\n", next: 5))
+        let shell = Self.shell(children)
+        _ = try await shell.read("old", after: 0)
+        #expect(shell.hasRuns, "the running job the page reads is this pane's again")
+        shell.stop("old")
+        await children.waitForStops(1)
+        shell.terminateAll()
+        await children.waitForStops(2)
+        #expect(await children.stops == [FakeShellChildren.Stop(child: "old", mode: .interrupt),
+                                         FakeShellChildren.Stop(child: "old", mode: .hangup)])
+    }
+
+    @Test func aStopOfAJobThisShellNeverSawStillReachesTheDaemon() async {
+        let children = FakeShellChildren()
+        let shell = Self.shell(children)
+        shell.stop("from-before-the-relaunch")
+        await children.waitForStops(1)
+        #expect(await children.stops == [FakeShellChildren.Stop(child: "from-before-the-relaunch", mode: .interrupt)])
+    }
+
     @Test func endedJobsFreeTheirRunningSlots() async throws {
         let children = FakeShellChildren()
         let shell = Self.shell(children)
@@ -153,4 +177,6 @@ actor FakeShellChildren: AppChildServing {
     }
 
     func list(owner: String?) async throws -> [AppChildRow] { [] }
+
+    func releaseAll() async throws -> Int { 0 }
 }

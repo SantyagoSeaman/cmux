@@ -7,6 +7,8 @@ public protocol AppChildServing: Sendable {
     func exit(of child: String) async throws -> AppChildChunk.Exit?
     func stop(_ child: String, mode: AppChildStopMode) async throws
     func list(owner: String?) async throws -> [AppChildRow]
+    /// Ends every child at once (a clean quit); how many were running.
+    func releaseAll() async throws -> Int
 }
 
 extension AppChildClient: AppChildServing {}

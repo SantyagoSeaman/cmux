@@ -242,10 +242,12 @@ public final class AgentPaneShell {
     /// Interrupts the command's process group, as Ctrl-C in a terminal does; what ignores it is
     /// terminated, then killed.
     public func stop(_ id: String) {
-        if daemonRuns[id]?.running == true, let children = daemonChildren?() {
+        guard let run = runs[id] else {
+            // A daemon job: this pane's, or one the page started before the app relaunched (stop by id).
+            guard daemonRuns[id]?.running != false, let children = daemonChildren?() else { return }
             return stopInDaemon(id, mode: .interrupt, children: children)
         }
-        guard let run = runs[id], run.exit == nil, !run.stopping else { return }
+        guard run.exit == nil, !run.stopping else { return }
         run.stopping = true
         let group = -run.pid
         kill(group, SIGINT)

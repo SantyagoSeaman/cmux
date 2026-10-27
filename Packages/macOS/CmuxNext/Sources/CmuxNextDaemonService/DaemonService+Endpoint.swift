@@ -15,9 +15,15 @@ extension DaemonService {
     /// The socket for dedicated terminal attachments (re-read on reconnect).
     public func endpoint() async throws -> DaemonEndpoint {
         if policyBlock.isBlocked { throw DaemonError.endpointBlocked("turned off by your organization") }
-        if connection == nil, startup == .connecting, isStarting { await firstConnection() }
+        await connectedOrStartupEnded()
         guard let connection, let endpoint = await connection.endpoint else { throw DaemonError.notConnected }
         return endpoint
+    }
+
+    /// Returns once the first connection exists or startup gave up (its startup deadline bounds the wait): at
+    /// once when connected, when a connection that existed dropped, or when the service is not starting.
+    public func connectedOrStartupEnded() async {
+        if connection == nil, startup == .connecting, isStarting { await firstConnection() }
     }
 }
 

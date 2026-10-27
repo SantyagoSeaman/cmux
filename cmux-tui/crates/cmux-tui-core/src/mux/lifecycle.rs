@@ -149,9 +149,10 @@ impl Mux {
         // Held start adoptions end: each posts a retry that sees shutdown.
         self.release_startup_adoptions();
         // The app's children end with the daemon (app_children.rs, the
-        // lifeline rule); their stop escalations are continue items.
+        // lifeline rule): SIGTERM, a bounded wait for their exits, then
+        // SIGKILL here, since the usual escalation is a continue item.
         #[cfg(unix)]
-        self.control_clients.app_children.terminate_all();
+        self.control_clients.app_children.end_with_daemon();
         // Block items (a Chief engine file save) and started skip items (a
         // browser-runtime status read) finish; queued skip items and every
         // continue item (an acpmux ask, a git item or a listening-port

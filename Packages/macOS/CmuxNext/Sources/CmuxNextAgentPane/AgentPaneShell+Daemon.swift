@@ -24,18 +24,13 @@ extension AgentPaneShell {
             throw Self.failure(error)
         }
         let id = started.child
-        let run = DaemonRun()
-        daemonRuns[id] = run
-        daemonOrder.append(id)
-        evictDaemonRuns()
-        watchExit(of: id, run: run, children: children)
-        // The pane closed while the job started: hang it up as terminateAll() did the others.
-        if terminated { stopInDaemon(id, mode: .hangup, children: children) }
+        track(id, children: children)
         return id
     }
 
     /// The daemon job's output after `after`; a job this pane did not start (the app relaunched since)
-    /// is read the same way.
+    /// is read the same way, and its first answer while it runs makes it this pane's job again, so Stop,
+    /// closing the pane and the running cap cover it as they cover the jobs it started.
     func readInDaemon(_ id: String, after: Int, children: any AppChildServing) async throws(Failure) -> Chunk {
         let chunk: AppChildChunk
         do {
@@ -43,8 +38,20 @@ extension AgentPaneShell {
         } catch {
             throw Self.failure(error)
         }
+        if daemonRuns[id] == nil, chunk.exit == nil { track(id, children: children) }
         return Chunk(output: chunk.output, next: Int(clamping: chunk.next), truncated: chunk.truncated,
                      exit: chunk.exit.map { Exit(code: $0.code, signal: $0.signal) })
+    }
+
+    /// Makes daemon job `id` this pane's: its end is watched, and a pane that closed meanwhile hangs it up as
+    /// terminateAll() did the others.
+    private func track(_ id: String, children: any AppChildServing) {
+        let run = DaemonRun()
+        daemonRuns[id] = run
+        daemonOrder.append(id)
+        evictDaemonRuns()
+        watchExit(of: id, run: run, children: children)
+        if terminated { stopInDaemon(id, mode: .hangup, children: children) }
     }
 
     /// Stops a daemon job; the daemon escalates `interrupt` to SIGTERM and SIGKILL as ``stop(_:)`` does.

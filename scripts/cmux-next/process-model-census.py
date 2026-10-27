@@ -15,7 +15,9 @@ Finds the tagged app and every process of its process model, by executable path 
   chromium_helper  `<bundle>/Contents/Frameworks/<product> Helper*.app/...` (CEF helpers of the app or the host)
   other            any other process under a cmux process that runs from the bundle (acpmux, cmux-cua, ...)
   children         processes under a cmux process from outside the bundle (shells, agents): reported, never
-                   part of cmux's totals
+                   part of cmux's totals. `children.under_daemon` lists the daemon's own direct children with their
+                   argv: the app's children it runs (app-children-v1: shell-mode commands, serve-web) and the shells
+                   of in-process terminals, so a check can name what a clean quit left (app-crash-survival.py)
 
 Hosts and the holder are not children of the app (they leave the daemon's session and outlive restarts), so
 they are matched by the owner argument the daemon gives them (terminal_host_runtime/unix/host_session.rs,
@@ -96,6 +98,9 @@ THREAD_DOC_SECTION = "## Registered threads and queues"
 THREAD_DOC_TABLE = "thread / queue"  # the owner table's first header cell
 ROLES = ("app", "daemon", "holder", "vt_worker", "terminal_host", "chromium_host", "chromium_helper", "other")
 CMUX_ROLES = ROLES  # what totals count; `children` (shells, agents) never
+# `children.under_daemon`: at most this many rows, each argv cut to this many characters.
+UNDER_DAEMON_ROWS = 64
+UNDER_DAEMON_ARGS = 300
 TERMINAL_ROLES = ("holder", "vt_worker", "terminal_host")
 RUST_ROLES = ("daemon", "holder", "vt_worker", "terminal_host")
 HOST_ARG, HOLDER_ARG, VT_WORKER_ARG, OWNER_FLAG = "__terminal-host", "__holder", "__vt-worker", "--owner"
@@ -739,6 +744,10 @@ def census(procs, target, session=None, samples=None, baseline=None, sampling=No
             "pids": sorted(p.pid for p in members),
         }
     children = report_roles.pop("children")
+    daemons = {pid for pid, role in roles.items() if role == "daemon"}
+    under_daemon = [{"pid": p.pid, "ppid": p.ppid, "args": p.args[:UNDER_DAEMON_ARGS]}
+                    for p in sorted(procs, key=lambda p: p.pid)
+                    if p.ppid in daemons and roles.get(p.pid) in ("children", "other")][:UNDER_DAEMON_ROWS]
     cmux = [p for p in procs if roles.get(p.pid) in CMUX_ROLES]
     total_unique = unique_kb(cmux)
     terminal_unique = unique_kb([p for p in cmux if roles[p.pid] in TERMINAL_ROLES])
@@ -774,7 +783,8 @@ def census(procs, target, session=None, samples=None, baseline=None, sampling=No
         "session": {k: session.get(k) for k in ("shape", "terminals", "hidden_terminals", "workspaces", "build")
                     if k in session},
         "roles": report_roles,
-        "children": {"processes": children["processes"], "threads": children["threads"], "rss_mb": children["rss_mb"]},
+        "children": {"processes": children["processes"], "threads": children["threads"], "rss_mb": children["rss_mb"],
+                     "under_daemon": under_daemon},
         "threads_by_name": threads_by_name,
         "per_object_threads": dict(per_object.most_common()),
         "per_hidden_terminal_mb": per_hidden,

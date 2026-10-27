@@ -817,7 +817,8 @@ final class AppServices {
         pages.showsStandIns = self.features.isEnabled(.pageStandIn)
         pages.sharesChromiumWindows = self.features.isEnabled(.pageTabsShareChromiumWindow)
         if self.features.isEnabled(.appChildrenInDaemon) {
-            appChildren.resolve { [weak daemon = self.daemon] in daemon?.connection.map(AppChildClient.init(connection:)) }
+            appChildren.resolve(with: { [weak daemon = self.daemon] in daemon?.connection.map(AppChildClient.init(connection:)) },
+                                firstConnection: { [weak daemon = self.daemon] in await daemon?.connectedOrStartupEnded() })
         }
         DebugTimings.markLaunch("services.cache")
         let runtime = GhosttyRuntime.shared

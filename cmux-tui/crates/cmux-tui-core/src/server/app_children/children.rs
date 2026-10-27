@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use cmux_process::{Command, Stdio};
-use cmux_threads::sync::Mutex;
+use cmux_threads::sync::{Condvar, Mutex};
 use cmux_threads::work::{Lane, Priority, Shutdown};
 use serde_json::{Value, json};
 
@@ -46,6 +46,12 @@ pub(crate) const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 /// After the child exits, how long its pipe may still drain; a background
 /// process that keeps the pipe open does not hold the output open past it.
 pub(crate) const DRAIN_AFTER_EXIT: Duration = Duration::from_millis(250);
+/// The daemon's end: how long its children get after SIGTERM before the
+/// groups still running are killed (Chrome's
+/// `ChildProcessLauncherHelper::ForceNormalProcessTerminationSync` waits the
+/// same way before its SIGKILL, content/browser/
+/// child_process_launcher_helper_posix.cc).
+pub(crate) const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 /// How a child ended.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -188,6 +194,8 @@ pub(crate) type ReadReply = Box<dyn FnOnce(Chunk) + Send>;
 
 struct Waiter {
     token: u64,
+    /// The connection that parked it: its close drops the read.
+    client: u64,
     after: u64,
     /// Answer only once the child finished (no deadline).
     until_exit: bool,
@@ -225,8 +233,20 @@ impl Child {
         self.exit.is_some() && self.output_closed
     }
 
+    /// News for a read from `after`: whole characters past it, or the end.
+    /// A trailing partial character is not news while the child runs, so a
+    /// child that stops after half a character parks its readers instead of
+    /// answering each of them at once with nothing ([`Self::chunk`] holds
+    /// those bytes back).
     fn has_news(&self, after: u64) -> bool {
-        self.end() > after || self.finished()
+        self.finished() || self.complete_end() > after
+    }
+
+    /// The offset after the buffer's last whole UTF-8 character.
+    fn complete_end(&self) -> u64 {
+        let tail = self.buffer.len().min(4);
+        let last: Vec<u8> = self.buffer.range(self.buffer.len() - tail..).copied().collect();
+        self.end() - (tail - utf8_complete(&last)) as u64
     }
 
     fn chunk(&self, after: u64) -> Chunk {
@@ -316,6 +336,8 @@ struct State {
     next_token: u64,
     /// Bumped by every grace start and by an app's return (app_children.rs).
     grace_generation: u64,
+    /// A grace is armed and has not ended (app_children.rs).
+    grace_armed: bool,
     /// The grace a test set; else `app_children::APP_GRACE`.
     #[cfg(test)]
     grace: Option<Duration>,
@@ -348,6 +370,9 @@ impl State {
 #[derive(Default)]
 pub(crate) struct AppChildren {
     state: Mutex<State>,
+    /// Signalled at every child's exit: the daemon's end waits on it
+    /// ([`AppChildren::end_with_daemon`]).
+    exits: Condvar,
     /// The mux whose work, reaper and read loop the children use; bound
     /// once it is built.
     owner: OnceLock<Weak<Mux>>,
@@ -450,7 +475,16 @@ impl AppChildren {
         state.children.insert(id.clone(), child);
         state.order.push_back(id.clone());
         state.evict();
+        let grace_armed = state.grace_armed;
         drop(state);
+        if mux.daemon_shutdown_requested() {
+            // The daemon's end took its list before this child was in it.
+            signal_group(pid, libc::SIGKILL);
+        } else if !grace_armed && !super::app_connected(mux) {
+            // The app left while this start was in flight and found nothing
+            // running then: the lifeline rule still applies to this child.
+            self.last_app_left();
+        }
         if let Some((reply, started)) = immediate {
             reply(Ok(started));
         } else {
@@ -525,6 +559,7 @@ impl AppChildren {
     pub(crate) fn read(
         self: &Arc<Self>,
         mux: &Mux,
+        client: u64,
         id: &str,
         after: u64,
         wait: ReadWait,
@@ -548,7 +583,7 @@ impl AppChildren {
             return Err(ChildError::Limit);
         }
         let until_exit = wait == ReadWait::UntilExit;
-        child.waiters.push(Waiter { token, after, until_exit, reply });
+        child.waiters.push(Waiter { token, client, after, until_exit, reply });
         drop(state);
         let ReadWait::For(wait) = wait else { return Ok(()) };
         let children = Arc::downgrade(self);
@@ -569,6 +604,27 @@ impl AppChildren {
             self.expire(id, token);
         }
         Ok(())
+    }
+
+    /// Connection `client` closed: its parked reads go with it, unanswered.
+    /// An exit watch has no deadline, so without this every app life that
+    /// watched a long-lived child would keep a slot of its
+    /// [`MAX_WAITERS`] until the child ends.
+    pub(crate) fn disconnect(&self, client: u64) {
+        let dropped: Vec<Waiter> = {
+            let mut state = self.lock();
+            let mut dropped = Vec::new();
+            for child in state.children.values_mut() {
+                let (gone, kept): (Vec<Waiter>, Vec<Waiter>) = std::mem::take(&mut child.waiters)
+                    .into_iter()
+                    .partition(|w| w.client == client);
+                child.waiters = kept;
+                dropped.extend(gone);
+            }
+            dropped
+        };
+        // The replies drop outside the lock.
+        drop(dropped);
     }
 
     fn expire(&self, id: &str, token: u64) {
@@ -662,6 +718,38 @@ impl AppChildren {
         running.len()
     }
 
+    /// The daemon's end ([`crate::mux::Mux::shutdown`]): every running
+    /// child is terminated, the children get up to [`SHUTDOWN_WAIT`] to exit, and the
+    /// groups still running then are killed. The usual escalation is a
+    /// posted item that shutdown does not wait for, so a child that ignores
+    /// SIGTERM would outlive the daemon without this. Returns how many were
+    /// running.
+    pub(crate) fn end_with_daemon(self: &Arc<Self>) -> usize {
+        self.end_within(SHUTDOWN_WAIT)
+    }
+
+    /// [`Self::end_with_daemon`] with `wait` for the exits.
+    pub(crate) fn end_within(self: &Arc<Self>, wait: Duration) -> usize {
+        let running = self.terminate_all();
+        if running == 0 {
+            return 0;
+        }
+        let state = self.lock();
+        let (state, _) = self
+            .exits
+            .wait_timeout_while(state, wait, |state| {
+                state.children.values().any(|child| child.exit.is_none())
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let left: Vec<i32> =
+            state.children.values().filter(|child| child.exit.is_none()).map(|c| c.pid).collect();
+        drop(state);
+        for pid in left {
+            signal_group(pid, libc::SIGKILL);
+        }
+        running
+    }
+
     /// Every child, oldest first, or only `owner`'s.
     pub(crate) fn list(&self, owner: Option<&str>) -> Vec<Value> {
         let state = self.lock();
@@ -674,14 +762,16 @@ impl AppChildren {
             .collect()
     }
 
+    /// A child runs or a start is between its reserve and its insert.
     pub(crate) fn any_running(&self) -> bool {
-        self.lock().children.values().any(|child| child.exit.is_none())
+        self.lock().running() > 0
     }
 
     /// Starts a new grace period: its generation and how long it lasts.
     pub(crate) fn begin_grace(&self, grace: Duration) -> (u64, Duration) {
         let mut state = self.lock();
         state.grace_generation += 1;
+        state.grace_armed = true;
         #[cfg(test)]
         let grace = state.grace.unwrap_or(grace);
         (state.grace_generation, grace)
@@ -692,9 +782,11 @@ impl AppChildren {
         self.lock().grace = Some(grace);
     }
 
-    /// Ends any grace period (an app came back).
+    /// Ends any grace period (an app came back, or the grace ran out).
     pub(crate) fn end_grace(&self) {
-        self.lock().grace_generation += 1;
+        let mut state = self.lock();
+        state.grace_generation += 1;
+        state.grace_armed = false;
     }
 
     /// Whether `generation` is still the current grace period.
@@ -758,6 +850,7 @@ impl AppChildren {
             effects.reads = child.ready_waiters();
             !child.output_closed
         };
+        self.exits.notify_all();
         effects.run();
         if !drain {
             return;

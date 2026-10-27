@@ -27,6 +27,7 @@ cat > "$dir/ps.txt" <<EOF
   120     1   3000 $HX/def/cmux-tui-host __terminal-host --bootstrap-stdio --owner cmux_DEV_t1:t1@99
   121   120   2000 /bin/zsh -l
   122   102   3000 $HX/def/cmux-tui-host __terminal-host --bootstrap-stdio
+  160   102   1000 /bin/zsh -l -c sleep 60 # an app child
   130   110   4000 $HX/aaa/cmux-vt-worker --shard 0
   131   110   4000 $HX/aaa/cmux-vt-worker --shard 1
   140   100  90000 $B/Contents/MacOS/cmux DEV Chromium Host --data x
@@ -83,7 +84,10 @@ want = {"app": [100], "daemon": [102], "holder": [110], "vt_worker": [130, 131],
         "chromium_host": [140], "chromium_helper": [101, 141, 142], "other": [150, 151, 152]}
 for role, pids in want.items():
     eq(f"{role} pids", roles[role]["pids"], pids)
-eq("children", report["children"]["processes"], 2)
+eq("children", report["children"]["processes"], 3)
+# The daemon's own children (app-children-v1) by argv; its terminal host is a cmux role, not one of them.
+eq("under the daemon", report["children"]["under_daemon"],
+   [{"pid": 160, "ppid": 102, "args": "/bin/zsh -l -c sleep 60 # an app child"}])
 eq("another tag's host", report["foreign_hosts"], 1)
 eq("daemon threads", roles["daemon"]["threads"], 5)
 eq("daemon peak (the next daemon during the restart)", roles["daemon"]["peak_threads"], 20)

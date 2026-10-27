@@ -6,8 +6,10 @@ public import Foundation
 /// server, and the URL with its connection token, outlive an app crash: the relaunched app's first
 /// request adopts the running server instead of starting another. The daemon reads the server's
 /// output and answers the start at its `Web UI available at` line; it ends the server when the app
-/// quits or does not come back within its grace. With no daemon children (the feature off, an older
-/// daemon) the launch goes to `fallback`, this app's own child.
+/// quits or does not come back within its grace. A start that comes before the daemon's first connection (a
+/// VS Code tab restored at launch) waits for it (``AppChildSlot/current()``), so it adopts the server a crashed app
+/// left instead of starting a second one with a new URL. With no daemon children (the feature off, an older
+/// daemon, a daemon that could not be reached) the launch goes to `fallback`, this app's own child.
 public final class VSCodeServeWebDaemonLauncher: VSCodeServeWebLaunching {
     /// The daemon's tag for the server (`app-child-list`).
     public static let owner = "vscode-serve-web"

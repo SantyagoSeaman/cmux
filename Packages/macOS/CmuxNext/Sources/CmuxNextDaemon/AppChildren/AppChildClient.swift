@@ -13,6 +13,8 @@ public import Foundation
 public struct AppChildClient: Sendable {
     /// The extra time a request gets past the daemon's own wait (the reply's trip).
     static let replyMargin: Duration = .seconds(5)
+    /// How long a quit waits for `app-child-release-all`: the daemon answers once the signals went out.
+    static let releaseWait: Duration = .seconds(2)
 
     private let connection: DaemonConnection
 
@@ -57,10 +59,11 @@ public struct AppChildClient: Sendable {
         try await connection.request(AppChildRequests.List(owner: owner)).children
     }
 
-    /// Ends every child at once (a clean quit); returns how many were running.
+    /// Ends every child at once (a clean quit); returns how many were running. Bounded by ``releaseWait``:
+    /// a quit never waits longer on it.
     @discardableResult
     public func releaseAll() async throws -> Int {
-        try await connection.request(AppChildRequests.ReleaseAll()).stopped
+        try await connection.request(AppChildRequests.ReleaseAll(), timeout: Self.releaseWait).stopped
     }
 
     static func milliseconds(_ duration: Duration) -> UInt64 {

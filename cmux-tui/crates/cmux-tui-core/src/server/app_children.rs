@@ -13,8 +13,9 @@
 //! verified app connection ends, a grace of [`APP_GRACE`] starts: an app
 //! that comes back and calls any `app-child-*` command in it adopts the
 //! children; else, or when no app is connected when it ends, every child is
-//! terminated. A clean quit ends them at once (`app-child-release-all`), and
-//! the daemon's own end terminates every child. A child started with
+//! terminated. A clean quit ends them at once (`app-child-release-all`, the
+//! app's quit sends it before it exits), and the daemon's own end terminates
+//! every child and kills what still runs after [`children::SHUTDOWN_WAIT`]. A child started with
 //! `stdin: "lifeline"` also sees its stdin end when the daemon dies.
 //!
 //! No thread waits for a child: its spawn runs on a request-wait work item,
@@ -213,14 +214,16 @@ fn is_app_client(mux: &Mux, client: u64) -> bool {
     state.clients.get(&client).is_some_and(is_app)
 }
 
-fn app_connected(mux: &Mux) -> bool {
+pub(super) fn app_connected(mux: &Mux) -> bool {
     let state = mux.control_clients.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     state.clients.values().any(is_app)
 }
 
 impl AppChildren {
-    /// The last verified app connection ended: the grace starts, and at its
-    /// end the children are terminated unless an app adopted them.
+    /// The last verified app connection ended (or a start finished with no
+    /// app connected): the grace starts, and at its end the children are
+    /// terminated unless an app adopted them. A start still between its
+    /// reserve and its insert counts as running.
     pub(super) fn last_app_left(self: &Arc<Self>) {
         let Some(mux) = self.mux() else { return };
         if !self.any_running() {
@@ -238,7 +241,11 @@ impl AppChildren {
                 let (Some(children), Some(mux)) = (children.upgrade(), weak_mux.upgrade()) else {
                     return;
                 };
-                if children.grace_current(generation) && !app_connected(&mux) {
+                if !children.grace_current(generation) {
+                    return;
+                }
+                children.end_grace();
+                if !app_connected(&mux) {
                     let ended = children.terminate_all();
                     eprintln!(
                         "cmux-tui: no app came back within the grace; {ended} app children end"
@@ -285,7 +292,7 @@ fn handle(line: &RouteLine<'_>) -> Option<bool> {
             let reply = Box::new(move |chunk: children::Chunk| {
                 ok(&reply_writer, reply_id, chunk.json());
             });
-            match children.read(mux, &child, after, wait, reply) {
+            match children.read(mux, client, &child, after, wait, reply) {
                 Ok(()) => true,
                 Err(error) => fail_with(writer, id, &error),
             }

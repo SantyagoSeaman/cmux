@@ -1,5 +1,6 @@
 import AppKit
 import CmuxNextActions
+import CmuxNextAgentPane
 import CmuxNextBridge
 import CmuxNextBrowserImport
 import CmuxNextControl
@@ -14,6 +15,7 @@ import CmuxNextSettings
 import CmuxNextSidebar
 import CmuxNextTerminal
 import CmuxNextTrace
+import CmuxNextVSCodeServer
 import CmuxNextWakeups
 
 #if DEBUG || CMUX_BENCH_HOOKS
@@ -284,6 +286,54 @@ enum DebugDriverControl {
                 let end = ContinuousClock.now + .milliseconds(milliseconds)
                 while ContinuousClock.now < end {}
                 return .value(["stalled_ms": .number(Double(milliseconds))])
+            },
+        ])
+        // The app's children in the daemon (`appChildrenInDaemon`, p01-process-239) for app-crash-survival.py: a
+        // shell-mode command through the agent pane's own shell (a relaunched app reads it by id), serve-web's URL,
+        // and the daemon's children (no secrets).
+        let benchShell = AgentPaneShell(deadlines: services.mainDeadlines)
+        benchShell.daemonOwner = "bench-shell"
+        benchShell.daemonChildren = { [weak slot = services.appChildren] in slot?.children }
+        router.register([
+            .async("debug.app_children") { [benchShell, slot = services.appChildren, vscode = services.vscodeServeWeb] call in
+                let params = call.params
+                switch params["op"]?.stringValue {
+                case "run_shell":
+                    guard let command = params["command"]?.stringValue else { throw ControlError.invalidParams("run_shell needs command") }
+                    do {
+                        return ["id": .string(try await benchShell.run(command, cwd: params["cwd"]?.stringValue))]
+                    } catch {
+                        throw ControlError(code: "app_error", message: String(describing: error))
+                    }
+                case "read_shell":
+                    guard let id = params["id"]?.stringValue else { throw ControlError.invalidParams("read_shell needs id") }
+                    let chunk: AgentPaneShell.Chunk
+                    do {
+                        chunk = try await benchShell.read(id, after: params["after"]?.intValue ?? 0)
+                    } catch {
+                        throw ControlError(code: "app_error", message: String(describing: error))
+                    }
+                    let exit: JSONValue = chunk.exit.map { exit in
+                        .object(["code": exit.code.map { .number(Double($0)) } ?? .null, "signal": exit.signal.map { .number(Double($0)) } ?? .null])
+                    } ?? .null
+                    return ["output": .string(chunk.output), "next": .number(Double(chunk.next)), "truncated": .bool(chunk.truncated), "exit": exit]
+                case "serve_web":
+                    guard let app = params["vscode"]?.stringValue else { throw ControlError.invalidParams("serve_web needs vscode") }
+                    do {
+                        return ["url": .string(try await vscode.url(vscode: URL(fileURLWithPath: app)).absoluteString)]
+                    } catch {
+                        throw ControlError(code: "app_error", message: String(describing: error))
+                    }
+                case "list":
+                    guard let children = await slot.current() else { return ["enabled": .bool(false), "children": .array([])] }
+                    let rows = (try? await children.list(owner: nil)) ?? []
+                    return ["enabled": .bool(true), "served": .bool(await children.isServed), "children": .array(rows.map { row in
+                        .object(["child": .string(row.child), "pid": .number(Double(row.pid)), "name": .string(row.name),
+                                 "owner": .string(row.owner), "running": .bool(row.running)])
+                    })]
+                default:
+                    throw ControlError.invalidParams("op must be run_shell, read_shell, serve_web or list")
+                }
             },
         ])
         // Sidebar fixtures and the sidebar focus ring live in CmuxNextSidebar behind DEBUG only, so a bench

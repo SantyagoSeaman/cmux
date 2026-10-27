@@ -9860,8 +9860,10 @@ to the app, not to one connection.
 
 The lifeline rule: when the last verified app connection ends, a 30 s grace
 starts. Any `app-child-*` command from an app in the grace adopts the
-children; otherwise, at its end, every child is terminated. The daemon's own
-end terminates every child. Each child runs in its own process group with
+children; otherwise, at its end, every child is terminated. A start still in
+flight counts as running, and a child whose start ends with no app connected
+gets the same grace. The daemon's own end sends SIGTERM to every child,
+waits up to 2 s for them to exit, then kills the groups that still run. Each child runs in its own process group with
 stdout and stderr in one pipe; the daemon keeps its last 1 MiB of output.
 Limits: 32 running children, 96 kept (finished ones dropped oldest first),
 16 parked reads per child (`app-child.limit`).
@@ -9891,6 +9893,8 @@ read from next, `truncated` when output before `after` was dropped, and
 `exit` (`{code?, signal?}`) once the child ended and every byte was read. With
 no news it waits up to `wait_ms` (at most 10 s) for output or the end;
 `until_exit:true` answers only once the child finished, with no deadline.
+Bytes of an unfinished UTF-8 character at the end are not news while the
+child runs. A parked read ends, unanswered, when its connection closes.
 
 ### app-child-stop
 
@@ -9907,8 +9911,9 @@ not an error; an unknown one is `app-child.unknown`.
 
 ### app-child-release-all
 
-`{id, cmd:"app-child-release-all"}` terminates every running child (a clean
-quit) and answers `{stopped}`, how many were running.
+`{id, cmd:"app-child-release-all"}` terminates every running child and
+answers `{stopped}`, how many were running. The app sends it on a clean quit,
+before its connection closes, so no child waits out the grace.
 
 ## Agent session attach
 

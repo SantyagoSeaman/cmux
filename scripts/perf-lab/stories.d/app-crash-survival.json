@@ -1,0 +1,20 @@
+{
+  "id": "app-crash-survival",
+  "tier": "T2",
+  "description": "App-crash survival of the app's children in the daemon (appChildrenInDaemon on, app-crash-survival.py): a 60 s shell-mode command and the inline VS Code server, then SIGKILL of the app and a relaunch on the same tag; the command still runs and its output continues by offset, VS Code keeps its URL, and after a clean quit process-model-census.py finds no app child left under the daemon.",
+  "command": ["scripts/cmux-next/app-crash-survival.py", "--story", "app-crash-survival"],
+  "runs": ["scripts/cmux-next/process-model-census.py"],
+  "session": "light",
+  "engine": "none",
+  "config": "bench",
+  "metrics": [
+    {"name": "app_crash_survival\\.(shell_continued|vscode_same_url)", "unit": "ratio", "better": "higher"},
+    {"name": "app_crash_survival\\.shell_resume", "unit": "ms", "better": "lower"},
+    {"name": "app_crash_survival\\.quit_left_children", "unit": "count", "better": "lower"}
+  ],
+  "repeats": 1,
+  "seconds": 240,
+  "needs": ["debug:debug.app_children"],
+  "owner": "PL-daemon",
+  "component": "Stability>Restore"
+}

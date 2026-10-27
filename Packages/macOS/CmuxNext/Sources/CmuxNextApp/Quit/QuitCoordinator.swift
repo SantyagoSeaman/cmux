@@ -232,6 +232,8 @@ final class QuitCoordinator {
                 // Home's drafts, scroll places and unsent sends (its cache's last batch).
                 await services.home.flushCacheForQuit()
             },
+            // The app's children in the daemon end now, not at the end of its grace (p01-process-239).
+            releaseAppChildren: { await services.appChildren.releaseAllForQuit() },
             endLocalSessions: { await services.daemon.endSessionsAndStop($0) },
             confirmFailures: { [weak self] failures in await self?.confirm(failures) ?? .quitAnyway },
             endLocalAgents: { [attempts = QuitAttempts()] in

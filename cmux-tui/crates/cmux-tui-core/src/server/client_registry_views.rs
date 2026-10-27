@@ -603,6 +603,9 @@ impl ClientRegistry {
         self.agent_sessions.disconnect(client);
         self.apps.disconnect(client);
         self.scripts.disconnect(client);
+        // Its parked app-child reads (an exit watch has no deadline).
+        #[cfg(unix)]
+        self.app_children.disconnect(client);
         // Poison recovery: a removal never grants access; on a poisoned registry the
         // record still goes, so a fail-closed close never panics here.
         let mut state = self.state.lock().recover_poison();

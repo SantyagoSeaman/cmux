@@ -28,6 +28,9 @@ enum QuitFailureAnswer: Equatable {
 struct QuitSteps {
     var remember: @MainActor (QuitBehavior) async -> Void
     var prepareWindows: @MainActor () async -> Void
+    /// Ends the app's children in the daemon at once (`app-child-release-all`, bounded), so a clean quit leaves
+    /// no shell-mode command or serve-web server waiting out the daemon's grace for an app that will not come back.
+    var releaseAppChildren: @MainActor () async -> Void = {}
     /// Ends the local sessions; returns every step that failed.
     var endLocalSessions: @MainActor (QuitSessionsChoice) async -> [EndSessionsFailure]
     /// Shows the failures and waits for Retry or Quit Anyway.
@@ -53,6 +56,7 @@ enum QuitCompletion {
     static func run(_ choice: QuitSessionsChoice, remember: Bool, _ steps: QuitSteps) async {
         if remember { await steps.remember(QuitPolicy.remembered(choice)) }
         await steps.prepareWindows()
+        await steps.releaseAppChildren()
         if choice.ends {
             var failures = await steps.endLocalAgents() + steps.endLocalSessions(choice)
             while !failures.isEmpty, await steps.confirmFailures(failures) == .retry {
