@@ -45,11 +45,15 @@ import Testing
         let (route, registry, home) = try await Self.route()
         defer { try? FileManager.default.removeItem(at: home) }
         let generated = try #require(Self.menu(route, "workspaceRow")?["generated"])
-        var top = try #require(generated["top"]?.arrayValue)
-        top.removeAll { $0 == "workspace.duplicate" }
-        let layout: JSONValue = ["top": .array(top), "more": [], "hidden": ["workspace.duplicate"]]
+        var items = try #require(generated["items"]?.arrayValue)
+        items.removeAll { $0 == "workspace.duplicate" }
+        // Rename goes into a submenu of the person's.
+        items.removeAll { $0 == "renameWorkspace" }
+        items.insert(["key": "group:mine", "title": "Mine", "items": ["renameWorkspace"]], at: 0)
+        let layout: JSONValue = ["items": .array(items), "hidden": ["workspace.duplicate"]]
         _ = try await route.call(ContextMenusPageProvider.prefix + "set", params: ["menu": "workspaceRow", "layout": layout], context: Self.click)
         #expect(registry.contextMenuLayouts[.workspaceRow]?.hidden == ["workspace.duplicate"])
+        #expect(registry.contextMenuLayouts[.workspaceRow]?.items.first == .folder(key: "group:mine", title: "Mine", items: [.item("renameWorkspace")]))
         #expect(Self.menu(route, "workspaceRow")?["customized"] == true)
         #expect(!ContextMenuCatalog.shared.referencedIDs(registry.contextMenuEntries(for: .workspaceRow)).contains("workspace.duplicate"))
 
@@ -73,7 +77,7 @@ import Testing
     @Test func onlyThePersonsClickOnSettingsWrites() async throws {
         let (route, registry, home) = try await Self.route()
         defer { try? FileManager.default.removeItem(at: home) }
-        let params: JSONValue = ["menu": "tab", "layout": ["top": ["closeTab"]]]
+        let params: JSONValue = ["menu": "tab", "layout": ["items": ["closeTab"]]]
         for context in [PageCallContext(page: "cmux.settings"), PageCallContext(page: "cmux.history", userGesture: true)] {
             await #expect(throws: PageError.self) {
                 _ = try await route.call(ContextMenusPageProvider.prefix + "set", params: params, context: context)
@@ -83,7 +87,7 @@ import Testing
             _ = try await route.call(ContextMenusPageProvider.prefix + "set", params: ["menu": "nope", "layout": .null], context: Self.click)
         }
         await #expect(throws: PageError.self) {
-            _ = try await route.call(ContextMenusPageProvider.prefix + "set", params: ["menu": "tab", "layout": ["top": "closeTab"]], context: Self.click)
+            _ = try await route.call(ContextMenusPageProvider.prefix + "set", params: ["menu": "tab", "layout": ["items": "closeTab"]], context: Self.click)
         }
         #expect(registry.contextMenuLayouts.isEmpty)
     }

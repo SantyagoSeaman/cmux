@@ -7,8 +7,9 @@ public import CmuxNextActions
 ///   "showCustomizeItem": true,
 ///   "layouts": {
 ///     "workspaceRow": {
-///       "top": ["renameWorkspace", "workspace.copyPath", "-", "folder:more", "-", "closeWorkspace"],
-///       "more": ["home.messageAbout"],
+///       "items": ["renameWorkspace", "workspace.copyPath", "-",
+///                 {"key": "group:a1", "title": "Mine", "items": ["home.messageAbout", {"key": "folder:move", "items": []}]},
+///                 {"key": "folder:more", "items": ["palette.markWorkspaceUnread"]}, "-", "closeWorkspace"],
 ///       "hidden": ["workspace.duplicate"]
 ///     }
 ///   }
@@ -56,7 +57,7 @@ public nonisolated struct ContextMenusSetting: Sendable, Hashable {
             }
             guard let layout = layout(value) else {
                 diagnostics.append(SettingsDiagnostic(kind: .invalidValue, path: "\(id).\(name)",
-                                                      message: "expected {\"top\": [...], \"more\": [...], \"hidden\": [...]} of row keys"))
+                                                      message: "expected {\"items\": [...], \"hidden\": [...]}: row keys, \"-\" and {\"key\", \"title\", \"items\"} submenus"))
                 continue
             }
             setting.layouts[context] = layout
@@ -64,26 +65,81 @@ public nonisolated struct ContextMenusSetting: Sendable, Hashable {
         return setting
     }
 
-    /// A layout object (cmux.json, or a Settings > Menus write): `top` is required; each list holds strings only.
+    /// The deepest submenu nesting and the most entries a layout may hold: a hand-edited file
+    /// cannot make every right-click walk an unbounded tree.
+    static let maxDepth = 8
+    static let maxEntries = 2_000
+
+    /// A layout object (cmux.json, or a Settings > Menus write): `items`, the menu as a tree (a row
+    /// key, `-`, or `{"key", "title"?, "items"}` for a submenu), and `hidden` keys. The first
+    /// shape, `top` (keys) and `more` (keys moved into More), still reads. Nil for anything else.
     public static func layout(_ value: JSONValue) -> ContextMenuLayout? {
+        guard value.objectValue != nil else { return nil }
+        var count = 0
         func keys(_ list: JSONValue?) -> [String]? {
             guard let items = list?.arrayValue else { return nil }
             let keys = items.compactMap(\.stringValue)
-            return keys.count == items.count ? keys : nil
+            count += keys.count
+            return keys.count == items.count && count <= maxEntries ? keys : nil
         }
-        guard value.objectValue != nil, let top = keys(value["top"]) else { return nil }
-        let more = value["more"] == nil ? [] : keys(value["more"])
+        func nodes(_ list: JSONValue?, depth: Int) -> [ContextMenuLayout.Node]? {
+            guard depth <= maxDepth, let items = list?.arrayValue else { return nil }
+            var result: [ContextMenuLayout.Node] = []
+            for item in items {
+                count += 1
+                guard count <= maxEntries else { return nil }
+                if let key = item.stringValue {
+                    result.append(key == ContextMenuLayout.separator ? .separator : .item(key))
+                } else if let key = item["key"]?.stringValue, let children = nodes(item["items"] ?? .array([]), depth: depth + 1) {
+                    let title = item["title"]?.stringValue
+                    if ContextMenuLayout.isGroup(key), title == nil { return nil }
+                    result.append(.folder(key: key, title: title, items: children))
+                } else {
+                    return nil
+                }
+            }
+            return result
+        }
         let hidden = value["hidden"] == nil ? [] : keys(value["hidden"])
-        guard let more, let hidden else { return nil }
-        return ContextMenuLayout(top: top, more: more, hidden: hidden)
+        guard let hidden else { return nil }
+        if value["items"] != nil {
+            guard let items = nodes(value["items"], depth: 0) else { return nil }
+            return ContextMenuLayout(items: items, hidden: hidden)
+        }
+        // The first shape: a top level of keys, and More's leading rows.
+        guard let top = keys(value["top"]) else { return nil }
+        let more = value["more"] == nil ? [] : keys(value["more"])
+        guard let more else { return nil }
+        var items: [ContextMenuLayout.Node] = top.map { key in
+            if key == ContextMenuLayout.separator { return .separator }
+            return key.hasPrefix("folder:") ? .folder(key: key, title: nil, items: []) : .item(key)
+        }
+        if !more.isEmpty {
+            let moved = more.map(ContextMenuLayout.Node.item)
+            if let at = items.firstIndex(where: { $0.key == ContextMenuLayout.moreKey }) {
+                items[at] = .folder(key: ContextMenuLayout.moreKey, title: nil, items: moved + [.separator])
+            } else {
+                items += [.separator, .folder(key: ContextMenuLayout.moreKey, title: nil, items: moved + [.separator])]
+            }
+        }
+        return ContextMenuLayout(items: items, hidden: hidden)
     }
 
     /// The value to write for `layout`.
     public static func value(_ layout: ContextMenuLayout) -> JSONValue {
-        var members: [String: JSONValue] = ["top": .array(layout.top.map(JSONValue.string))]
-        if !layout.more.isEmpty { members["more"] = .array(layout.more.map(JSONValue.string)) }
+        var members: [String: JSONValue] = ["items": .array(layout.items.map(nodeValue))]
         if !layout.hidden.isEmpty { members["hidden"] = .array(layout.hidden.map(JSONValue.string)) }
         return .object(members)
+    }
+
+    /// One tree entry as cmux.json holds it.
+    public static func nodeValue(_ node: ContextMenuLayout.Node) -> JSONValue {
+        switch node {
+        case .separator: .string(ContextMenuLayout.separator)
+        case .item(let key): .string(key)
+        case .folder(let key, let title, let items):
+            .object(["key": .string(key), "items": .array(items.map(nodeValue))].merging(title.map { ["title": .string($0)] } ?? [:]) { $1 })
+        }
     }
 }
 

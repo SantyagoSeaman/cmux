@@ -17,7 +17,7 @@ public nonisolated struct ContextMenuEditorMenu: Sendable, Hashable {
     public let title: String
     public let area: ActionMenuContext.MenuArea
     public let rows: [Row]
-    /// The generated top level (``ContextMenuLayout/generated(_:)``): what Reset draws.
+    /// The generated menu (``ContextMenuLayout/generated(_:)``): what Reset draws.
     public let generated: ContextMenuLayout
     /// The layout drawn now, normalized against the generated menu.
     public let layout: ContextMenuLayout
@@ -47,6 +47,8 @@ extension ActionRegistry {
         switch unit.entry {
         case .folder(let folder, _):
             return .init(key: unit.key, title: folder.title, symbol: folder.symbol, kind: .folder, home: unit.home)
+        case .group(let group, _):
+            return .init(key: unit.key, title: group.title, symbol: nil, kind: .folder, home: unit.home)
         case .action(let id), .choices(let id), .submenu(let id, _):
             let symbol = descriptor(for: id)?.symbol
             let kind: ContextMenuEditorMenu.Row.Kind = if case .action = unit.entry { .item } else { .submenu }

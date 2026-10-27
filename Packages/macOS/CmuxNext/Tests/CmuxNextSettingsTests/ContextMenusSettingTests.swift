@@ -29,12 +29,20 @@ import Testing
         await settings.reload()
         #expect(registry.contextMenuLayouts.isEmpty)
 
-        let layout = ContextMenuLayout(top: ["renameWorkspace", "-", ContextMenuLayout.moreKey], more: ["workspace.duplicate"], hidden: ["home.messageAbout"])
+        let layout = ContextMenuLayout(items: [
+            .item("renameWorkspace"), .separator,
+            .folder(key: "group:mine", title: "Mine", items: [.item("workspace.duplicate"), .folder(key: ContextMenuLayout.moreKey, title: nil, items: [])]),
+        ], hidden: ["home.messageAbout"])
         try await settings.setContextMenuLayout(layout, for: .workspaceRow)
         #expect(registry.contextMenuLayouts[.workspaceRow] == layout)
         let saved = try Self.file(home)?["contextMenus"] as? [String: Any]
         let workspace = (saved?["layouts"] as? [String: Any])?["workspaceRow"] as? [String: Any]
-        #expect(workspace?["top"] as? [String] == ["renameWorkspace", "-", "folder:more"])
+        let items = workspace?["items"] as? [Any]
+        #expect(items?.prefix(2).compactMap { $0 as? String } == ["renameWorkspace", "-"])
+        let mine = items?.last as? [String: Any]
+        #expect(mine?["key"] as? String == "group:mine")
+        #expect(mine?["title"] as? String == "Mine")
+        #expect((mine?["items"] as? [Any])?.first as? String == "workspace.duplicate")
         #expect(workspace?["hidden"] as? [String] == ["home.messageAbout"])
 
         try await settings.setShowsCustomizeMenuItem(false)
@@ -53,14 +61,23 @@ import Testing
         let root: JSONValue = ["contextMenus": [
             "showCustomizeItem": "yes",
             "layouts": [
-                "tab": ["top": ["closeTab"], "hidden": ["duplicateTab"]],
-                "notAMenu": ["top": []],
-                "pane": ["top": "splitRight"],
+                "tab": ["items": ["closeTab", ["key": "group:g", "title": "G", "items": ["-"]]], "hidden": ["duplicateTab"]],
+                // The first shape still reads: top keys, and More's leading rows.
+                "newTab": ["top": ["newSurface", "folder:more"], "more": ["newTab.page"]],
+                "notAMenu": ["items": []],
+                "pane": ["items": "splitRight"],
+                // A submenu of the person's needs a title.
+                "screen": ["items": [["key": "group:untitled", "items": []]]],
             ],
         ]]
         let setting = ContextMenusSetting.parse(root, diagnostics: &diagnostics)
-        #expect(setting.layouts == [.tab: ContextMenuLayout(top: ["closeTab"], hidden: ["duplicateTab"])])
+        #expect(setting.layouts[.tab] == ContextMenuLayout(items: [.item("closeTab"), .folder(key: "group:g", title: "G", items: [.separator])],
+                                                          hidden: ["duplicateTab"]))
+        #expect(setting.layouts[.newTab] == ContextMenuLayout(items: [
+            .item("newSurface"), .folder(key: ContextMenuLayout.moreKey, title: nil, items: [.item("newTab.page"), .separator]),
+        ]))
         #expect(setting.showsCustomizeItem)
-        #expect(Set(diagnostics.map(\.path)) == ["contextMenus.showCustomizeItem", "contextMenus.layouts.notAMenu", "contextMenus.layouts.pane"])
+        #expect(Set(diagnostics.map(\.path)) == ["contextMenus.showCustomizeItem", "contextMenus.layouts.notAMenu",
+                                                 "contextMenus.layouts.pane", "contextMenus.layouts.screen"])
     }
 }

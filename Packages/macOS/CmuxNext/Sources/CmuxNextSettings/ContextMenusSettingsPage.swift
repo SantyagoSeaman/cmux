@@ -54,7 +54,7 @@ public struct ContextMenusSettingsPage {
         var layout: ContextMenuLayout?
         if value != .null {
             guard let parsed = ContextMenusSetting.layout(value) else {
-                throw InvalidRequest(message: "layout must be {top, more, hidden} lists of row keys")
+                throw InvalidRequest(message: "layout must be {items, hidden}: row keys, \"-\" and {key, title, items} submenus")
             }
             // Saved as drawn: keys the app does not place are dropped, and the generated menu is
             // no layout at all, so later app changes reach it.
@@ -83,8 +83,7 @@ public struct ContextMenusSettingsPage {
 
     private static func layoutJSON(_ layout: ContextMenuLayout) -> JSONValue {
         [
-            "top": .array(layout.top.map(JSONValue.string)),
-            "more": .array(layout.more.map(JSONValue.string)),
+            "items": .array(layout.items.map(ContextMenusSetting.nodeValue)),
             "hidden": .array(layout.hidden.map(JSONValue.string)),
         ]
     }
