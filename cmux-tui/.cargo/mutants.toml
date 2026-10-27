@@ -1,0 +1,40 @@
+# cargo-mutants over the daemon store (p15-oracle-191; spec plans/cmux-next/chrome-parity/p15-oracle.md,
+# section 3F "Mutation strength"). cargo-mutants generates the mutants; the oracle's daemon suites judge
+# them through scripts/cmux-next/oracle/mutants.sh, which reads this file for the mutant list and never
+# runs `cargo test`. A plain `cargo mutants` in cmux-tui/ reads it too and mutates the same files.
+
+# The store and its router: resource routing and mutation plans, the mux, the layout tree and the
+# journal reducers.
+examine_globs = [
+  "crates/cmux-tui-core/src/resource_router.rs",
+  "crates/cmux-tui-core/src/resource_router/**/*.rs",
+  "crates/cmux-tui-core/src/resource_mutation*.rs",
+  "crates/cmux-tui-core/src/mux.rs",
+  "crates/cmux-tui-core/src/mux/**/*.rs",
+  "crates/cmux-tui-core/src/layout.rs",
+  "crates/cmux-tui-core/src/journal_reducers.rs",
+]
+
+# Test-only files (cargo-mutants already skips `#[cfg(test)]` modules; these names make it explicit) and
+# the oracle's own read-out of the state, which judges mutants and must not be one.
+exclude_globs = [
+  "**/*_tests.rs",
+  "**/*_test.rs",
+  "**/tests.rs",
+  "**/tests/**",
+  "**/test_*.rs",
+  "**/legacy_actor_test_wrappers.rs",
+  "crates/cmux-tui-core/src/mux/oracle.rs",
+]
+
+# Debug formatting and log text change nothing a client observes.
+exclude_re = [
+  "<impl (std::fmt::|fmt::)?(Debug|Display) for ",
+  "replace .*::fmt -> ",
+]
+
+# The build the oracle runs (p15-oracle-201): release optimization without LTO, debug assertions on.
+profile = "oracle"
+features = ["oracle"]
+# A mutant that only trips a deny lint still builds and still runs.
+cap_lints = true
