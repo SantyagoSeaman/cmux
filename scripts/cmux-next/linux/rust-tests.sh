@@ -159,8 +159,15 @@ for line in errors:
     print(f"rust-tests: error: {line}")
 for entry in flaky:
     print(f"rust-tests: FLAKY: {entry['test']}: {' '.join(entry['results'])}")
-for entry in stable_red:
+for entry in stable_red[:40]:
     print(f"rust-tests: RED: {entry['test']}: {' '.join(entry['results'])}")
+if len(stable_red) > 40:
+    by_crate = {}
+    for entry in stable_red:
+        crate = entry["binary_id"].split("::", 1)[0]
+        by_crate[crate] = by_crate.get(crate, 0) + 1
+    crates = ", ".join(f"{name} {n}" for name, n in sorted(by_crate.items(), key=lambda kv: -kv[1]))
+    print(f"rust-tests: {len(stable_red) - 40} more red tests in the receipt (red by crate: {crates})")
 print(f"rust-tests: {len(by_test)} tests, {stable_pass} passed every repeat, {len(stable_red)} red, "
       f"{len(flaky)} flaky; receipt {receipt_path}")
 sys.exit(75 if errors else 1 if stable_red else 0)
