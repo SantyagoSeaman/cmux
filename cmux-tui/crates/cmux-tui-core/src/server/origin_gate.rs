@@ -425,6 +425,17 @@ impl AcceptedPeer {
         };
         AcceptedPeer { peer_key, local_peer, mobile_host, peer_process }
     }
+
+    /// A peer whose accept found only `peer_key` (tests).
+    #[cfg(test)]
+    pub(super) fn with_key_for_test(peer_key: String) -> Self {
+        AcceptedPeer {
+            peer_key: Some(peer_key),
+            local_peer: LocalPeer::Unknown,
+            mobile_host: false,
+            peer_process: PeerProcess::Unverified,
+        }
+    }
 }
 
 /// Records the accepted peer's identity on `client`, before a legacy client
