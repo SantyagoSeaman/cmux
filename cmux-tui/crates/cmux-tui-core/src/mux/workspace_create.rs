@@ -205,10 +205,10 @@ impl Mux {
             } else {
                 let marked = workspace_public_id.as_str().to_string();
                 let marked_key = key.clone();
-                let writes = mark.writes();
-                let write_mark = move |tx: &crate::workspace_registry::RegistryTransaction<'_>| {
-                    mark.write(tx, &marked, &marked_key)
-                };
+                let write_mark =
+                    mark.writes().then(|| -> crate::workspace_registry::OwnedTransactionWrite {
+                        Box::new(move |tx| mark.write(tx, &marked, &marked_key))
+                    });
                 registry.commit_for_resource_effect_with(
                     mutation,
                     &fingerprint,
@@ -219,9 +219,7 @@ impl Mux {
                     &desired,
                     Some(&active_public_id),
                     &result,
-                    writes.then_some(
-                        &write_mark as crate::workspace_registry::RegistryTransactionWrite<'_>,
-                    ),
+                    write_mark,
                 )?
             };
             let committed_workspace = commit.result["workspace"]

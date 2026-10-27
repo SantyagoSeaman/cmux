@@ -65,6 +65,7 @@ pub(crate) use registry_intent::{
 };
 mod terminal_commit_intent;
 pub(crate) use terminal_commit_intent::TerminalCommitIntent;
+mod workspace_admit;
 mod workspace_commit_intent;
 mod workspace_rows_commit;
 use workspace_rows_commit::commit_workspace_registry_in_transaction;
@@ -3358,6 +3359,7 @@ impl WorkspaceRegistry {
 
     /// Atomically replace the live ordered registry, including its selected
     /// workspace, and record the mutation plus its public resource event.
+    /// Admitted, not waited for (`workspace_admit`).
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub fn commit_with_active_workspace(
@@ -3372,7 +3374,7 @@ impl WorkspaceRegistry {
         active_workspace: Option<&WorkspacePublicId>,
         result: &Value,
     ) -> anyhow::Result<RegistryCommit> {
-        self.commit_workspace_registry(
+        self.admit_workspace_registry(
             mutation,
             fingerprint,
             expected_generation,
@@ -3390,7 +3392,8 @@ impl WorkspaceRegistry {
     /// Commit a workspace-registry revision that also writes one workspace's
     /// presentation row in the same transaction. The desired registry may be
     /// unchanged (metadata only) or reordered (a group move). A replayed
-    /// mutation returns its original result and writes nothing.
+    /// mutation returns its original result and writes nothing. The row
+    /// rides the admitted intent (`workspace_admit`).
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub fn commit_workspace_presentation(
@@ -3407,10 +3410,11 @@ impl WorkspaceRegistry {
         result: &Value,
     ) -> anyhow::Result<RegistryCommit> {
         update.validate()?;
-        let write = |tx: &Transaction<'_>| {
-            presentation_store::write_workspace_presentation(tx, workspace_key, update)
-        };
-        self.commit_workspace_registry(
+        let (key, presentation) = (workspace_key.to_string(), update.clone());
+        let write: OwnedTransactionWrite = Box::new(move |tx: &Transaction<'_>| {
+            presentation_store::write_workspace_presentation(tx, &key, &presentation)
+        });
+        self.admit_workspace_registry(
             mutation,
             fingerprint,
             expected_generation,
@@ -3421,7 +3425,7 @@ impl WorkspaceRegistry {
             active_workspace,
             result,
             true,
-            Some(&write),
+            Some(write),
         )
     }
 

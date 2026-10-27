@@ -39,7 +39,8 @@ impl WorkspaceRegistry {
     /// [`Self::commit_for_resource_effect`] that also writes `extra` (state
     /// rows such as the ephemeral flag) in the staging transaction, so the
     /// resource projection that later publishes the workspace already sees
-    /// them.
+    /// them. The stage is admitted, not waited for (`workspace_admit`), and
+    /// `extra` rides its intent.
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub(crate) fn commit_for_resource_effect_with(
@@ -53,9 +54,9 @@ impl WorkspaceRegistry {
         workspaces: &[RegistryWorkspace],
         active_workspace: Option<&WorkspacePublicId>,
         result: &Value,
-        extra: Option<RegistryTransactionWrite<'_>>,
+        extra: Option<OwnedTransactionWrite>,
     ) -> anyhow::Result<RegistryCommit> {
-        self.commit_workspace_registry(
+        self.admit_workspace_registry(
             mutation,
             fingerprint,
             expected_generation,
