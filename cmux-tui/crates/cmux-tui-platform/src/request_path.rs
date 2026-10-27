@@ -24,7 +24,8 @@
 //! thread-local load. Inside one it adds one relaxed atomic to the scope's
 //! [`RequestPathStats`]; only the `record` and `panic:<kinds>` modes also
 //! fill the 128-entry site ring, time registry lock holds, and print a
-//! `REQUEST_PATH_IO kind=<kind> site=<file:line>` line on stderr. A
+//! `REQUEST_PATH_IO kind=<kind> site=<file:line> [op=<name>]` line on
+//! stderr, `op` being the request the scope runs ([`name_op`]). A
 //! `panic:` kind panics only in builds with debug assertions (debug and test).
 //! Nothing here allocates on the note path.
 //!
@@ -41,7 +42,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
-use std::io::Write as _;
 use std::marker::PhantomData;
 use std::panic::Location;
 use std::sync::Arc;
@@ -304,14 +304,25 @@ impl RequestPathStats {
         let slot = &self.ring[self.ring_next.fetch_add(1, Ordering::AcqRel) % SITE_RING_LEN];
         slot.kind.store(kind as u8, Ordering::Relaxed);
         slot.site.store(std::ptr::from_ref(site).cast_mut(), Ordering::Release);
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "REQUEST_PATH_IO kind={kind} site={}:{}",
-            site.file(),
-            site.line()
-        );
+        let _ = write_record_line(&mut std::io::stderr().lock(), kind, site, current_op());
         (Noted::Recorded, self.mode.panics_on(kind))
     }
+}
+
+/// One `record` line: `REQUEST_PATH_IO kind=<kind> site=<file:line>`, plus
+/// ` op=<wire name>` once the scope's request is named ([`name_op`]), so a
+/// record run lists each (site, op) pair (queue Q18, p05-ipc.md).
+fn write_record_line(
+    out: &mut impl std::io::Write,
+    kind: BlockingKind,
+    site: &Location<'_>,
+    op: Option<&'static str>,
+) -> std::io::Result<()> {
+    write!(out, "REQUEST_PATH_IO kind={kind} site={}:{}", site.file(), site.line())?;
+    if let Some(op) = op {
+        write!(out, " op={op}")?;
+    }
+    writeln!(out)
 }
 
 /// What a note did on the current thread.
@@ -330,6 +341,8 @@ pub enum Noted {
 thread_local! {
     static ACTIVE: RefCell<Option<Arc<RequestPathStats>>> = const { RefCell::new(None) };
     static OBSERVER: Cell<Option<&'static dyn BlockingObserver>> = const { Cell::new(None) };
+    /// The wire name of the request the innermost recording scope runs.
+    static OP: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 
 /// What a pool worker is told about the blocking work of the task it runs
@@ -384,6 +397,8 @@ impl Drop for ScopeEnded {
 #[must_use = "the scope ends when it drops"]
 pub struct RequestPathScope {
     previous: Option<Arc<RequestPathStats>>,
+    /// The outer scope's request name, back in place when this one drops.
+    previous_op: Option<&'static str>,
     /// The scope belongs to its thread.
     _thread: PhantomData<*const ()>,
 }
@@ -394,16 +409,37 @@ impl RequestPathScope {
         if !previous.as_ref().is_some_and(|outer| Arc::ptr_eq(outer, stats)) {
             stats.handler_runs.fetch_add(1, Ordering::Relaxed);
         }
-        Self { previous, _thread: PhantomData }
+        let previous_op = OP.try_with(|op| op.replace(None)).ok().flatten();
+        Self { previous, previous_op, _thread: PhantomData }
     }
 }
 
 impl Drop for RequestPathScope {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        // Thread teardown may have destroyed the slot already.
+        // Thread teardown may have destroyed the slots already.
         let _ = ACTIVE.try_with(|active| *active.borrow_mut() = previous);
+        let _ = OP.try_with(|op| op.set(self.previous_op));
     }
+}
+
+/// The current scope's request is now `name()`: a `Command` or v2 resource
+/// wire name, or a frame stage before the frame reaches its handler. Only a
+/// recording mode keeps it, and only then is `name` called, so the default
+/// mode pays one thread-local read. A later call renames the request.
+#[inline]
+pub fn name_op(name: impl FnOnce() -> &'static str) {
+    let records = ACTIVE
+        .try_with(|active| active.borrow().as_ref().is_some_and(|stats| stats.mode.record))
+        .unwrap_or(false);
+    if records {
+        let _ = OP.try_with(|op| op.set(Some(name())));
+    }
+}
+
+/// The name [`name_op`] gave the current scope's request, if it records.
+pub fn current_op() -> Option<&'static str> {
+    OP.try_with(Cell::get).ok().flatten()
 }
 
 /// True while the current thread runs inside a [`RequestPathScope`].

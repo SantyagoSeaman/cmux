@@ -309,6 +309,26 @@ fn request_watchdog_names_every_method() {
     assert_eq!(word_start_us(CLAIMING), None);
 }
 
+#[test]
+fn request_watchdog_names_the_recording_request_path_op() {
+    use crate::request_path::{RequestPathMode, RequestPathScope, RequestPathStats};
+    use cmux_tui_platform::request_path::current_op;
+    let watchdog = RequestWatchdog::default();
+    let stats = RequestPathStats::new(RequestPathMode::RECORD);
+    let _request_path = RequestPathScope::enter(&stats);
+    let scope = watchdog.begin(1, WatchedMethod::frame(FrameStage::Route)).expect("a free slot");
+    assert_eq!(current_op(), Some(WatchedMethod::frame(FrameStage::Route).name()));
+    scope.command(&Command::ListWorkspaces);
+    assert_eq!(current_op(), Some("list-workspaces"), "the frame reached its handler");
+    scope.set_method(CREATE);
+    assert_eq!(current_op(), Some("workspace.create"));
+    drop(scope);
+    let wait =
+        Command::WaitFor(WaitForParams { surface: 1, pattern: "x".to_string(), timeout_ms: 1 });
+    assert!(watchdog.begin_command(2, &wait).is_none());
+    assert_eq!(current_op(), Some("wait-for"), "a wait by design is unwatched but named");
+}
+
 /// Measures one watched run (`begin` and the scope's drop); prints ns per
 /// run. `cargo test -p cmux-tui-core --release --lib --
 /// request_watchdog_begin_bench --ignored --nocapture`.

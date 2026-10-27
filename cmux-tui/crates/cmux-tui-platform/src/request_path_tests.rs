@@ -249,3 +249,50 @@ fn the_blocking_observer_hears_notes_and_will_block_scopes_on_its_thread() {
     .unwrap();
     assert_eq!(heard, ["network", "started", "ended", "started", "ended"]);
 }
+
+#[test]
+fn a_recording_scope_names_its_request_and_an_inner_scope_restores_the_outer_name() {
+    let recording = RequestPathStats::new(RequestPathMode::RECORD);
+    let counting = RequestPathStats::new(RequestPathMode::OFF);
+    std::thread::spawn(move || {
+        name_op(|| unreachable!("outside a scope the name is never asked for"));
+        assert_eq!(current_op(), None);
+        let outer = RequestPathScope::enter(&recording);
+        name_op(|| "route");
+        name_op(|| "split");
+        assert_eq!(current_op(), Some("split"), "a later name renames the request");
+        {
+            let _inner = RequestPathScope::enter(&recording);
+            assert_eq!(current_op(), None, "an inner scope starts unnamed");
+            name_op(|| "workspace.create");
+            assert_eq!(current_op(), Some("workspace.create"));
+        }
+        assert_eq!(current_op(), Some("split"));
+        {
+            let _counting = RequestPathScope::enter(&counting);
+            name_op(|| unreachable!("a counting scope never asks for the name"));
+            assert_eq!(current_op(), None);
+        }
+        drop(outer);
+        assert_eq!(current_op(), None);
+    })
+    .join()
+    .expect("naming thread");
+}
+
+#[test]
+fn a_record_line_carries_the_op_only_once_the_request_is_named() {
+    let site = Location::caller();
+    let mut unnamed = Vec::new();
+    write_record_line(&mut unnamed, BlockingKind::Sqlite, site, None).unwrap();
+    assert_eq!(
+        String::from_utf8(unnamed).unwrap(),
+        format!("REQUEST_PATH_IO kind=sqlite site={}:{}\n", site.file(), site.line())
+    );
+    let mut named = Vec::new();
+    write_record_line(&mut named, BlockingKind::Sqlite, site, Some("pane.split")).unwrap();
+    assert_eq!(
+        String::from_utf8(named).unwrap(),
+        format!("REQUEST_PATH_IO kind=sqlite site={}:{} op=pane.split\n", site.file(), site.line())
+    );
+}

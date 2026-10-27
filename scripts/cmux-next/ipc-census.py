@@ -41,7 +41,9 @@ Refinements over the raw queries (each is stated on its queue):
 Schema queues (Q5, Q6, Q12, Q15) compare source against cmux-tui/spec/sdk-schema.json. Runtime
 queues are read, not computed: Q9 and Q18 from a `CMUX_TUI_REQUEST_PATH_IO=record` run (lines with
 `REQUEST_PATH_IO`, `kind=` and `site=FILE:LINE`, optional `op=`; passed with `--io-record FILE`
-or stored by `--record --io-record FILE`), Q16 from `runtime.Q16`, which bench-daemon-latency.py
+or stored by `--record --io-record FILE` as `runtime.Q9` and, its sqlite sites with their ops,
+`runtime.Q18`; Q18 reads `runtime.Q18` before `runtime.Q9`, whose run may predate `op=`), Q16
+from `runtime.Q16`, which bench-daemon-latency.py
 `--write-q16` writes (p05-ipc-002).
 
 Usage:
@@ -1092,12 +1094,16 @@ class Census:
         return self.refined("Q8", "threads without QoS", hits, self.Q8_RAW, self.Q8_PATHS)
 
     # Q9 and Q18 (runtime) ---------------------------------------------------------------------
-    def io_sites(self) -> tuple[list[Hit], str]:
+    def io_sites(self, queue: str = "Q9") -> tuple[list[Hit], str]:
+        """The record run's sites: `--io-record`, else the stored `runtime.<queue>`, else (for
+        Q18) the stored `runtime.Q9`."""
         if self.io_record is not None:
             return parse_io_record(self.io_record), "--io-record"
-        stored = self.targets.get("runtime", {}).get("Q9")
-        if stored:
-            return [Hit(item["file"], int(item.get("line", 0)), item["key"]) for item in stored], f"{TARGETS} runtime.Q9"
+        runtime = self.targets.get("runtime", {})
+        for name in dict.fromkeys((queue, "Q9")):
+            stored = runtime.get(name)
+            if stored:
+                return [Hit(item["file"], int(item.get("line", 0)), item["key"]) for item in stored], f"{TARGETS} runtime.{name}"
         return [], "not recorded (p05-ipc-003 record run)"
 
     def q9(self) -> Result:
@@ -1109,7 +1115,7 @@ class Census:
         IPC-5 ops of p05-ipc.md section 5). A site without `op=` stays: the record cannot show it is
         off the IPC-5 path. An empty or missing `ipc5_ops` keeps every sqlite site, and `--check`
         refuses it once Q9 has data, so the list never filters by being empty."""
-        hits, source = self.io_sites()
+        hits, source = self.io_sites("Q18")
         ops = set(self.targets.get("ipc5_ops") or [])
         chosen = []
         for hit in hits:
@@ -1437,7 +1443,9 @@ def record(census: Census, path: Path) -> dict:
         queues[queue] = entry
     targets["base"] = {"sha": census.repo.head(), "queues": queues}
     if census.io_record is not None:
-        targets.setdefault("runtime", {})["Q9"] = [hit.as_json() for hit in census.result("Q9").hits]
+        runtime = targets.setdefault("runtime", {})
+        runtime["Q9"] = [hit.as_json() for hit in census.result("Q9").hits]
+        runtime["Q18"] = [hit.as_json() for hit in census.result("Q9").hits if hit.key.split()[0] == "kind=sqlite"]
     path.write_text(json.dumps(targets, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return targets
 

@@ -29,7 +29,10 @@
 //! primitives are `#[track_caller]` (request_path_tests.rs checks the direct
 //! connection callers), so a note's site is the handler's line. Queue Q9
 //! (p05-ipc.md) is `CMUX_TUI_REQUEST_PATH_IO=record cargo test -p
-//! cmux-tui-core | grep REQUEST_PATH_IO`.
+//! cmux-tui-core | grep REQUEST_PATH_IO`. A recorded line also names its
+//! request (`op=`): the request watchdog passes each method it learns to
+//! [`name_op`] (server/request_watchdog.rs), and queue Q18 keeps the
+//! `sqlite` sites of the IPC-5 ops by that name.
 
 use std::sync::Arc;
 
@@ -39,7 +42,7 @@ use serde::Serialize;
 pub(crate) use cmux_tui_platform::request_path::in_scope;
 pub(crate) use cmux_tui_platform::request_path::{
     BlockingKind, BlockingObserver, Noted, RequestPathMode, RequestPathScope, RequestPathStats,
-    note, note_at, set_blocking_observer, sleep, will_block,
+    name_op, note, note_at, set_blocking_observer, sleep, will_block,
 };
 
 /// The daemon setting: unset or empty counts only; `record` keeps the site

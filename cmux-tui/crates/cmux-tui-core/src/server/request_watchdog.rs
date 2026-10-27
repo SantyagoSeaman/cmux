@@ -802,6 +802,7 @@ impl RequestWatchdog {
     /// when every slot is taken (counted as unwatched).
     // perf-hot: <100ns daemon-request
     pub(crate) fn begin(&self, client: u64, method: WatchedMethod) -> Option<RequestScope<'_>> {
+        crate::request_path::name_op(|| method.name());
         self.watch_run(WatchKind::MuxConn, client, method.0)
     }
 
@@ -832,11 +833,13 @@ impl RequestWatchdog {
     /// counted in `expected_waits` instead.
     // perf-hot: <100ns daemon-request
     pub(super) fn begin_command(&self, client: u64, command: &Command) -> Option<RequestScope<'_>> {
+        let method = WatchedMethod::command(command);
         if command.waits_by_design() {
+            crate::request_path::name_op(|| method.name());
             self.shared.expected_waits.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        self.begin(client, WatchedMethod::command(command))
+        self.begin(client, method)
     }
 
     /// The `slow_requests` section of `server-stats`.
@@ -886,6 +889,7 @@ impl<'a> RequestScope<'a> {
 
     /// The run is now doing `method` (a frame reaching its handler).
     pub(crate) fn set_method(&self, method: WatchedMethod) {
+        crate::request_path::name_op(|| method.name());
         self.slot.method.store(method.0, Ordering::Relaxed);
     }
 

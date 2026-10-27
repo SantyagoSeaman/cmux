@@ -495,6 +495,19 @@ class RuntimeQueueTests(Fixture):
                 self.assertEqual(len(self.sites("Q18", targets, self.RECORD)), 3)
                 self.assertIn("ipc5_ops is empty", self.census(targets, self.RECORD).result("Q18").source)
 
+    def test_q18_reads_its_own_op_labelled_run_before_an_older_q9_run(self):
+        stored = lambda key: [{"file": "src/workspace_registry/tabs.rs", "line": 120, "key": key}]
+        targets = {
+            "ipc5_ops": ["new-tab"],
+            "runtime": {"Q9": stored("kind=sqlite"), "Q18": stored("kind=sqlite op=new-tab")},
+        }
+        self.assertEqual(self.sites("Q9", targets), [("tabs.rs", 120, "kind=sqlite")])
+        self.assertEqual(self.sites("Q18", targets), [("tabs.rs", 120, "kind=sqlite op=new-tab")])
+        self.assertEqual(self.census(targets).result("Q18").source, f"{census_module.TARGETS} runtime.Q18")
+        del targets["runtime"]["Q18"]
+        self.assertEqual(self.sites("Q18", targets), [("tabs.rs", 120, "kind=sqlite")])
+        self.assertEqual(self.sites("Q18", targets, self.RECORD)[-1], ("tabs.rs", 120, "kind=sqlite op=new-tab"))
+
     def test_check_refuses_an_empty_or_unknown_ops_list_once_q9_has_data(self):
         self.write(f"{CORE}/resource/wire_name.rs", 'Self::PaneSplit => "pane.split",\n')
         census = self.census({"ipc5_ops": []}, self.RECORD)
@@ -537,6 +550,18 @@ class RecordCheckTests(Fixture):
         code, _, err = self.run_main("--check")
         self.assertEqual(code, 1)
         self.assertIn("Q4 (side connections)", err)
+
+    def test_record_with_a_run_stores_q9_and_the_runs_sqlite_sites_as_q18(self):
+        run = self.root / "record.txt"
+        run.write_text(
+            "REQUEST_PATH_IO kind=sqlite site=src/tabs.rs:120 op=new-tab\n"
+            "REQUEST_PATH_IO kind=journal_wait site=src/spawn.rs:44 op=split\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(self.run_main("--record", "--io-record", str(run))[0], 0)
+        runtime = json.loads(self.targets.read_text(encoding="utf-8"))["runtime"]
+        self.assertEqual([item["key"] for item in runtime["Q9"]], ["kind=journal_wait op=split", "kind=sqlite op=new-tab"])
+        self.assertEqual(runtime["Q18"], [{"file": "src/tabs.rs", "line": 120, "key": "kind=sqlite op=new-tab"}])
 
     def test_check_refuses_an_entry_without_a_reason_or_without_a_site(self):
         self.run_main("--record")
