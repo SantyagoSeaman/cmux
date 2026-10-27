@@ -56,8 +56,8 @@ pub(crate) fn private_state_dir(dir: &Path) -> Result<()> {
     );
     anyhow::ensure!(
         metadata.mode() & 0o022 == 0,
-        "{} is writable by another user; inspect it before removing group/other write permission",
-        dir.display()
+        "{}",
+        writable_refusal(dir, metadata.mode(), "700")
     );
     refuse_extended_acl(&opened, dir)?;
     if metadata.mode() & 0o077 != 0 {
@@ -77,6 +77,24 @@ pub(crate) fn private_state_dir(dir: &Path) -> Result<()> {
         dir.display()
     );
     Ok(())
+}
+
+/// Why a state path another account may write is refused, and the exact
+/// `chmod` (to `owner_only`, 700 or 600) that fixes it. Such a path is never
+/// narrowed here: another account may have changed what is in it, and it came
+/// from elsewhere (a `mkdir` or a shell redirect under umask 002), since acpmux
+/// makes its own state owner-only whatever the umask.
+#[cfg(unix)]
+fn writable_refusal(path: &Path, mode: u32, owner_only: &str) -> String {
+    let text = path.display().to_string();
+    let plain = !text.is_empty()
+        && text.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-+,:@%".contains(&b));
+    let word = if plain { text } else { format!("'{}'", text.replace('\'', r"'\''")) };
+    format!(
+        "{} is writable by another user (mode {:o}): check that nothing in it was changed, then make it owner-only with `chmod {owner_only} {word}`",
+        path.display(),
+        mode & 0o777
+    )
 }
 
 /// Every namespace owner above an acpmux state directory must be this user
@@ -157,8 +175,8 @@ fn validate_private_state_file(file: &std::fs::File, path: &Path) -> Result<()> 
     );
     anyhow::ensure!(
         metadata.mode() & 0o022 == 0,
-        "{} is writable by another user; inspect it before removing group/other write permission",
-        path.display()
+        "{}",
+        writable_refusal(path, metadata.mode(), "600")
     );
     refuse_extended_acl(file, path)?;
     if metadata.mode() & 0o077 != 0 {
@@ -624,6 +642,21 @@ pub struct StoreConfig {
     /// Segment roll size in bytes for the event log.
     #[serde(default = "default_segment_bytes")]
     pub segment_bytes: u64,
+    /// Days a closed chat's event log is kept whole (`hub/retention.rs`): after them, the
+    /// harness's raw lines and long tool output are removed from it, the chat's messages kept.
+    /// Default 14; 0 keeps every log whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_log_days: Option<u32>,
+}
+
+impl StoreConfig {
+    /// How long a closed chat's log is kept whole; None: always.
+    pub fn closed_log_retention(&self) -> Option<std::time::Duration> {
+        match self.closed_log_days.unwrap_or(14) {
+            0 => None,
+            days => Some(std::time::Duration::from_secs(u64::from(days) * 86_400)),
+        }
+    }
 }
 
 fn default_segment_bytes() -> u64 {
@@ -632,7 +665,11 @@ fn default_segment_bytes() -> u64 {
 
 impl Default for StoreConfig {
     fn default() -> Self {
-        Self { mode: StoreMode::Local, segment_bytes: default_segment_bytes() }
+        Self {
+            mode: StoreMode::Local,
+            segment_bytes: default_segment_bytes(),
+            closed_log_days: None,
+        }
     }
 }
 
@@ -884,11 +921,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub web_roots: Vec<String>,
     /// `vmHost`: this machine is a dedicated agent VM (a Chief's cloud
-    /// subagent host), so the VM boundary is the sandbox: a remote chain's
-    /// Claude Code runs there without Seatbelt (`hub/remote_sandbox.rs`).
-    /// Honored off macOS only, read from this file only (no RPC sets it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub vm_host: bool,
+    /// subagent host, a VM cmux created), so the VM boundary is the sandbox:
+    /// a remote chain's Claude Code runs there without Seatbelt
+    /// (`hub/remote_sandbox.rs`). Honored off macOS only. Absent: on exactly
+    /// when cmux created this VM (`hub/vm_host.rs`); `_acpmux/vm_host` sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_host: Option<bool>,
     /// `pool`: hidden pre-created sessions that make a harness switch
     /// instant (`hub/pool/`).
     #[serde(default, skip_serializing_if = "PoolConfig::is_default")]
@@ -908,6 +946,11 @@ pub struct Config {
     /// user's own login. The binary names no route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coderouter_claude_route: Option<String>,
+    /// `sendRelay`: `{"argv": [...]}`, the command `acpmux send` hands a message to when its
+    /// target names no session here and no peer lists it (`cli/send_relay.rs`). Unset (the
+    /// default): such a send is refused as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_relay: Option<crate::cli::send_relay::SendRelay>,
     /// Where this config was loaded from. A config built in code (tests,
     /// `--memory` runs) has no path and is never written to disk.
     #[serde(skip)]
@@ -1352,6 +1395,7 @@ pub use pool::PoolConfig;
 mod btw;
 pub use btw::BtwConfig;
 pub mod folder_profiles;
+pub mod harness_icon;
 pub mod profiles;
 pub use profiles::{
     Diagnostic as ProfileDiagnostic, LoadedProfiles, ProfileMeta, ProfileSource, ProfileSources,
