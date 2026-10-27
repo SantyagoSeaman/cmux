@@ -49,6 +49,8 @@ const SUBSCRIPTION: &str = "opens a subscription: it moves to control with the s
     events, as subscribe already did";
 const STREAM_END: &str = "only attach streams carry it: it ends the stream after the stream's \
     output on bulk, like detached; on control it could overtake that output";
+const ATTACH_INPUT_FAILED: &str = "only attach streams carry it (task p05-ipc-078: the attach \
+    stream an INPUT frame named): it rides bulk in order with that stream's output and stream-end";
 
 /// Every name whose lane changed, the old and new lane, and why.
 const EXPECTED_DIFFERENCES: &[(&str, Lane, Lane, &str)] = &[
@@ -76,6 +78,7 @@ const EXPECTED_DIFFERENCES: &[(&str, Lane, Lane, &str)] = &[
     ("cmd agent-inventory-refresh", Lane::Interactive, Lane::Bulk, READ_BEHIND_INPUT),
     ("cmd fs.read", Lane::Interactive, Lane::Bulk, READ_BEHIND_INPUT),
     ("event stream-end", Lane::Control, Lane::Bulk, STREAM_END),
+    ("event input-failed", Lane::Control, Lane::Bulk, ATTACH_INPUT_FAILED),
 ];
 
 /// The values of a route's refining field to try: absent, and the one value
