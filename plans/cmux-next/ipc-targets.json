@@ -1,5 +1,5 @@
 {
-  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there.",
+  "about": "p05-ipc queue targets (plans/cmux-next/chrome-parity/p05-ipc.md, section 6). scripts/cmux-next/ipc-census.py --record writes `base`; --check fails when a queue grows past it or an allowlist entry has no reason or matches no site. Allowlist entries are {queue, file, key (optional: the whole file), reason}. Task p05-ipc-106 adds the transient daemon connections of section 3.1. `ipc5_ops` lists the IPC-5 ops; cmux-tui/scripts/bench-daemon-latency.py `--ops all` measures each of them and refuses to run when one has no plan. `runtime.Q16` (items {file, line, key, p95_ms, wire}) and `runtime.Q16_run` (command, scenario, threshold_ms, sha, host, daemon_version, skipped, failed) are written by `bench-daemon-latency.py --ops all --scenario scale --write-q16` on a macOS fleet host (p05-ipc-002); ipc-census.py reads Q16 from there. p05-ipc-128 recorded the Q9 run: `runtime.Q9` (items {file, line, key}, read by ipc-census.py for Q9 and Q18) and `runtime.Q9_run` (sha, host, command, runs); `triage.Q9` gives every (kind, site) of that run a `task` (`tasks.Q9` defines the p05-ipc-3NN ones; others are existing tasks), a `reason`, or both; `why` holds the backtrace that ties a site to its task.",
   "allowlist": [
     {
       "queue": "Q4",
@@ -250,9 +250,10 @@
       },
       "Q9": {
         "title": "request-path I/O",
-        "count": 0,
-        "found": 0,
-        "source": "not recorded (p05-ipc-003 record run)"
+        "count": 165,
+        "found": 165,
+        "source": "plans/cmux-next/ipc-targets.json runtime.Q9",
+        "recorded_sha": "31f1fd5480211e614fcad92ac25cb22951b3bc10"
       },
       "Q10": {
         "title": "JSON and base64 in the app connection layer",
@@ -478,10 +479,2066 @@
       },
       "Q18": {
         "title": "request-path SQLite reads",
-        "count": 0,
-        "found": 0,
-        "source": "not recorded (p05-ipc-003 record run)"
+        "count": 89,
+        "found": 89,
+        "source": "plans/cmux-next/ipc-targets.json runtime.Q9",
+        "recorded_sha": "31f1fd5480211e614fcad92ac25cb22951b3bc10"
       }
     }
+  },
+  "runtime": {
+    "Q9": [
+      {
+        "file": "/rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs",
+        "line": 250,
+        "key": "kind=proc_scan"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/conversation_attachment_close_tests.rs",
+        "line": 62,
+        "key": "kind=fs_write"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/journal_hooks.rs",
+        "line": 311,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/conversations.rs",
+        "line": 223,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/resource_topology/unpublished_creation.rs",
+        "line": 41,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/resource_topology/unpublished_creation.rs",
+        "line": 41,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 69,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 197,
+        "key": "kind=proc_scan"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 201,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 31,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 31,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 46,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 56,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 72,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 85,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 85,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 109,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 135,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 147,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 147,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 174,
+        "key": "kind=journal_wait"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 175,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 119,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 119,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router.rs",
+        "line": 261,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router.rs",
+        "line": 261,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/auxiliary.rs",
+        "line": 228,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/auxiliary.rs",
+        "line": 228,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/content.rs",
+        "line": 388,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/content.rs",
+        "line": 388,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "key": "kind=journal_wait"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 299,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 299,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "key": "kind=journal_wait"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology/workspace_order.rs",
+        "line": 35,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/resource_router/topology/workspace_order.rs",
+        "line": 35,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server.rs",
+        "line": 2640,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server.rs",
+        "line": 2640,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 94,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 94,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 97,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 97,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 108,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 108,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_job.rs",
+        "line": 143,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/agent_cli_job.rs",
+        "line": 143,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/bookmarks.rs",
+        "line": 194,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/bookmarks.rs",
+        "line": 194,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 71,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 71,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 130,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 131,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 132,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 132,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 786,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 955,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 43,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 70,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 130,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 130,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 160,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 160,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 115,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 115,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 128,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 128,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 182,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 182,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 202,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 202,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 295,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 295,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 308,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 308,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_screens.rs",
+        "line": 240,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_screens.rs",
+        "line": 240,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_server.rs",
+        "line": 107,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_server.rs",
+        "line": 107,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 56,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 56,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 98,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 98,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 193,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 193,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 223,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 223,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 372,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 372,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 402,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 402,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 419,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 419,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 473,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 473,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 516,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 516,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 529,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 529,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 340,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 340,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 33,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 33,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 50,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 50,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 78,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 78,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 285,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 285,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 385,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 385,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 95,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 95,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 176,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 176,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 204,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 227,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 227,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 284,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 284,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 397,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 397,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/new_screen.rs",
+        "line": 64,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/new_screen.rs",
+        "line": 64,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/personal.rs",
+        "line": 64,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/personal.rs",
+        "line": 64,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+        "line": 109,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+        "line": 110,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 125,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 125,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 485,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 485,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/split_kind.rs",
+        "line": 200,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/split_kind.rs",
+        "line": 200,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/split_respawn.rs",
+        "line": 35,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/split_respawn.rs",
+        "line": 35,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/terminal_resources.rs",
+        "line": 11,
+        "key": "kind=proc_scan"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/server/terminal_resources.rs",
+        "line": 94,
+        "key": "kind=proc_scan"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 69,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 88,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 88,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 91,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 91,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 47,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 49,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/construct.rs",
+        "line": 320,
+        "key": "kind=process_spawn"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 74,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 86,
+        "key": "kind=lock_hold_over_1ms"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 86,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 98,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 135,
+        "key": "kind=sqlite"
+      },
+      {
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_intent_tests.rs",
+        "line": 31,
+        "key": "kind=journal_wait"
+      }
+    ],
+    "Q9_run": {
+      "task": "p05-ipc-128",
+      "sha": "31f1fd5480211e614fcad92ac25cb22951b3bc10",
+      "host": "cmux-orchestrator-1 (Linux 7.0.0-1014-gcp x86_64, 360 cores), debug test build",
+      "rustc": "1.95.0 (59807616e 2026-04-14)",
+      "command": "cd cmux-tui && CMUX_TUI_REQUEST_PATH_IO=record cargo test -p cmux-tui-core 2>&1 | grep REQUEST_PATH_IO | sort | uniq -c",
+      "runs": [
+        {
+          "what": "the command as written: lib tests",
+          "env": {
+            "CMUX_TUI_REQUEST_PATH_IO": "record"
+          },
+          "result": "83 sites. 207 lib tests failed and cargo stopped before the integration targets; the 8 server::capabilities::ipc_grant_tests hang on Linux and were killed after every other test ended."
+        },
+        {
+          "what": "each test binary on its own (lib minus ipc_grant_tests, and the 20 tests/*.rs targets)",
+          "env": {
+            "CMUX_TUI_REQUEST_PATH_IO": "record",
+            "CMUX_DAEMON_BLOCKING": "record"
+          },
+          "result": "165 sites, a superset of the first run's. With the thread blocking detector panicking (its Debug default), mux-line-out panics at server/outbound_batch.rs:57 (condvar-wait), which fails most socket tests before their handlers run. In record mode all 20 integration targets pass and the lib has 3245 passed, 246 failed, 14 ignored."
+        }
+      ],
+      "sites": 165,
+      "notes": "Linux run: proc_scan sites read /proc here, sysctl or proc_pidinfo on macOS, at the same call sites. lock_hold_over_1ms depends on timing, so a fleet run can show a different subset of the sqlite sites. Backtraces for the non-sqlite sites come from CMUX_TUI_REQUEST_PATH_IO=panic:<kind> runs with RUST_BACKTRACE=1."
+    }
+  },
+  "triage": {
+    "Q9": [
+      {
+        "kind": "proc_scan",
+        "file": "/rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs",
+        "line": 250,
+        "task": "p05-ipc-303",
+        "why": "Not a cmux line: process-info (cmd_terminals.rs:372-376, tests/pty.rs process_info_reports_live_foreground_cwd) passes platform::foreground_* to Option::and_then as a fn item, so #[track_caller] stops at core's FnOnce::call_once. Three notes per call."
+      },
+      {
+        "kind": "fs_write",
+        "file": "crates/cmux-tui-core/src/conversation_attachment_close_tests.rs",
+        "line": 62,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/journal_hooks.rs",
+        "line": 311,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/conversations.rs",
+        "line": 223,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/mux/resource_topology/unpublished_creation.rs",
+        "line": 41,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/resource_topology/unpublished_creation.rs",
+        "line": 41,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 69,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "proc_scan",
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 197,
+        "task": "p05-ipc-302",
+        "why": "Backtrace (panic:proc_scan): close-pane cmd_panes.rs:295 -> batch_close.rs:607 -> terminal_archive.rs:76 -> foreground_job_name."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/mux/terminal_archive.rs",
+        "line": 201,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 31,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 31,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 46,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 56,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 72,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 85,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 85,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 109,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 135,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 147,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 147,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "journal_wait",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 174,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/request_path_tests.rs",
+        "line": 175,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 119,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 119,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_api.rs",
+        "line": 558,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router.rs",
+        "line": 261,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router.rs",
+        "line": 261,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/auxiliary.rs",
+        "line": 228,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/auxiliary.rs",
+        "line": 228,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/content.rs",
+        "line": 388,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/content.rs",
+        "line": 388,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 40,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 58,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "journal_wait",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "task": "p05-ipc-125",
+        "why": "Backtrace (panic:journal_wait): commit_success -> resource_effects.rs:167 commit_effect_intent -> effect_commit.rs:59 commit_registry_intent -> wait_for_commit_result."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/effects.rs",
+        "line": 166,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 299,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 299,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "journal_wait",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "task": "p05-ipc-121",
+        "why": "Backtrace (panic:journal_wait): workspace.create and terminal creates reach surface_spawn.rs:276 commit_terminal -> commit_registry_intent -> wait_for_commit_result."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/topology.rs",
+        "line": 339,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/resource_router/topology/workspace_order.rs",
+        "line": 35,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/resource_router/topology/workspace_order.rs",
+        "line": 35,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server.rs",
+        "line": 2640,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server.rs",
+        "line": 2640,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 94,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 94,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 97,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 97,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 108,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_intents.rs",
+        "line": 108,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_job.rs",
+        "line": 143,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/agent_cli_job.rs",
+        "line": 143,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/bookmarks.rs",
+        "line": 194,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/bookmarks.rs",
+        "line": 194,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 71,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 71,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 130,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 131,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 132,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/browser_profiles.rs",
+        "line": 132,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 173,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 786,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/chief_registry_resource.rs",
+        "line": 955,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 43,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 70,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 130,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 130,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 160,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_frontend.rs",
+        "line": 160,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 115,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 115,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 128,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 128,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 182,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 182,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 202,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 202,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 295,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 295,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 308,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_panes.rs",
+        "line": 308,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_screens.rs",
+        "line": 240,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_screens.rs",
+        "line": 240,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_server.rs",
+        "line": 107,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_server.rs",
+        "line": 107,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 56,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 56,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 98,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 98,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 193,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 193,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 223,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 223,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 372,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 372,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 402,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 402,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 419,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 419,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 473,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 473,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 516,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 516,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 529,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_tabs.rs",
+        "line": 529,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 30,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 340,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_terminals.rs",
+        "line": 340,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 33,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 33,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 50,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 50,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 78,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 78,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 285,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 285,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 385,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/cmd_workspaces.rs",
+        "line": 385,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 95,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 95,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 176,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 176,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 204,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 227,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 227,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 284,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 284,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 397,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/journal_stream.rs",
+        "line": 397,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/new_screen.rs",
+        "line": 64,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/new_screen.rs",
+        "line": 64,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/personal.rs",
+        "line": 64,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/personal.rs",
+        "line": 64,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+        "line": 109,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/server_stats_tests.rs",
+        "line": 110,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 125,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 125,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 485,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/session_event_stream.rs",
+        "line": 485,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/split_kind.rs",
+        "line": 200,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/split_kind.rs",
+        "line": 200,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/server/split_respawn.rs",
+        "line": 35,
+        "task": "p05-ipc-136",
+        "reason": "The registry connection hold of the kind=sqlite note at the same site (one acquisition, timed at its release; debug build on a loaded host). It goes with that site's Q18 child of p05-ipc-136, which removes the acquisition."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/server/split_respawn.rs",
+        "line": 35,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "proc_scan",
+        "file": "crates/cmux-tui-core/src/server/terminal_resources.rs",
+        "line": 11,
+        "task": "p05-ipc-301"
+      },
+      {
+        "kind": "proc_scan",
+        "file": "crates/cmux-tui-core/src/server/terminal_resources.rs",
+        "line": 94,
+        "task": "p05-ipc-301"
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 69,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 88,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 88,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 91,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/state/router_blocking_tests.rs",
+        "line": 91,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 47,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/store_lock_blocking_tests.rs",
+        "line": 49,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "process_spawn",
+        "file": "crates/cmux-tui-core/src/surface/construct.rs",
+        "line": 320,
+        "task": "p05-ipc-304",
+        "why": "The note's own line: Surface::spawn (construct.rs:49) and spawn_surface_with (surface_spawn.rs:311, :466) are not #[track_caller]. Backtraces: resource_router/topology.rs:339 (terminal creates) and resource_router/auxiliary.rs:344 (sidebar_plugin.rs:65)."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/surface/directory.rs",
+        "line": 222,
+        "task": "p05-ipc-136",
+        "reason": "Q18 (p05-ipc-136): every kind=sqlite site of this run is a Q18 site; 136 writes one child task per file that serves the read from a registry-owned projection."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 74,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "lock_hold_over_1ms",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 86,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 86,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 98,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "sqlite",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_connection_blocking_tests.rs",
+        "line": 135,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      },
+      {
+        "kind": "journal_wait",
+        "file": "crates/cmux-tui-core/src/workspace_registry/registry_intent_tests.rs",
+        "line": 31,
+        "reason": "A request_path detector test: the test opens its own RequestPathScope and asserts this note at its file!/line!; no daemon request reaches this line."
+      }
+    ]
+  },
+  "tasks": {
+    "Q9": [
+      {
+        "id": "p05-ipc-301",
+        "title": "Q9 proc_scan: terminal-resources samples off the request thread",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/server/terminal_resources.rs",
+          "cmux-tui/crates/cmux-tui-core/tests/terminal_resources.rs"
+        ],
+        "change": "Sites terminal_resources.rs:11 (Sampler::new) and :94 (sampler.sample): terminal-resources walks and samples the process table inside the request's RequestPathScope. Post the walk to a background sequence outside any request scope and reply from its completion, as Chrome's task manager refreshes process metrics on a blocking-allowed background sequence and posts the result back (chrome/browser/task_manager/sampling/task_group_sampler.cc). Still one sample per request: no cache, no timer.",
+        "acceptance": "A Q9 record run has no proc_scan site in terminal_resources.rs; request_path_io.proc_scan == 0 after a terminal-resources call; tests/terminal_resources.rs passes.",
+        "test_phase": "RUST(terminal_resources); Q9 record run (p05-ipc-128 test_phase)",
+        "size": "M",
+        "machine_queue": "Q9",
+        "depends_on": [
+          "p05-ipc-003"
+        ]
+      },
+      {
+        "id": "p05-ipc-302",
+        "title": "Q9 proc_scan: closing a pane reads no process table",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/mux/terminal_archive.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/resource_topology/batch_close.rs"
+        ],
+        "change": "Site terminal_archive.rs:197: every terminal a close-pane closes calls platform::foreground_job_name on the request thread (cmd_panes.rs:295 -> batch_close.rs:607 -> terminal_archive.rs:76). Take the stopped job's name from the foreground process the terminal host already reports (add it to that report if it is missing) instead of a process table read at close.",
+        "acceptance": "A Q9 record run has no proc_scan site in terminal_archive.rs; close-pane and close-surface have request_path_io.proc_scan == 0; a reopened stopped job keeps its name (archive tests pass).",
+        "test_phase": "RUST(terminal_archive); RUST(batch_close); Q9 record run (p05-ipc-128 test_phase)",
+        "size": "M",
+        "machine_queue": "Q9",
+        "depends_on": [
+          "p05-ipc-003"
+        ]
+      },
+      {
+        "id": "p05-ipc-303",
+        "title": "Q9 proc_scan: process-info keeps its caller and reads off the request thread",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/server/cmd_terminals.rs",
+          "cmux-tui/crates/cmux-tui-core/src/server/cmd_terminal_io.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/terminal_reap.rs"
+        ],
+        "change": "Site library/core/src/ops/function.rs:250: process-info (cmd_terminals.rs:372-376) passes platform::foreground_cwd, foreground_leader and foreground_process_name to Option::and_then as fn items, so the note's #[track_caller] site is core's FnOnce::call_once. Call them through closures there and at cmd_terminal_io.rs:133 and terminal_reap.rs:483 (same pattern) so the site is the handler; then answer process-info from one foreground snapshot taken on the background sequence of p05-ipc-301 instead of three process table reads on the request thread.",
+        "acceptance": "A Q9 record run has no site outside the repository; process-info has request_path_io.proc_scan == 0; tests/pty.rs process_info_reports_live_foreground_cwd passes.",
+        "test_phase": "RUST(process_info); Q9 record run (p05-ipc-128 test_phase)",
+        "size": "S",
+        "machine_queue": "Q9",
+        "depends_on": [
+          "p05-ipc-003",
+          "p05-ipc-301"
+        ]
+      },
+      {
+        "id": "p05-ipc-304",
+        "title": "Q9 process_spawn: surface spawns name their handler",
+        "files": [
+          "cmux-tui/crates/cmux-tui-core/src/surface/construct.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/surface_spawn.rs",
+          "cmux-tui/crates/cmux-tui-core/src/mux/sidebar_plugin.rs"
+        ],
+        "change": "Site surface/construct.rs:320 is the note's own line: Surface::spawn (construct.rs:49) and spawn_surface_with (surface_spawn.rs:311, :466) are not #[track_caller], so every spawn records construct.rs. Make that chain #[track_caller] so the run names resource_router/topology.rs:339 (terminal creates through terminal_create.rs) and resource_router/auxiliary.rs:344 (sidebar plugin start through sidebar_plugin.rs:65). The terminal creates move after the reply with p05-ipc-130 (terminal-async-start-v1); the sidebar plugin start takes the same async start.",
+        "acceptance": "A Q9 record run shows process_spawn only at handler lines, none in construct.rs; with p05-ipc-130, workspace.create, tab.create_terminal and the sidebar plugin start have request_path_io.process_spawn == 0.",
+        "test_phase": "RUST(request_path); RUST(sidebar_plugin); Q9 record run (p05-ipc-128 test_phase)",
+        "size": "S",
+        "machine_queue": "Q9",
+        "depends_on": [
+          "p05-ipc-003",
+          "p05-ipc-130"
+        ]
+      }
+    ]
   }
 }
