@@ -18,13 +18,12 @@ struct BranchSizedForTests {
             // The host default is `smallest` (bb425d70ed3), where the phone's attach takes the grid by
             // design; this test is about last active, so the terminal pins it, as sized_attach.rs does.
             _ = try await h.connection.request(SetSizePolicyRequest(surface: surface, policy: .init(mode: "latest")))
-            let target = TerminalAttachment.Target(surface: surface, generation: h.identity.generation)
-            let mac = try await TerminalAttachment.attach(
-                endpoint: h.endpoint, target: target, size: CellSize(cols: 100, rows: 30), claimGeometry: true,
-                device: TerminalSizingDevice(kind: "mac", name: "Studio"))
-            let phone = try await TerminalAttachment.attach(
-                endpoint: h.endpoint, target: target, size: CellSize(cols: 50, rows: 20), claimGeometry: false,
-                device: TerminalSizingDevice(kind: "iphone", name: "Pocket"))
+            // Two devices: each view's stream rides a connection of its own (the harness keeps
+            // `terminalStreams` off), which declares that view's device.
+            let mac = try await h.attach(surface, size: CellSize(cols: 100, rows: 30), claimGeometry: true,
+                                         device: TerminalSizingDevice(kind: "mac", name: "Studio"))
+            let phone = try await h.attach(surface, size: CellSize(cols: 50, rows: 20), claimGeometry: false,
+                                           device: TerminalSizingDevice(kind: "iphone", name: "Pocket"))
             let watchdog = Task {
                 try await Task.sleep(for: .seconds(30))
                 mac.detachNow()

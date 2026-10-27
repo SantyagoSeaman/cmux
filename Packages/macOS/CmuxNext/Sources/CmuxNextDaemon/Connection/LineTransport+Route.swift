@@ -91,4 +91,12 @@ extension LineTransport {
         fail(DaemonError.command(cmd: waiter.cmd, message: failure.error ?? "unknown error", code: failure.errorCode,
                                  details: failure.errorDetails, retryable: failure.retryable))
     }
+
+    /// Hands an untagged event to every open stream: a connection of one terminal
+    /// view's own to a daemon without `attach-streams-v1` carries that view's
+    /// events with no stream id (``TerminalStreamCarrier/tagsStreams``).
+    func deliverToOpenStreams(_ message: StreamMessage) {
+        let sinks = state.withLock { Array($0.attachStreams.values) }
+        for sink in sinks { sink(message) }
+    }
 }

@@ -74,9 +74,9 @@ public final class DaemonCompatBackend: MobileCompatBackend {
 
     public func attach(_ tab: TabSnapshot, generation: DaemonGeneration?, size: CellSize) async throws
         -> any MobileCompatTerminalChannel {
-        guard let endpoint = await connection.endpoint else { throw DaemonError.notConnected }
+        let carrier = try await connection.terminalStreams(for: TerminalAttachRoute.View(
+            device: nil, clientName: "cmux-next-mobile-compat"))
         return try await TerminalAttachment.attach(
-            endpoint: endpoint, target: .init(tab: tab, generation: generation), size: size,
-            claimGeometry: false, clientName: "cmux-next-mobile-compat")
+            carrier: carrier, target: .init(tab: tab, generation: generation), size: size, claimGeometry: false)
     }
 }

@@ -14,15 +14,29 @@ import Testing
         /// The daemon's end of the socket: what the view sends.
         let daemon: Int32
 
-        init() throws {
+        /// - Parameters:
+        ///   - ownsConnection: The socket is the view's own (`daemonTerminalStreams` off).
+        ///   - highWater: The view's queue bound.
+        init(ownsConnection: Bool = false, highWater: Int = 8 << 20) throws {
             var fds: [Int32] = [0, 0]
             #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
             transport = LineTransport(connected: fds[0], path: "socketpair")
             daemon = fds[1]
-            queue = TerminalEventQueue.sharedConnection(recorder: nil)
+            queue = TerminalEventQueue(highWater: highWater)
             reader = TerminalStreamReader(transport: transport, queue: queue, control: TerminalAttachment.ControlBox(),
-                                          resolvedSurface: TerminalAttachment.SurfaceBox(SurfaceID(rawValue: 4)))
+                                          resolvedSurface: TerminalAttachment.SurfaceBox(SurfaceID(rawValue: 4)),
+                                          ownsConnection: ownsConnection)
             reader.stream = 9
+        }
+
+        /// Answers the next request the view sent with `data`; returns that request.
+        func reply(_ data: String) throws -> [String: Any] {
+            let line = try #require(sent(1).first)
+            let request = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            let id = try #require(request["id"] as? Int)
+            let reply = Data(#"{"id":\#(id),"ok":true,"data":\#(data)}"#.utf8) + Data([0x0A])
+            _ = reply.withUnsafeBytes { write(daemon, $0.baseAddress, $0.count) }
+            return request
         }
 
         func ready(at offset: UInt64) -> LineTransport.StreamMessage {
@@ -205,7 +219,7 @@ import Testing
         defer { fixture.transport.close(); close(fixture.daemon) }
         fixture.transport.start(onEvent: { _, _, _ in }, onClose: { _ in })
         let identity = DaemonIdentity(capabilities: ["attach-streams-v1", "attach-frames-v1"], generation: "g")
-        let carrier = TerminalStreamCarrier(transport: fixture.transport, identity: identity, frames: true)
+        let carrier = TerminalStreamCarrier(transport: fixture.transport, identity: identity, frames: true, ownsConnection: false, tagsStreams: true)
         let target = TerminalAttachment.Target(surface: SurfaceID(rawValue: 4))
         // The daemon answers with a reply the view cannot read: no daemon refusal.
         let malformed = Task { try await TerminalAttachment.attach(carrier: carrier, target: target, size: CellSize(cols: 80, rows: 24), claimGeometry: false) }
@@ -253,6 +267,78 @@ import Testing
         child.waitUntilExit()
         let seen = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         #expect(seen == "closed\n", "macOS \(ProcessInfo.processInfo.operatingSystemVersionString): \(seen)")
+    }
+
+    /// p01-process-127: a view that falls `highWater` behind drops only its own queued output, asks
+    /// for a snapshot on its own stream, and shows nothing more until that READY.
+    @Test func anOverflowDropsTheStreamsOutputAndAsksForASnapshot() async throws {
+        let fixture = try Fixture(highWater: 8)
+        defer { fixture.transport.close(); close(fixture.daemon) }
+        fixture.reader.receive(fixture.ready(at: 0))
+        fixture.reader.receive(fixture.output("12345", at: 0))
+        fixture.reader.receive(fixture.output("67890", at: 5))  // 10 bytes queued: past the mark
+        fixture.reader.receive(fixture.output("later", at: 10)) // dropped while resyncing
+        let sent = fixture.sent(1)
+        let request = try JSONSerialization.jsonObject(with: Data(try #require(sent.first).utf8)) as? [String: Any]
+        #expect(request?["cmd"] as? String == "snapshot-request")
+        #expect(request?["reason"] as? String == "gap")
+        #expect(request?["attach_stream"] as? Int == 9, "the request runs on the view's own lane")
+        fixture.reader.receive(fixture.ready(at: 40))
+        fixture.reader.receive(fixture.output("fresh", at: 40))
+        let events = await fixture.drain()
+        let outputs = events.compactMap { event -> String? in
+            if case .output(let data, _) = event { String(decoding: data, as: UTF8.self) } else { nil }
+        }
+        #expect(outputs == ["fresh"], "the overflowed output and what came before the READY are gone")
+        #expect(events.filter { if case .snapshot = $0 { true } else { false } }.count == 2)
+    }
+
+    /// p01-process-127: with `daemonTerminalStreams` off a view's stream rides a connection of its
+    /// own, which ends with the stream.
+    @Test func aStreamEndClosesAConnectionOfTheViewsOwn() async throws {
+        let fixture = try Fixture(ownsConnection: true, tagsStreams: true)
+        defer { close(fixture.daemon) }
+        fixture.reader.receive(.event(name: "stream-end", line: Data(#"{"event":"stream-end"}"#.utf8)))
+        #expect(await fixture.drain() == [.closed(.surfaceGone)])
+        #expect(fixture.transport.isClosed)
+    }
+
+    /// p01-process-127: a view on a connection of its own detaches by closing it (no cancel-stream),
+    /// and its events end as a client detach.
+    @Test func aViewOnAConnectionOfItsOwnDetachesByClosingIt() async throws {
+        let fixture = try Fixture()
+        defer { fixture.transport.close(); close(fixture.daemon) }
+        fixture.transport.start(onEvent: { _, _, _ in }, onClose: { _ in })
+        let identity = DaemonIdentity(capabilities: ["attach-streams-v1", "attach-frames-v1"], generation: "g")
+        let carrier = TerminalStreamCarrier(transport: fixture.transport, identity: identity, frames: true, ownsConnection: true, tagsStreams: true)
+        let attach = Task {
+            try await TerminalAttachment.attach(carrier: carrier, target: .init(surface: SurfaceID(rawValue: 4)),
+                                                size: CellSize(cols: 80, rows: 24), claimGeometry: false)
+        }
+        let request = try fixture.reply(#"{"lease":"lease-1"}"#)
+        #expect(request["cmd"] as? String == "attach-surface")
+        let attachment = try await attach.value
+        attachment.detachNow()
+        #expect(fixture.transport.isClosed)
+        var last: TerminalChannelEvent?
+        for await event in attachment.events { last = event }
+        #expect(last == .closed(.detachedByClient))
+    }
+
+    /// p01-process-127: an attach that fails on a connection of the view's own closes that connection.
+    @Test func aFailedAttachOnAConnectionOfItsOwnClosesIt() async throws {
+        let fixture = try Fixture()
+        defer { fixture.transport.close(); close(fixture.daemon) }
+        fixture.transport.start(onEvent: { _, _, _ in }, onClose: { _ in })
+        let identity = DaemonIdentity(capabilities: ["attach-streams-v1"], generation: "g")
+        let carrier = TerminalStreamCarrier(transport: fixture.transport, identity: identity, frames: false, ownsConnection: true, tagsStreams: true)
+        let attach = Task {
+            try await TerminalAttachment.attach(carrier: carrier, target: .init(surface: SurfaceID(rawValue: 4)),
+                                                size: CellSize(cols: 80, rows: 24), claimGeometry: false)
+        }
+        _ = try fixture.reply(#""not an attach reply""#)
+        await #expect(throws: (any Error).self) { try await attach.value }
+        #expect(fixture.transport.isClosed)
     }
 
     @Test func aStreamEndWithReasonOverflowClosesTheViewAsAnOverflow() async throws {

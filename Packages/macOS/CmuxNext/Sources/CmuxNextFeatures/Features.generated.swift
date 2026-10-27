@@ -470,12 +470,12 @@ nonisolated extension Feature {
         runtimeMutable: false
     )
 
-    /// Terminal views attach as client streams on the app's one connection to each daemon (attach-streams-v1, binary attach frames and the local output ring) instead of opening a connection and a handshake per view.
+    /// Terminal views attach as client streams on the app's one connection to each daemon (attach-streams-v1, binary attach frames and the local output ring) instead of each view's stream riding a connection and a handshake of its own.
     public static let daemonTerminalStreams = Feature(
         index: 27,
         name: "daemonTerminalStreams",
         owner: "PL-conn",
-        description: "Terminal views attach as client streams on the app's one connection to each daemon (attach-streams-v1, binary attach frames and the local output ring) instead of opening a connection and a handshake per view.",
+        description: "Terminal views attach as client streams on the app's one connection to each daemon (attach-streams-v1, binary attach frames and the local output ring) instead of each view's stream riding a connection and a handshake of its own.",
         kind: .perfPath,
         process: .app,
         chromiumFeature: nil,

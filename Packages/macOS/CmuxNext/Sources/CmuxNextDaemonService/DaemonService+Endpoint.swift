@@ -20,25 +20,25 @@ extension DaemonService {
         return endpoint
     }
 
-    /// The connection as a carrier of terminal streams (`attach-streams-v1`):
-    /// terminal views attach on it with no connection of their own. Nil when the
-    /// daemon does not serve streams; the view then uses ``endpoint()``.
+    /// The carrier of a terminal view's stream: this machine's connection, or
+    /// with `daemonTerminalStreams` off (or an older daemon) a connection of the
+    /// view's own (`DaemonConnection.terminalStreams(for:)`).
     ///
-    /// - Parameter device: The views' device for shared sizing.
-    /// - Returns: The carrier, or nil when views open their own connections.
+    /// - Parameter view: The view's device, hang watch, input queue and client name.
+    /// - Returns: The carrier of the view's stream.
     /// - Throws: `DaemonError.endpointBlocked` when an administrator turned the
     ///   machine off, `DaemonError.notConnected` while it is not connected.
-    public func terminalStreams(device: TerminalSizingDevice) async throws -> TerminalStreamCarrier? {
+    public func terminalStreams(for view: TerminalAttachRoute.View) async throws -> TerminalStreamCarrier {
         if policyBlock.isBlocked { throw DaemonError.endpointBlocked("turned off by your organization") }
         if connection == nil, startup == .connecting, isStarting { await firstConnection() }
         guard let connection else { throw DaemonError.notConnected }
-        return try await connection.terminalStreams(device: device)
+        return try await connection.terminalStreams(for: view)
     }
 
-    /// Where this machine's terminal views attach: a stream on its connection
-    /// (``terminalStreams(device:)``), else a connection of their own (``endpoint()``).
+    /// Where this machine's terminal views attach: a stream whose carrier
+    /// ``terminalStreams(for:)`` gives.
     public var terminalAttachRoute: TerminalAttachRoute {
-        TerminalAttachRoute(streams: { try await self.terminalStreams(device: $0) }, endpoint: { try await self.endpoint() })
+        TerminalAttachRoute { try await self.terminalStreams(for: $0) }
     }
 }
 

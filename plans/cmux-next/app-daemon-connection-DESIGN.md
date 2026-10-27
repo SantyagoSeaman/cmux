@@ -343,10 +343,12 @@ the size is raised with that number as its reason.
 ## 6. Versioning
 
 - Old app, new daemon: no capability, today's per-view connections and JSON.
-- New app, old daemon: the daemon does not advertise the capabilities; the app uses per-view connections.
-- Streams are behind the `daemonTerminalStreams` feature (schemas/features/features.d, default off on
-  every channel while the chrome-parity push measures it; p01-process-126). One release after it turns on,
-  slice 4 deletes the per-view path.
+- New app, old daemon: the daemon does not advertise the capabilities; each view's stream rides a
+  connection of its own whose untagged events are that view's (p01-process-127).
+- Every view is a stream (`TerminalAttachment` has one path since p01-process-127). The
+  `daemonTerminalStreams` feature (schemas/features/features.d, default off on every channel while the
+  chrome-parity push measures it) only picks the carrier: on, the machine's connection; off, a
+  connection per view carrying its one stream. One release after it turns on, slice 4 deletes the flag.
 - Binary frames and the ring follow p05-ipc's grant rule (capabilities.rs `IpcCapability`): only a direct
   same-user local client that declared this daemon's `api_revision` gets them. Until the app declares its
   revision in `set-client-info`, its streams carry JSON events tagged with `attach_stream`. The daemon keeps JSON/base64 output for the other clients (iOS `CmuxMobileSSH`,
@@ -371,8 +373,9 @@ STRESS before and after.
 3. **Shared-memory ring.** Daemon writer, RING / RING_ADVANCE, app mapping, zero-copy spans, lap detection,
    resume by offset. Red: copied-bytes counter app-side for local output (> 0 today, 0 after); a lap test
    (reader holds a span while the writer laps) requires a resync and a correct screen.
-4. **Remove the per-view path** after one release: the flag, the per-view `LineTransport`, the blocking
-   `TerminalEventQueue` mode.
+4. **Remove the per-view path** after one release: the flag and the per-view carrier. The per-view
+   `LineTransport` in `TerminalAttachment` and the blocking `TerminalEventQueue` mode went in
+   p01-process-127.
 5. **SSH bridge frames** (cmux-remote): frames over the link, per-stream lane, `attach_stream` kept on `send`.
 
 ## 8. Files (for coordination)

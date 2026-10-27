@@ -23,7 +23,7 @@ import Testing
     }
 
     @Test func aParkedTerminalReadGetsTheNextEvent() async {
-        let queue = TerminalEventQueue(recorder: nil)
+        let queue = TerminalEventQueue()
         let read = Task { await queue.next() }
         let event = TerminalChannelEvent.output(Data([1, 2, 3]), colors: nil)
         queue.push(event)
@@ -31,7 +31,7 @@ import Testing
     }
 
     @Test func aParkedTerminalReadGetsNilAtTheEnd() async {
-        let queue = TerminalEventQueue(recorder: nil)
+        let queue = TerminalEventQueue()
         let read = Task { await queue.next() }
         queue.finish()
         #expect(await read.value == nil)

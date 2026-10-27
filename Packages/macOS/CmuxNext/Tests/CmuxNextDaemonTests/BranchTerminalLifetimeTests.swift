@@ -56,9 +56,7 @@ struct BranchTerminalLifetimeTests {
                 .first { $0.tabResourceID == projected.id })
             #expect(restored.terminalID == before.terminalID)
             #expect(try await h.pane(of: restored.surface)?.id == pane)
-            let attachment = try await TerminalAttachment.attach(
-                endpoint: h.endpoint, target: .init(surface: restored.surface, generation: h.identity.generation),
-                size: CellSize(cols: 120, rows: 30), claimGeometry: true)
+            let attachment = try await h.attach(restored.surface, size: CellSize(cols: 120, rows: 30), claimGeometry: true)
             var iterator = attachment.events.makeAsyncIterator()
             guard case .replay(let replay)? = await iterator.next() else {
                 Issue.record("attach did not start with a replay")

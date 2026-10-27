@@ -210,8 +210,10 @@ struct QuitSessionsTests {
     /// Types `command` into `tab`'s terminal and returns its output up to `sentinel` (bounded: 20 s).
     static func run(_ command: String, in tab: TabSnapshot, endpoint: DaemonEndpoint, generation: DaemonGeneration?,
                     until sentinel: String) async throws -> String {
+        let carrier = try await TerminalStreamCarrier.dedicated(endpoint: endpoint, capabilities: DaemonCapability.advertised,
+                                                                view: TerminalAttachRoute.View(device: nil))
         let attachment = try await TerminalAttachment.attach(
-            endpoint: endpoint, target: .init(tab: tab, generation: generation),
+            carrier: carrier, target: .init(tab: tab, generation: generation),
             size: CellSize(cols: 200, rows: 50), claimGeometry: true)
         let watchdog = Task {
             try await Task.sleep(for: .seconds(20))

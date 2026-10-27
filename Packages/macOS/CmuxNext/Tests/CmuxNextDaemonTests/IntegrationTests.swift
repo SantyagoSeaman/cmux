@@ -143,7 +143,7 @@ struct IntegrationTests {
             #expect(await store.workspace(key: workspace.key)?.name == "it")
 
             let attachment = try await TerminalAttachment.attach(
-                endpoint: ensured.endpoint,
+                carrier: try await connection.terminalStreams(for: TerminalAttachRoute.View(device: nil)),
                 target: .init(surface: surface, terminalResourceID: resourceID, generation: identity.generation),
                 size: CellSize(cols: 80, rows: 24),
                 claimGeometry: true
@@ -238,7 +238,7 @@ struct IntegrationTests {
             work: BackgroundWork(label: "test.daemon-launcher"),
             configuration: .init(binary: binary, session: session, stateDirectory: root.appendingPathComponent("state")),
             environment: { environment })
-        let ensured = try await launcher.ensure()
+        _ = try await launcher.ensure()
         // The app's provider, fed the same login env as the launcher (the
         // default one reads the process-wide capture of the test runner's env).
         let connection = DaemonConnection(
@@ -249,7 +249,7 @@ struct IntegrationTests {
             let workspace = try await connection.createWorkspace(name: "path")
             let terminal = try await connection.createTerminal(in: workspace.key, cwd: root.path, size: CellSize(cols: 200, rows: 24))
             let attachment = try await TerminalAttachment.attach(
-                endpoint: ensured.endpoint,
+                carrier: try await connection.terminalStreams(for: TerminalAttachRoute.View(device: nil)),
                 target: .init(surface: try #require(terminal.surface), generation: identity.generation),
                 size: CellSize(cols: 200, rows: 24), claimGeometry: true)
             let watchdog = Task {

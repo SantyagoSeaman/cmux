@@ -8,10 +8,10 @@ import func CmuxSafeConcurrency.withOnceContinuation
 /// view that renders its steps (plans/cmux-next/state-audit.md T1).
 ///
 /// Overflow policy: the producer waits while more than `highWater` output
-/// bytes are queued, so a view that stops draining stops its pump, the
-/// attachment's `TerminalEventQueue` fills, its reader stops reading, and
-/// the daemon ends the stream with `overflow` at its 8 MiB mailbox limit.
-/// The view then reattaches from a fresh replay. A replay never waits and
+/// bytes are queued, so a view that stops draining stops its pump and the
+/// attachment's `TerminalEventQueue` fills; past its bound that stream drops
+/// its output and resyncs by snapshot (a replay stream ends with `overflow`
+/// and the view reattaches from a fresh replay). A replay never waits and
 /// discards queued output, which it supersedes (the view
 /// rebuilds its surface from it). Nothing here grows without bound.
 public nonisolated final class TerminalStepQueue: Sendable {

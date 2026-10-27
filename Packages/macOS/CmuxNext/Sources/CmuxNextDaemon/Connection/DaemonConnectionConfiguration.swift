@@ -6,11 +6,11 @@ public struct DaemonConnectionConfiguration: Sendable {
     public var clientName: String
     public var requiredCapabilities: [String]
     public var advertisedCapabilities: [String]
-    /// Terminal views attach as streams on this connection when the daemon
-    /// serves `attach-streams-v1` (``DaemonConnection/terminalStreams(device:)``);
-    /// false keeps one connection per view. The app sets it from the
-    /// `daemonTerminalStreams` feature (default off): the per-view path stays the
-    /// rollback until that path is removed (design section 6).
+    /// Terminal views attach as streams on this connection
+    /// (``DaemonConnection/terminalStreams(for:)``); false gives each view a
+    /// connection of its own that carries only its stream. The app sets it from
+    /// the `daemonTerminalStreams` feature (default off): a connection per view
+    /// stays the rollback until the shared lanes are measured (design section 6).
     public var terminalStreams: Bool
     public var treeEvents: TreeEventMode
     /// Spacing and budget of reconnect attempts.

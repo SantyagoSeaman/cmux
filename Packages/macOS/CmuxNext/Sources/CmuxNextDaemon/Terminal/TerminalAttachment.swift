@@ -4,13 +4,16 @@ public import CmuxNextTrace
 import CmuxNextWakeups
 import os
 
-/// One attached terminal view: a client stream on the app's connection to its
-/// daemon (``attach(carrier:target:size:claimGeometry:snapshotVersion:localHistory:images:)``,
-/// `attach-streams-v1`), or, against a daemon without streams, a connection of
-/// its own (``attach(endpoint:target:size:claimGeometry:snapshotVersion:localHistory:images:clientName:device:)``).
-/// Output flows through a bounded `TerminalEventQueue`; after the attach every
-/// command here is fire-and-forget. On a shared connection the reader never
-/// waits for this view: a view that falls behind resyncs by snapshot (D5).
+/// One attached terminal view: a client stream (`attach-streams-v1`) on the
+/// carrier its route gives (``TerminalStreamCarrier``), the machine's one
+/// connection to its daemon or, while `daemonTerminalStreams` is off, a
+/// connection of the view's own that carries only this stream. Output flows
+/// through the view's bounded ``TerminalEventQueue``; after the attach every
+/// command here is fire-and-forget. Views share one connection as Chrome's
+/// associated interfaces share one message pipe, each with its own id and
+/// queue (mojo/public/cpp/bindings/lib/multiplex_router.cc). The connection's
+/// reader never waits for this view: a view that falls behind loses its
+/// queued output and resyncs by snapshot (D5).
 public actor TerminalAttachment: TerminalByteChannel {
     public struct Target: Sendable, Hashable {
         public var surface: SurfaceID
@@ -54,13 +57,15 @@ public actor TerminalAttachment: TerminalByteChannel {
         init(_ surface: SurfaceID) { value = Mutex(surface) }
     }
 
-    /// Snapshot order of this stream; only the reader thread touches it.
-    private final class SequencerBox: Sendable {
-        let value = Mutex(TerminalSnapshotSequencer())
-    }
+    /// The carrier's connection; this view only sends on it, tagged with ``wireStream``.
     private nonisolated let transport: LineTransport
-    /// The view's client stream on a shared connection; nil on its own connection.
-    nonisolated let stream: UInt16?
+    /// The connection is this view's own (``TerminalStreamCarrier/ownsConnection``).
+    private nonisolated let ownsConnection: Bool
+    /// The view's client stream on its carrier.
+    nonisolated let stream: UInt16
+    /// The stream id the view's requests name: ``stream``, or nil on a connection of its own to a
+    /// daemon without `attach-streams-v1` (``TerminalStreamCarrier/tagsStreams``).
+    private nonisolated let wireStream: UInt16?
     private nonisolated let queue: TerminalEventQueue
     private nonisolated let logger = Logger(subsystem: "com.cmuxterm.app.next", category: "daemon.attach")
 
@@ -79,7 +84,8 @@ public actor TerminalAttachment: TerminalByteChannel {
         /// the participant (held: without it the view cannot tell whether it owns the grid).
         var sizeGeneration: UInt64?
         var heldSizeState: TerminalSizeState?
-        /// This view sent `cancel-stream` (its stream end is a client detach).
+        /// This view ended its stream (`cancel-stream`, or closing a connection of its own):
+        /// the stream's end is a client detach.
         var canceled = false
     }
 
@@ -96,62 +102,8 @@ public actor TerminalAttachment: TerminalByteChannel {
     /// and grid change, so a host without it gets a byte replay attach.
     public static let snapshotCapability = DaemonCapability.terminalSnapshotHistory.rawValue
 
-    /// Opens a connection, attaches in byte mode at `size`, and optionally
-    /// claims canonical geometry (the focused view in the key window does).
-    ///
-    /// - Parameter snapshotVersion: the view's GHOSTSNP version. When the
-    ///   host has ``snapshotCapability`` the attach asks for snapshots; the
-    ///   host still answers with a byte replay when its version differs.
-    /// - Parameter hangs: watches the reader's handling of each output line
-    ///   (``LineTransport``'s `daemon.line` scope); nil watches nothing.
-    /// - Parameter createIntent: the `create.tab` intent id of the new tab whose terminal this first attach
-    ///   shows (``NewTerminalTrace/FirstAttach``): its stages are that create's instants. 0: a restore or a
-    ///   reattach, which writes none.
-    /// - Parameter inputQueue: the view's serial input queue; the socket writer drains on it (nil: its own queue).
-    public static func attach(
-        endpoint: DaemonEndpoint,
-        target: Target,
-        size: CellSize,
-        claimGeometry: Bool,
-        snapshotVersion: UInt16? = nil,
-        localHistory: Bool = false,
-        images: Bool = false,
-        clientName: String = "cmux-next-terminal",
-        device: TerminalSizingDevice? = nil,
-        hangs: (any HangWatchScoping)? = nil,
-        createIntent: UInt64 = 0,
-        inputQueue: DispatchQueue? = nil
-    ) async throws -> TerminalAttachment {
-        DaemonLaunchTimings.shared.mark("terminal.attach_start")
-        NewTerminalTrace.shared.attachEvent(.attachStart, surface: target.surface.rawValue, intent: createIntent)
-        let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .terminalAttach,
-                                                     stats: endpoint.wireStats, hangs: hangs, writerTarget: inputQueue)
-        let attachment = TerminalAttachment(transport: transport, surface: target.surface)
-        do {
-            try await attachment.open(target: target, size: size, claimGeometry: claimGeometry,
-                                      snapshotVersion: snapshotVersion, localHistory: localHistory,
-                                      images: images, clientName: clientName, device: device, createIntent: createIntent)
-        } catch {
-            transport.close()
-            throw error
-        }
-        return attachment
-    }
-
-    private init(transport: LineTransport, surface: SurfaceID) {
-        self.transport = transport
-        stream = nil
-        resolvedSurface = SurfaceBox(surface)
-        control = ControlBox()
-        let queue = TerminalEventQueue(recorder: transport.recorder)
-        self.queue = queue
-        events = AsyncStream(unfolding: { await queue.next() }, onCancel: { queue.cancel() })
-    }
-
-    /// Attaches a view: as a stream on the connection `route.streams` gives
-    /// for `device` (``attach(carrier:target:size:claimGeometry:snapshotVersion:localHistory:images:)``),
-    /// or, when it gives none (an older daemon, streams turned off), on a
-    /// connection of its own to `route.endpoint`. The one attach path of an app view.
+    /// Attaches a view as a stream on the carrier `route` gives for it. The
+    /// one attach path of an app view.
     ///
     /// - Parameters:
     ///   - route: Where the view attaches (`DaemonService.terminalAttachRoute`).
@@ -161,11 +113,12 @@ public actor TerminalAttachment: TerminalByteChannel {
     ///   - snapshotVersion: The view's GHOSTSNP version (snapshot attach), or nil.
     ///   - localHistory: The view reflows its own history at a resize.
     ///   - images: The view applies Kitty image replays.
-    ///   - device: The view's device for shared sizing.
-    ///   - hangs: Watches a connection of the view's own (its reader's lines); a stream's lines are
-    ///     its machine connection's.
+    ///   - device: The view's device for shared sizing; nil joins none.
+    ///   - hangs: Watches a connection of the view's own (its reader's lines); a shared
+    ///     connection's lines are its machine connection's.
     ///   - createIntent: The `create.tab` intent of the new tab this first attach shows; 0 otherwise.
     ///   - inputQueue: The view's serial input queue for a connection of its own (nil: its own queue).
+    ///   - clientName: The `set-client-info` name of a connection of the view's own.
     /// - Returns: The attached view.
     /// - Throws: `DaemonError` when the daemon refuses the attach or the
     ///   connection fails; `CancellationError` when the task is cancelled.
@@ -177,26 +130,22 @@ public actor TerminalAttachment: TerminalByteChannel {
         snapshotVersion: UInt16? = nil,
         localHistory: Bool = false,
         images: Bool = false,
-        device: TerminalSizingDevice,
+        device: TerminalSizingDevice?,
         hangs: (any HangWatchScoping)? = nil,
         createIntent: UInt64 = 0,
-        inputQueue: DispatchQueue? = nil
+        inputQueue: DispatchQueue? = nil,
+        clientName: String = "cmux-next-terminal"
     ) async throws -> TerminalAttachment {
-        if let carrier = try await route.streams?(device) {
-            return try await attach(carrier: carrier, target: target, size: size, claimGeometry: claimGeometry,
-                                    snapshotVersion: snapshotVersion, localHistory: localHistory, images: images,
-                                    createIntent: createIntent)
-        }
-        return try await attach(endpoint: try await route.endpoint(), target: target, size: size,
-                                claimGeometry: claimGeometry, snapshotVersion: snapshotVersion,
-                                localHistory: localHistory, images: images, device: device, hangs: hangs,
-                                createIntent: createIntent, inputQueue: inputQueue)
+        let carrier = try await route.carrier(TerminalAttachRoute.View(device: device, hangs: hangs, inputQueue: inputQueue,
+                                                                       clientName: clientName))
+        return try await attach(carrier: carrier, target: target, size: size, claimGeometry: claimGeometry,
+                                snapshotVersion: snapshotVersion, localHistory: localHistory, images: images,
+                                createIntent: createIntent)
     }
 
     /// Attaches as a client stream on `carrier`'s connection: one
-    /// `attach-surface` round trip, no connection and no handshake of its own
-    /// (the connection declared the sizing device once,
-    /// ``DaemonConnection/terminalStreams(device:)``).
+    /// `attach-surface` round trip (a shared connection declared the sizing
+    /// device once, ``DaemonConnection/terminalStreams(for:)``).
     ///
     /// - Parameters:
     ///   - carrier: The connection the stream rides on.
@@ -222,16 +171,18 @@ public actor TerminalAttachment: TerminalByteChannel {
     ) async throws -> TerminalAttachment {
         DaemonLaunchTimings.shared.mark("terminal.attach_start")
         NewTerminalTrace.shared.attachEvent(.attachStart, surface: target.surface.rawValue, intent: createIntent)
-        let queue = TerminalEventQueue.sharedConnection(recorder: carrier.transport.recorder)
+        let queue = TerminalEventQueue()
         let resolvedSurface = SurfaceBox(target.surface)
         let control = ControlBox()
         let reader = TerminalStreamReader(transport: carrier.transport, queue: queue, control: control,
-                                  resolvedSurface: resolvedSurface)
+                                          resolvedSurface: resolvedSurface, ownsConnection: carrier.ownsConnection,
+                                          tagsRequests: carrier.tagsStreams)
         guard let stream = carrier.transport.openStream({ reader.receive($0) }) else {
+            if carrier.ownsConnection { carrier.transport.close() }
             throw DaemonError.connectionClosed(reason: "the daemon connection closed")
         }
         reader.stream = stream
-        let attachment = TerminalAttachment(transport: carrier.transport, surface: target.surface, stream: stream,
+        let attachment = TerminalAttachment(carrier: carrier, surface: target.surface, stream: stream,
                                             queue: queue, resolvedSurface: resolvedSurface, control: control)
         do {
             try await attachment.openStream(target: target, identity: carrier.identity, size: size,
@@ -244,10 +195,12 @@ public actor TerminalAttachment: TerminalByteChannel {
         return attachment
     }
 
-    private init(transport: LineTransport, surface: SurfaceID, stream: UInt16, queue: TerminalEventQueue,
+    private init(carrier: TerminalStreamCarrier, surface: SurfaceID, stream: UInt16, queue: TerminalEventQueue,
                  resolvedSurface: SurfaceBox, control: ControlBox) {
-        self.transport = transport
+        transport = carrier.transport
+        ownsConnection = carrier.ownsConnection
         self.stream = stream
+        wireStream = carrier.tagsStreams ? stream : nil
         self.resolvedSurface = resolvedSurface
         self.queue = queue
         self.control = control
@@ -259,6 +212,7 @@ public actor TerminalAttachment: TerminalByteChannel {
         let useIdentity = identity.supports("attach-identity-v1") && target.terminalResourceID != nil
             && target.generation == identity.generation
         if target.surface == Self.unresolvedSurface, !useIdentity {
+            // Only the identity pair can name a terminal with no tab.
             throw DaemonError.missingCapabilities(["attach-identity-v1"])
         }
         let request = AttachSurfaceRequest(
@@ -270,7 +224,8 @@ public actor TerminalAttachment: TerminalByteChannel {
             snapshotLocalHistory: localHistory && identity.supports(DaemonCapability.terminalSnapshotLocalHistory.rawValue),
             snapshotImages: images && identity.supports(DaemonCapability.terminalSnapshotImages.rawValue)
         )
-        let stream = stream
+        let stream = wireStream
+        // The READY or the replay rides before the reply: a longer, still bounded deadline.
         let line = try await transport.request(cmd: AttachSurfaceRequest.commandName, timeout: .seconds(10)) { id in
             try WireCoding.encodeRequest(request, id: id, stream: stream)
         }.line
@@ -285,14 +240,19 @@ public actor TerminalAttachment: TerminalByteChannel {
         NewTerminalTrace.shared.attachEvent(.attachEnd, surface: target.surface.rawValue, intent: createIntent)
     }
 
-    /// Ends this view's stream after its attach failed. The daemon ends a
-    /// stream it refused (an error reply, then `stream-end`). A deadline or a
-    /// cancel gives up with the attach still in flight: `cancel-stream` runs
-    /// after it on the stream's lane, so a late success does not leave a viewer
-    /// nobody reads; its `stream-end` frees the id. A closed transport sends
-    /// nothing more, so the id is forgotten here.
+    /// Ends this view's stream after its attach failed. A connection of the
+    /// view's own closes (that ends the stream on the daemon). On a shared
+    /// connection the daemon ends a stream it refused (an error reply, then
+    /// `stream-end`); a deadline or a cancel gives up with the attach still in
+    /// flight: `cancel-stream` runs after it on the stream's lane, so a late
+    /// success does not leave a viewer nobody reads; its `stream-end` frees the
+    /// id. A closed transport sends nothing more, so the id is forgotten here.
     private nonisolated func abandonStream(after error: any Error) {
-        guard let stream else { return }
+        if ownsConnection {
+            control.value.withLock { $0.canceled = true }
+            transport.close()
+            return
+        }
         if transport.isClosed {
             transport.forgetStream(stream)
             return
@@ -302,7 +262,7 @@ public actor TerminalAttachment: TerminalByteChannel {
         fireAndForget(CancelStreamRequest())
     }
 
-    /// Records the attach reply's lease and size state (both attach paths).
+    /// Records the attach reply's lease and size state.
     private nonisolated func acceptAttachReply(_ response: AttachSurfaceRequest.Response, size: CellSize, hidesInPlace: Bool) {
         let queue = queue
         control.value.withLock { control in
@@ -324,85 +284,6 @@ public actor TerminalAttachment: TerminalByteChannel {
 
     /// Output bytes waiting for the consumer (diagnostics, tests).
     public nonisolated var bufferedOutputBytes: Int { queue.bufferedOutputBytes }
-
-    private func open(target: Target, size: CellSize, claimGeometry: Bool, snapshotVersion: UInt16?,
-                      localHistory: Bool, images: Bool, clientName: String,
-                      device: TerminalSizingDevice?, createIntent: UInt64) async throws {
-        let queue = queue
-        let control = control
-        let resolvedSurface = resolvedSurface
-        let sequencer = SequencerBox()
-        let decoder = transport.decoder
-        transport.start(
-            onEvent: { name, line, _ in
-                var surface = resolvedSurface.value.withLock { $0 }
-                if surface == Self.unresolvedSurface, let named = Self.initialSurface(name: name, line: line, decoder: decoder) {
-                    resolvedSurface.value.withLock { $0 = named }
-                    surface = named
-                }
-                guard let decoded = Self.decodeAttachLine(name: name, line: line, surface: surface, decoder: decoder),
-                      let event = sequencer.value.withLock({ $0.admit(decoded) })
-                else { return }
-                if case .sizeState(let state, let selfParticipant) = event {
-                    // Pushed under the same lock that orders generations (see admitSizeState).
-                    Self.admitSizeState(state, selfParticipant: selfParticipant, control: control, queue: queue)
-                    return
-                }
-                if case .closed = event {
-                    queue.finish(event)
-                } else {
-                    if case .output = event { TypingLatencyProbe.shared.outputDecoded(flow: decoded.flow) }
-                    queue.push(event)
-                    if let flow = decoded.flow { queue.pushWithoutWaiting(.inputEcho(flow: flow)) } // rides behind its chunk
-                }
-            },
-            onClose: { reason in
-                switch reason {
-                case .closedByClient: queue.finish(.closed(.detachedByClient))
-                case .daemonShutdown: queue.finish(.closed(.connectionLost("daemon shut down")))
-                case .lost(let detail): queue.finish(.closed(.connectionLost(detail)))
-                }
-            }
-        )
-        // Both in one round trip; the attach below needs the identity.
-        let replies = await transport.pipeline([
-            PipelinedLine(IdentifyRequest()),
-            PipelinedLine(SetClientInfoRequest(
-                name: clientName, kind: "frontend",
-                // A view that names its device joins shared sizing: `size-state` events, and its
-                // device in the size state ("Sized for <device>" on every other view).
-                capabilities: DaemonCapability.advertised + (device == nil ? [] : [DaemonCapability.sharedSizing.rawValue]),
-                deviceKind: device?.kind, deviceName: device?.name)),
-        ], timeout: DaemonConnection.defaultRequestTimeout)
-        let identity = try WireCoding.decodeResponse(IdentifyRequest.Response.self, from: replies[0].get())
-        _ = try replies[1].get()
-        let useIdentity = identity.supports("attach-identity-v1") && target.terminalResourceID != nil
-            && target.generation == identity.generation
-        if target.surface == Self.unresolvedSurface, !useIdentity {
-            // Only the identity pair can name a terminal with no tab.
-            throw DaemonError.missingCapabilities(["attach-identity-v1"])
-        }
-        let request = AttachSurfaceRequest(
-            surface: useIdentity ? nil : target.surface,
-            expectedGeneration: useIdentity ? target.generation : nil,
-            expectedTerminalID: useIdentity ? target.terminalResourceID : nil,
-            size: size,
-            snapshotVersion: identity.supports(Self.snapshotCapability) ? snapshotVersion : nil,
-            snapshotLocalHistory: localHistory && identity.supports(DaemonCapability.terminalSnapshotLocalHistory.rawValue),
-            snapshotImages: images && identity.supports(DaemonCapability.terminalSnapshotImages.rawValue)
-        )
-        // The reply carries the replay (up to 32 MiB): a longer, still bounded deadline.
-        let response = try await DaemonConnection.perform(request, on: transport, timeout: .seconds(10))
-        NewTerminalTrace.shared.attachEvent(.attachReplied, surface: target.surface.rawValue, intent: createIntent)
-        acceptAttachReply(response, size: size, hidesInPlace: identity.supports(DaemonCapability.sharedSizing.rawValue))
-        if claimGeometry {
-            _ = try await DaemonConnection.perform(
-                SetClientSizingRequest(surface: self.surface, enabled: true, exclusive: true), on: transport)
-        }
-        queue.arm()
-        DaemonLaunchTimings.shared.mark("terminal.attach_end")
-        NewTerminalTrace.shared.attachEvent(.attachEnd, surface: target.surface.rawValue, intent: createIntent)
-    }
 
     /// Passes `state` on with this view's participant, newest generation only. The participant is
     /// the event's `self_participant`, else the attach reply's; with neither the state is held,
@@ -436,7 +317,7 @@ public actor TerminalAttachment: TerminalByteChannel {
         let logger = logger
         let flow = TypingLatencyProbe.shared.openFlow
         do {
-            let stream = stream
+            let stream = wireStream
             try transport.sendNoReply(cmd: SendInputRequest.command, onError: { error in
                 logger.error("send failed: \(error.description, privacy: .public)")
             }) { id in
@@ -544,27 +425,26 @@ public actor TerminalAttachment: TerminalByteChannel {
         }
     }
 
-    /// Idempotent: the first call detaches. A stream ends (`cancel-stream`;
-    /// the shared connection stays); a connection of its own closes.
+    /// Idempotent: the first call detaches. The stream ends: `cancel-stream`
+    /// on a shared connection (which stays), or a connection of its own closes.
     public nonisolated func detachNow() {
-        let lease = control.value.withLock { control -> String?? in
-            guard !control.detached else { return .none }
+        let first = control.value.withLock { control -> Bool in
+            guard !control.detached else { return false }
             control.detached = true
             control.canceled = true
-            return .some(control.lease)
+            return true
         }
-        guard case .some(let lease) = lease else { return }
-        if stream != nil {
+        guard first else { return }
+        if ownsConnection {
+            transport.close()
+        } else {
             fireAndForget(CancelStreamRequest())
-            return
         }
-        if let lease { fireAndForget(DetachAttachedViewRequest(surface: surface, lease: lease)) }
-        transport.close()
     }
 
     private nonisolated func fireAndForget<R: DaemonRequest>(_ request: R) {
         let logger = logger
-        let stream = stream
+        let stream = wireStream
         do {
             try transport.sendNoReply(cmd: R.command, onError: { error in
                 logger.error("\(R.command, privacy: .public) failed: \(error.description, privacy: .public)")

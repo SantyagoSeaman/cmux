@@ -18,9 +18,7 @@ struct BranchAttachResizeTests {
                 #"stty -echo; printf '%s\n\033[1;3' "wait""ing"; read x; printf 'm after-%s\n' "$x""#,
                 in: surface, until: "waiting\r\n")
 
-            let attachment = try await TerminalAttachment.attach(
-                endpoint: h.endpoint, target: .init(surface: surface, generation: h.identity.generation),
-                size: CellSize(cols: 100, rows: 30), claimGeometry: true)
+            let attachment = try await h.attach(surface, size: CellSize(cols: 100, rows: 30), claimGeometry: true)
             let watchdog = Task {
                 try await Task.sleep(for: .seconds(15))
                 await attachment.detach()

@@ -14,8 +14,8 @@ struct DaemonWireStatsTests {
     static let mebibyte = 1 << 20
 
     /// The production openers, with the recorder on the endpoint: the app's control connection
-    /// (`DaemonConnection`, role main) and two terminal views, each on a connection of its own
-    /// (today's per-view path).
+    /// (`DaemonConnection`, role main) and two terminal views with `daemonTerminalStreams` off, each
+    /// view's stream on a connection of its own (the rollback path).
     @Test func twoTerminalsOnAFakeDaemonOpenThreeConnectionsAndCopyTheirOutput() async throws {
         let stats = DaemonWireStats()
         let daemon = try FakeWireDaemon(outputBytesPerAttach: Self.mebibyte)
@@ -26,8 +26,9 @@ struct DaemonWireStatsTests {
         _ = try await control.start()
         var attachments: [TerminalAttachment] = []
         for surface: UInt64 in [1, 2] {
+            let carrier = try await control.terminalStreams(for: TerminalAttachRoute.View(device: nil))
             attachments.append(try await TerminalAttachment.attach(
-                endpoint: endpoint, target: .init(surface: SurfaceID(rawValue: surface)),
+                carrier: carrier, target: .init(surface: SurfaceID(rawValue: surface)),
                 size: CellSize(cols: 80, rows: 24), claimGeometry: false))
         }
         for attachment in attachments {
@@ -40,7 +41,7 @@ struct DaemonWireStatsTests {
         #expect(snapshot.connectionsOpened[.terminalAttach] == 2)
         #expect(snapshot.bridgeSpawnsTotal == 0)
         // Per terminal: the reader copies each output line in, out, and into its Data (each line at
-        // least the base64 of its chunk), the decode copies the payload out of the line, and merges copy again.
+        // least the base64 of its chunk), and the decode copies the payload out of the line.
         let base64Bytes = FakeWireDaemon.chunks(for: Self.mebibyte) * FakeWireDaemon.base64Bytes(of: FakeWireDaemon.chunkBytes)
         #expect(snapshot.outputBytesCopiedApp >= UInt64(2 * (3 * base64Bytes + Self.mebibyte)))
         #expect(snapshot.framesRead[.event] == UInt64(2 * FakeWireDaemon.chunks(for: Self.mebibyte)))
@@ -53,6 +54,72 @@ struct DaemonWireStatsTests {
         #expect(snapshot.bytesWritten > 0)
 
         for attachment in attachments { attachment.detachNow() }
+        await control.close()
+    }
+
+    /// p01-process-127 (split-latency step 4): with `daemonTerminalStreams` on, views are streams on
+    /// the app's one connection: two views open no connection and send no handshake (one identify,
+    /// the control connection's), and each gets only its own stream's output.
+    @Test func twoTerminalsAsStreamsOpenNoConnectionAndNoHandshake() async throws {
+        let stats = DaemonWireStats()
+        let daemon = try FakeWireDaemon(outputBytesPerAttach: 4096)
+        defer { daemon.stop() }
+        var configuration = Self.configuration(role: .main)
+        configuration.terminalStreams = true
+        let control = DaemonConnection(endpoint: DaemonEndpoint(socketPath: daemon.path, wireStats: stats),
+                                       configuration: configuration)
+        _ = try await control.start()
+        let identifies = stats.snapshot().framesRead[.ignored]
+        var attachments: [TerminalAttachment] = []
+        for surface: UInt64 in [1, 2] {
+            let carrier = try await control.terminalStreams(for: TerminalAttachRoute.View(device: nil))
+            #expect(!carrier.ownsConnection)
+            attachments.append(try await TerminalAttachment.attach(
+                carrier: carrier, target: .init(surface: SurfaceID(rawValue: surface)),
+                size: CellSize(cols: 80, rows: 24), claimGeometry: false))
+        }
+        #expect(attachments[0].stream != attachments[1].stream)
+        for attachment in attachments {
+            #expect(await Self.outputBytes(of: attachment, atLeast: 4096) == 4096)
+        }
+        let snapshot = stats.snapshot()
+        #expect(snapshot.connectionsOpenedTotal == 1)
+        #expect(snapshot.connectionsOpened[.terminalAttach] == 0)
+        #expect(snapshot.framesRead[.ignored] == identifies, "a view sends no identify of its own")
+        for attachment in attachments { attachment.detachNow() }
+        await control.close()
+    }
+
+    /// p01-process-127: a daemon older than `attach-streams-v1` (a remote machine's) still shows its
+    /// terminals with streams turned on: the view's stream rides a connection of its own, and that
+    /// connection's untagged events are the view's.
+    @Test func aDaemonWithoutStreamsGetsEachViewOnAConnectionOfItsOwn() async throws {
+        let stats = DaemonWireStats()
+        let daemon = try FakeWireDaemon(outputBytesPerAttach: 4096, colorsBeforeOutput: true, servesStreams: false)
+        defer { daemon.stop() }
+        var configuration = Self.configuration(role: .main)
+        configuration.terminalStreams = true
+        let control = DaemonConnection(endpoint: DaemonEndpoint(socketPath: daemon.path, wireStats: stats),
+                                       configuration: configuration)
+        _ = try await control.start()
+        let carrier = try await control.terminalStreams(for: TerminalAttachRoute.View(device: nil))
+        #expect(carrier.ownsConnection)
+        #expect(!carrier.tagsStreams)
+        let attachment = try await TerminalAttachment.attach(
+            carrier: carrier, target: .init(surface: SurfaceID(rawValue: 1)),
+            size: CellSize(cols: 80, rows: 24), claimGeometry: false)
+        var sawColors = false
+        var output = 0
+        for await event in attachment.events {
+            if case .colorsChanged = event { sawColors = true }
+            if case .output(let data, _) = event { output += data.count }
+            if output >= 4096 { break }
+        }
+        #expect(sawColors)
+        #expect(output == 4096)
+        #expect(stats.snapshot().connectionsOpened[.terminalAttach] == 1)
+        attachment.detachNow()
+        #expect(carrier.transport.isClosed)
         await control.close()
     }
 
@@ -82,8 +149,11 @@ struct DaemonWireStatsTests {
         let stats = DaemonWireStats()
         let daemon = try FakeWireDaemon(outputBytesPerAttach: 1000, colorsBeforeOutput: true)
         defer { daemon.stop() }
+        let carrier = try await TerminalStreamCarrier.dedicated(
+            endpoint: DaemonEndpoint(socketPath: daemon.path, wireStats: stats),
+            capabilities: DaemonCapability.advertised, view: TerminalAttachRoute.View(device: nil))
         let attachment = try await TerminalAttachment.attach(
-            endpoint: DaemonEndpoint(socketPath: daemon.path, wireStats: stats), target: .init(surface: SurfaceID(rawValue: 1)),
+            carrier: carrier, target: .init(surface: SurfaceID(rawValue: 1)),
             size: CellSize(cols: 80, rows: 24), claimGeometry: false)
         var sawColors = false
         for await event in attachment.events {
@@ -119,28 +189,6 @@ struct DaemonWireStatsTests {
         let snapshot = stats.snapshot()
         #expect(snapshot.framesRead[.droppedReply] == 1)
         #expect(snapshot.framesRead[.reply] == 1)
-    }
-
-    @Test func mergingQueuedOutputCountsACopy() async {
-        let stats = DaemonWireStats()
-        let queue = TerminalEventQueue(recorder: stats.recorder())
-        queue.push(.output(Data(repeating: 0x61, count: 10), colors: nil))
-        queue.push(.output(Data(repeating: 0x62, count: 10), colors: nil))
-        #expect(stats.snapshot().outputBytesCopiedApp == 0)
-        guard case .output(let merged, nil)? = await queue.next() else {
-            Issue.record("expected one merged output chunk")
-            return
-        }
-        #expect(merged.count == 20)
-        #expect(stats.snapshot().outputBytesCopiedApp == 20)
-    }
-
-    @Test func aSingleQueuedChunkIsNotCopied() async {
-        let stats = DaemonWireStats()
-        let queue = TerminalEventQueue(recorder: stats.recorder())
-        queue.push(.output(Data(repeating: 0x61, count: 10), colors: nil))
-        _ = await queue.next()
-        #expect(stats.snapshot().outputBytesCopiedApp == 0)
     }
 
     /// Transports take the stripes in turn, and a snapshot sums every stripe, also while many
@@ -382,10 +430,11 @@ struct DaemonWireStatsTests {
 }
 
 /// A Unix socket served by this test process that speaks just enough raw protocol v12 for control,
-/// page relay and byte-mode terminal attach connections: `identify` (after one line that is not
-/// JSON; it offers `origin-claim-v1`), `client-hello` with a connection id, nothing for
-/// ``unanswered``, `ok:true` for every other request, and after each `attach-surface` reply an optional `colors-changed`, then
-/// `outputBytesPerAttach` bytes of `output` events in 64 KiB chunks.
+/// page relay and byte-mode terminal stream connections: `identify` (after one line that is not
+/// JSON; it offers `origin-claim-v1`, and `attach-streams-v1` unless it plays an older daemon), `client-hello`
+/// with a connection id, nothing for ``unanswered``, `ok:true` for every other request, and after each
+/// `attach-surface` reply an optional `colors-changed`, then `outputBytesPerAttach` bytes of `output` events
+/// in 64 KiB chunks, each JSON event tagged with the request's `attach_stream` when it named one.
 private final class FakeWireDaemon: Sendable {
     static let chunkBytes = 64 << 10
     /// A command the fake never answers.
@@ -397,7 +446,7 @@ private final class FakeWireDaemon: Sendable {
     static func chunks(for bytes: Int) -> Int { (bytes + chunkBytes - 1) / chunkBytes }
     static func base64Bytes(of bytes: Int) -> Int { (bytes + 2) / 3 * 4 }
 
-    init(outputBytesPerAttach: Int, colorsBeforeOutput: Bool = false) throws {
+    init(outputBytesPerAttach: Int, colorsBeforeOutput: Bool = false, servesStreams: Bool = true) throws {
         path = "/tmp/cnd-wire-\(UUID().uuidString.prefix(8).lowercased()).sock"
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)  // a local: the closures below may not capture self
         self.listener = listener
@@ -417,7 +466,7 @@ private final class FakeWireDaemon: Sendable {
             close(listener)
             throw POSIXError(.EADDRINUSE)
         }
-        let script = Script(outputBytes: outputBytesPerAttach, colors: colorsBeforeOutput)
+        let script = Script(outputBytes: outputBytesPerAttach, colors: colorsBeforeOutput, streams: servesStreams)
         let thread = Thread {
             while true {
                 let client = accept(listener, nil, nil)
@@ -441,6 +490,8 @@ private final class FakeWireDaemon: Sendable {
     private struct Script: Sendable {
         var outputBytes: Int
         var colors: Bool
+        /// Offers `attach-streams-v1` (false: an older daemon).
+        var streams: Bool
     }
 
     private static func serve(_ client: Int32, script: Script) {
@@ -468,21 +519,25 @@ private final class FakeWireDaemon: Sendable {
         case unanswered:
             return true
         case IdentifyRequest.command:
+            let capabilities = [DaemonClientRole.originClaimCapability]
+                + (script.streams ? [DaemonCapability.attachStreams.rawValue] : [])
             let identity: [String: Any] = ["app": "cmux-tui", "protocol": 12, "generation": "gen-wire",
-                                           "capabilities": [DaemonClientRole.originClaimCapability]]
+                                           "capabilities": capabilities]
             return write(Data("{]".utf8), to: client) && reply(id, data: identity, to: client)
         case "client-hello":
             return reply(id, data: ["connection_id": "conn-\(id)"], to: client)
         case AttachSurfaceRequest.command:
             guard reply(id, data: ["lease": "lease-\(id)"], to: client) else { return false }
             let surface = request["surface"] as? Int ?? 0
-            if script.colors, !send(["event": "colors-changed", "surface": surface, "fg": "#ffffff"], to: client) { return false }
+            let tag: [String: Any] = (request["attach_stream"] as? Int).map { ["attach_stream": $0] } ?? [:]
+            let colors: [String: Any] = ["event": "colors-changed", "surface": surface, "fg": "#ffffff"]
+            if script.colors, !send(colors.merging(tag, uniquingKeysWith: { $1 }), to: client) { return false }
             var sent = 0
             while sent < script.outputBytes {
                 let size = min(chunkBytes, script.outputBytes - sent)
                 let event: [String: Any] = ["event": "output", "surface": surface,
                                             "data": Data(repeating: 0x61, count: size).base64EncodedString()]
-                guard send(event, to: client) else { return false }
+                guard send(event.merging(tag, uniquingKeysWith: { $1 }), to: client) else { return false }
                 sent += size
             }
             return true

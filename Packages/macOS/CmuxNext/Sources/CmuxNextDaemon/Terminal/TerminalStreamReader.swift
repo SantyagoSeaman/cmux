@@ -2,8 +2,8 @@ import CmuxNextCompat
 import CmuxNextWakeups
 import Foundation
 
-/// One terminal view's client stream on a shared daemon connection
-/// (`attach-streams-v1`): turns the stream's frames and events into the view's
+/// One terminal view's client stream (`attach-streams-v1`) on its carrier's
+/// connection: turns the stream's frames and events into the view's
 /// ``TerminalChannelEvent``s on the connection's reader thread.
 ///
 /// It never waits: the reader serves every view and the control plane. A view
@@ -37,6 +37,10 @@ final class TerminalStreamReader: Sendable {
     private let queue: TerminalEventQueue
     private let control: TerminalAttachment.ControlBox
     private let resolvedSurface: TerminalAttachment.SurfaceBox
+    /// The connection is this stream's own: it closes when the stream ends.
+    private let ownsConnection: Bool
+    /// The daemon names streams (`attach-streams-v1`): requests carry the stream id.
+    private let tagsRequests: Bool
     // A lock, not an actor (written exception to the CLAUDE.md actor rule): every
     // caller is a synchronous callback that cannot await. The transport's reader
     // thread delivers the stream's messages in wire order, and the order IS the
@@ -48,11 +52,13 @@ final class TerminalStreamReader: Sendable {
     private let state = Mutex(State())
 
     init(transport: LineTransport, queue: TerminalEventQueue, control: TerminalAttachment.ControlBox,
-         resolvedSurface: TerminalAttachment.SurfaceBox) {
+         resolvedSurface: TerminalAttachment.SurfaceBox, ownsConnection: Bool = false, tagsRequests: Bool = true) {
         self.transport = transport
         self.queue = queue
         self.control = control
         self.resolvedSurface = resolvedSurface
+        self.ownsConnection = ownsConnection
+        self.tagsRequests = tagsRequests
     }
 
     /// The stream's mapped ring (tests: the zero-copy check).
@@ -70,7 +76,7 @@ final class TerminalStreamReader: Sendable {
     func receive(_ message: LineTransport.StreamMessage) {
         switch message {
         case .closed(let reason):
-            queue.finish(.closed(Self.closeReason(reason)))
+            queue.finish(.closed(closeReason(reason)))
         case .event(let name, let line):
             event(name: name, line: line)
         case .frame(let header, let payload):
@@ -90,7 +96,7 @@ final class TerminalStreamReader: Sendable {
         } catch {
             TerminalAttachment.decodeLogger.error("output ring not mapped: \(String(describing: error), privacy: .public)")
             queue.finish(.closed(.connectionLost("the terminal's output ring could not be mapped")))
-            send(CancelStreamRequest())
+            endStream()
         }
     }
 
@@ -147,9 +153,11 @@ final class TerminalStreamReader: Sendable {
         if resync { requestResync() }
     }
 
-    private static func closeReason(_ reason: TransportCloseReason) -> TerminalChannelCloseReason {
-        switch reason {
-        case .closedByClient: .connectionLost("closed")
+    /// Why the stream ended with its connection: a view that closed a connection of its own detached.
+    private func closeReason(_ reason: TransportCloseReason) -> TerminalChannelCloseReason {
+        let canceled = control.value.withLock { $0.canceled }
+        return switch reason {
+        case .closedByClient: canceled ? .detachedByClient : .connectionLost("closed")
         case .daemonShutdown: .connectionLost("daemon shut down")
         case .lost(let detail): .connectionLost(detail)
         }
@@ -168,6 +176,8 @@ final class TerminalStreamReader: Sendable {
             let closed: TerminalChannelCloseReason = reason == "overflow" ? .overflow
                 : canceled ? .detachedByClient : .surfaceGone
             queue.finish(.closed(closed))
+            // A connection of the view's own carried only this stream.
+            if ownsConnection { transport.close() }
             return
         }
         let surface = resolve(name: name, line: line)
@@ -299,8 +309,8 @@ final class TerminalStreamReader: Sendable {
     }
 
     /// The view fell `highWater` behind and lost its queued output. A snapshot
-    /// stream resyncs; a replay stream cannot, so it ends and the view
-    /// reattaches (as a dedicated connection's overflow does).
+    /// stream resyncs (`snapshot-request`); a replay stream has no snapshot to
+    /// resync from, so it ends and the view reattaches for a fresh replay.
     private func overflowed() {
         let snapshots = state.withLock { stream -> Bool in
             if stream.snapshots { stream.resyncing = true }
@@ -311,7 +321,17 @@ final class TerminalStreamReader: Sendable {
             return
         }
         queue.finish(.closed(.overflow))
-        send(CancelStreamRequest())
+        endStream()
+    }
+
+    /// Ends a stream the view cannot read on: `cancel-stream` on a shared
+    /// connection; a connection of the view's own closes.
+    private func endStream() {
+        if ownsConnection {
+            transport.close()
+        } else {
+            send(CancelStreamRequest())
+        }
     }
 
     private func requestResync() {
@@ -319,7 +339,7 @@ final class TerminalStreamReader: Sendable {
     }
 
     private func send<R: DaemonRequest>(_ request: R) {
-        let stream = stream
+        let stream: UInt16? = tagsRequests ? self.stream : nil
         do {
             try transport.sendNoReply(cmd: R.command, onError: { error in
                 TerminalAttachment.decodeLogger.error("\(R.command, privacy: .public) failed: \(error.description, privacy: .public)")

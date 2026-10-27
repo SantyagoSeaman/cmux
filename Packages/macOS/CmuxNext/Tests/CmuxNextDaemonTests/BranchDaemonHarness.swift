@@ -144,12 +144,19 @@ struct BranchDaemonHarness {
         try await tree().workspaces.flatMap(\.screens).flatMap(\.panes).first { $0.tabs.contains { $0.surface == surface } }
     }
 
+    /// Attaches a view as the app does: a stream on the carrier the connection gives (the
+    /// connection itself with `terminalStreams`, else a connection of the view's own).
+    func attach(_ surface: SurfaceID, size: CellSize, claimGeometry: Bool,
+                device: TerminalSizingDevice? = nil) async throws -> TerminalAttachment {
+        let carrier = try await connection.terminalStreams(for: TerminalAttachRoute.View(device: device))
+        return try await TerminalAttachment.attach(
+            carrier: carrier, target: .init(surface: surface, generation: identity.generation),
+            size: size, claimGeometry: claimGeometry)
+    }
+
     /// Types `command` into `surface` and returns output up to `sentinel`.
     func run(_ command: String, in surface: SurfaceID, until sentinel: String) async throws -> String {
-        let attachment = try await TerminalAttachment.attach(
-            endpoint: endpoint,
-            target: .init(surface: surface, generation: identity.generation),
-            size: CellSize(cols: 200, rows: 50), claimGeometry: true)
+        let attachment = try await attach(surface, size: CellSize(cols: 200, rows: 50), claimGeometry: true)
         let watchdog = Task {
             try await Task.sleep(for: .seconds(20))
             await attachment.detach()

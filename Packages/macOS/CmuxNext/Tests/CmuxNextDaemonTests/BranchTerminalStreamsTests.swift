@@ -44,8 +44,8 @@ struct BranchTerminalStreamsTests {
             let (_, _, first) = try await h.workspaceWithTerminal("streams-a")
             let (_, _, second) = try await h.workspaceWithTerminal("streams-b")
             let device = TerminalSizingDevice(kind: "mac", name: "streams-test")
-            let carrier = try #require(try await h.connection.terminalStreams(device: device),
-                                       "the branch daemon serves attach-streams-v1")
+            let carrier = try await h.connection.terminalStreams(for: TerminalAttachRoute.View(device: device))
+            #expect(!carrier.ownsConnection, "with terminalStreams the views share the app's connection")
             #expect(carrier.frames, "a local connection negotiates binary frames")
             let clientsBefore = try await clientCount(h)
             let views = try await [first, second].asyncMap { surface in
@@ -56,7 +56,6 @@ struct BranchTerminalStreamsTests {
             // No connection per view: the daemon still counts the same clients.
             #expect(try await clientCount(h) == clientsBefore)
             #expect(views[0].stream != views[1].stream)
-            #expect(views.allSatisfy { $0.stream != nil })
 
             views[0].enqueueInput(Data("echo first-$((40+2))\r".utf8))
             views[1].enqueueInput(Data("echo second-$((40+3))\r".utf8))
@@ -76,6 +75,31 @@ struct BranchTerminalStreamsTests {
             #expect(after.contains("still-44") && afterEnd == nil, "the other view stopped: \(after.debugDescription)")
             #expect(carrier.transport.strayStreamMessages == 0)
             views[1].detachNow()
+        }
+    }
+}
+
+extension BranchTerminalStreamsTests {
+    /// p01-process-127: every view is a stream. With `daemonTerminalStreams` off (the rollback)
+    /// the stream rides a connection of the view's own, which closes when the view detaches.
+    @Test func withStreamsOffAViewsStreamRidesAConnectionOfItsOwn() async throws {
+        try await BranchDaemonHarness.with { h in
+            let (_, _, surface) = try await h.workspaceWithTerminal("own-connection")
+            let clientsBefore = try await clientCount(h)
+            let carrier = try await h.connection.terminalStreams(for: TerminalAttachRoute.View(device: nil))
+            #expect(carrier.ownsConnection)
+            let view = try await TerminalAttachment.attach(
+                carrier: carrier, target: .init(surface: surface, generation: h.identity.generation),
+                size: CellSize(cols: 80, rows: 24), claimGeometry: true)
+            #expect(try await clientCount(h) == clientsBefore + 1)
+            view.enqueueInput(Data("echo own-$((40+5))\r".utf8))
+            let (seen, end) = await output(of: view, until: "own-45")
+            #expect(seen.contains("own-45") && end == nil, "\(seen.debugDescription)")
+            view.detachNow()
+            var ended: TerminalChannelCloseReason?
+            for await event in view.events { if case .closed(let reason) = event { ended = reason } }
+            #expect(ended == .detachedByClient)
+            #expect(carrier.transport.isClosed)
         }
     }
 }
