@@ -1,13 +1,16 @@
+import CmuxNextFeatures
 import CmuxNextTerminal
 
 /// Connects the terminal module's process-wide hooks to the app's services
 /// at launch: app-scoped Ghostty actions (`appActionHandler`) and the
-/// menu-first rule of a terminal's key equivalents (`menuMayClaim`), and the daemon that
-/// sends a TUI its Command chords (`sendToProgram`).
+/// menu-first rule of a terminal's key equivalents (`menuMayClaim`), the daemon that
+/// sends a TUI its Command chords (`sendToProgram`), and the cursor blink on the render
+/// server (feature `terminalCursorBlinkLayer`).
 struct TerminalHooks {
     weak var services: AppServices?
 
     func install() {
+        if let services { GhosttyCursorBlinkLayer(runtime: .shared).set(services.features.isEnabled(.terminalCursorBlinkLayer)) }
         GhosttyRuntime.shared.appActionHandler = { [weak services] in services?.terminalDelegate.performAppAction($0) ?? false }
         TerminalKeyEquivalent.menuMayClaim = { [weak services] in services?.keyRouter.menuMayClaim($0) ?? true }
         // A TUI's Command chord (Cmd-C with nothing selected, Cmd-Z, Cmd-A): the tab's daemon
