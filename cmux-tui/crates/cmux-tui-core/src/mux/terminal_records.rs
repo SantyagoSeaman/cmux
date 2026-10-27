@@ -163,3 +163,7 @@ pub(super) fn commit_terminal_workspace(
     )?;
     Ok(commit.revision)
 }
+
+#[cfg(test)]
+#[path = "terminal_records_tests.rs"]
+mod tests;
