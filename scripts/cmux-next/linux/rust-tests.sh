@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Run the cmux-tui workspace tests on the Linux VM under cargo-nextest at 300
 # test threads, three times with no retries, and list the flaky tests. A test
-# is flaky when its results differ between the repeats (PASS in one, FAIL,
-# TIMEOUT or CRASH in another), as in Chromium's flakiness model: several
-# results for one test mean flaky (testing/flake_suppressor, typ's
-# expectations; plans/cmux-next/chrome-parity/p15-oracle.md, MQ-flakes).
-# A retry would hide a flake, so there is none.
+# is flaky when it passed in one repeat and not in another (FAIL, TIMEOUT, CRASH
+# or not run), as in Chromium's flakiness model: a PASS and a failure for one
+# test mean flaky (testing/flake_suppressor, typ's expectations;
+# plans/cmux-next/chrome-parity/p15-oracle.md, MQ-flakes). A test that passed in
+# no repeat is red, also when its failure kind changed (TIMEOUT, then FAIL).
+# A retry would hide a flake, so there is none. Each repeat starts with no
+# processes of the earlier ones: its commands carry their own marker in the
+# environment, and the processes with that marker (daemons that the fixtures
+# left) are stopped after the repeat, as the Rust gate does (cx-leo45,
+# scripts/ci/lib/reap-leaked.py). The receipt records each repeat's leak count.
 #
 # Usage: scripts/cmux-next/linux/rust-tests.sh [--jobs N] [--repeats N] [--out DIR]
 #            [--flaky-out FILE] [--filter FILTERSET]
@@ -17,21 +22,24 @@
 #                /tmp/oracle/flaky.jsonl, the MQ-flakes queue that oracle.py also feeds).
 #   --filter     a nextest filterset (-E) to run a part of the workspace.
 #   --self-test  check the result classifier on made-up JUnit files; builds nothing.
-# Results: <out>/receipt.json, <out>/build.log, <out>/repeat-<i>/{nextest.log,junit.xml}.
-# Exit 0 when no test failed in every repeat (flaky tests do not fail the run;
-# they go to --flaky-out), 1 when a test failed in every repeat, 2 on a usage
+# Results: <out>/receipt.json, <out>/build.log,
+#   <out>/repeat-<i>/{nextest.log,junit.xml,leaked.json,leaked.log}.
+# Exit 0 when every test passed in at least one repeat (flaky tests do not fail
+# the run; they go to --flaky-out), 1 when a test passed in no repeat, 2 on a usage
 # error, 75 when the build or a run failed for another reason than a red test.
 #
 # Doc tests are not run: nextest does not run them (the Rust gate runs them as
 # their own step). Needs cargo-nextest at the Rust gate's pin, which
 # scripts/cmux-next/linux/setup-tools.sh installs. Linux only: never compile or
 # test on a person's Mac (CLAUDE.md); a fleet Mac uses scripts/ci/cmux-tui-rust-check.sh.
+# The build and the repeats run at nice 10: the VM also runs agents.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(git -C "$here" rev-parse --show-toplevel)"
 workspace="$root/cmux-tui"
 gate="$root/scripts/ci/cmux-tui-rust-check.sh"
+reaper="$root/scripts/ci/lib/reap-leaked.py"
 
 jobs=300 repeats=3 out="" flaky_out=/tmp/oracle/flaky.jsonl filter="" self_test=0
 
@@ -59,7 +67,8 @@ done
 ((repeats >= 2)) || fail "--repeats must be at least 2: one run cannot show a flake" 2
 
 # analyze RECEIPT FLAKY_OUT META_JSON RUNS_TSV: reads each repeat's nextest log
-# and JUnit file (the RUNS_TSV rows: repeat, exit code, seconds, log, junit),
+# and JUnit file (the RUNS_TSV rows: repeat, exit code, seconds, log, junit,
+# the repeat's reap-leaked.py --json summary),
 # writes the receipt and appends the flaky tests. Exit 0, 1 (a test red in every
 # repeat) or 75 (a run that is not a test result).
 analyze() {
@@ -87,9 +96,17 @@ def result(case):
 
 errors, runs, by_test = [], [], {}
 rows = [line.rstrip("\n").split("\t") for line in open(runs_path, encoding="utf-8") if line.strip()]
-for index, (repeat, code, seconds, log, junit) in enumerate(rows):
+for index, (repeat, code, seconds, log, junit, leaks) in enumerate(rows):
     run = {"repeat": int(repeat), "exit": int(code), "seconds": float(seconds), "log": log, "junit": junit}
     runs.append(run)
+    # What the repeat left running (stopped before the next repeat); None when the check failed.
+    try:
+        run["leaked"] = json.load(open(leaks, encoding="utf-8"))
+    except (OSError, ValueError):
+        run["leaked"] = None
+    if run["leaked"] is None or run["leaked"].get("still_running"):
+        # The later repeats then ran beside this one's processes: not the same experiment.
+        errors.append(f"repeat {repeat}: its leftover processes were not all stopped (see {os.path.dirname(leaks)}/leaked.log)")
     # nextest exits 0 (all passed) or 100 (a test failed); anything else is a build,
     # list or setup failure, and its JUnit file (if any) is not a full result.
     if run["exit"] not in (0, 100):
@@ -123,11 +140,11 @@ if not errors:
         results = [r or "NOTRUN" for r in results]
         distinct = set(results)
         entry = {"binary_id": binary, "name": name, "test": f"{binary} {name}", "results": results}
-        if len(distinct) > 1:
-            flaky.append(entry)
-        elif distinct <= {"PASS", "SKIP"}:
+        if distinct <= {"PASS", "SKIP"}:
             stable_pass += 1
-        else:
+        elif "PASS" in distinct:
+            flaky.append(entry)
+        else:  # no PASS in any repeat: red, whatever its failure kinds were
             stable_red.append(entry)
 
 receipt = dict(meta)
@@ -154,7 +171,9 @@ if flaky and flaky_path:
 
 for run in runs:
     counts = ", ".join(f"{k} {v}" for k, v in sorted(run.get("counts", {}).items()))
-    print(f"rust-tests: repeat {run['repeat']}: exit {run['exit']}, {run['seconds']:.0f} s, {counts or 'no results'}")
+    leaked = "leak check failed" if run["leaked"] is None else f"{run['leaked']['processes']} processes leaked"
+    print(f"rust-tests: repeat {run['repeat']}: exit {run['exit']}, {run['seconds']:.0f} s, "
+          f"{counts or 'no results'}; {leaked}")
 for line in errors:
     print(f"rust-tests: error: {line}")
 for entry in flaky:
@@ -172,6 +191,44 @@ print(f"rust-tests: {len(by_test)} tests, {stable_pass} passed every repeat, {le
       f"{len(flaky)} flaky; receipt {receipt_path}")
 sys.exit(75 if errors else 1 if stable_red else 0)
 PY
+}
+
+# reap MARKER WHEN DIR: stops the processes whose environment holds MARKER (the
+# daemons a repeat's tests left), writes DIR/leaked.json and DIR/leaked.log and
+# prints the summary line. The marker alone selects them: the checkout is an
+# agent's worktree, where other processes of the agent work too.
+reap() {
+  local rc=0
+  rm -f "$3/leaked.json"
+  python3 -I "$reaper" --marker "$1" --when "$2" --json "$3/leaked.json" >"$3/leaked.log" 2>&1 || rc=$?
+  note "$(head -n 1 "$3/leaked.log")"
+  return "$rc"
+}
+
+# reap_self_test: reap stops a daemon of the marked commands that left their
+# session (setsid -f, as the fixtures' daemons do) and keeps a process without
+# the marker. Needs Linux's setsid.
+reap_self_test() {
+  if [[ "$(uname -s)" != Linux ]] || ! command -v setsid >/dev/null; then
+    note "self-test: the leak check needs Linux and setsid; not run"
+    return 0
+  fi
+  local marker="CMUX_RUST_TESTS_SELFTEST=$$-$RANDOM" other result
+  mkdir -p "$dir/reap" "$dir/reap-again"
+  env "$marker" setsid -f sleep 120 >/dev/null 2>&1
+  sleep 120 >/dev/null 2>&1 &
+  other=$!
+  reap "$marker" "in the self-test" "$dir/reap" >/dev/null || true
+  reap "$marker" "in the self-test, again" "$dir/reap-again" >/dev/null || true
+  result="$(python3 -I -c 'import json, sys; print(*(json.load(open(p))["processes"] for p in sys.argv[1:]))' \
+    "$dir/reap/leaked.json" "$dir/reap-again/leaked.json" 2>/dev/null || echo missing)"
+  local alive=0
+  kill -0 "$other" 2>/dev/null && alive=1
+  kill "$other" 2>/dev/null || true
+  if [[ "$result" != "1 0" || "$alive" != 1 ]]; then
+    note "self-test FAILED: the leak check stops the marked daemon only (leaked: $result, unmarked alive: $alive)"
+    return 1
+  fi
 }
 
 # self_test: the classifier on made-up repeats; exit 0 when every verdict matches.
@@ -194,17 +251,20 @@ plan = {
     "flip": ["PASS", "FAIL", "PASS"],
     "red": ["FAIL", "FAIL", "FAIL"],
     "slow": ["TIMEOUT", "FAIL", "FAIL"],
+    "hang": ["PASS", "TIMEOUT", "PASS"],
     "crashy": ["CRASH", "CRASH", "CRASH"],
     "gone": ["PASS", None, "PASS"],
 }
-def write(folder, repeat, uuid, logged, results, code=100):
-    """One repeat's nextest.log and junit.xml; returns its runs.tsv row."""
+def write(folder, repeat, uuid, logged, results, code=100, still_running=0):
+    """One repeat's nextest.log, junit.xml and leaked.json (repeat N leaked N processes); returns its runs.tsv row."""
     path = f"{d}/{folder}"
     os.makedirs(path, exist_ok=True)
+    json.dump({"when": f"after repeat {repeat}", "processes": repeat, "ptys_reclaimed": 0,
+               "still_running": still_running, "by_command": {}}, open(f"{path}/leaked.json", "w"))
     body = "".join(f'<testcase classname="crate::bin" name="{t}">{case[r]}</testcase>' for t, r in results.items() if r)
     open(f"{path}/junit.xml", "w").write(f'<testsuites uuid="{uuid}"><testsuite name="crate::bin">{body}</testsuite></testsuites>')
     open(f"{path}/nextest.log", "w").write(f" Nextest run ID {logged} with nextest profile: ci\n")
-    return f"{repeat}\t{code}\t1\t{path}/nextest.log\t{path}/junit.xml\n"
+    return f"{repeat}\t{code}\t1\t{path}/nextest.log\t{path}/junit.xml\t{path}/leaked.json\n"
 ids = [f"0000000{i}-0000-4000-8000-000000000000" for i in range(4)]
 rows = [write(f"r{i}", i + 1, ids[i], ids[i], {t: v[i] for t, v in plan.items()}) for i in range(3)]
 open(f"{d}/main.tsv", "w").write("".join(rows))
@@ -213,6 +273,9 @@ stale = write("stale", 1, ids[3], ids[0], {"steady": "PASS"}, code=0)
 build = write("build", 2, ids[1], ids[1], {}, code=101)
 open(f"{d}/stale.tsv", "w").write(stale + rows[1])
 open(f"{d}/build.tsv", "w").write(rows[0] + build)
+# A repeat whose leftovers survived the reaping: the later repeats ran beside them.
+alive = write("alive", 1, ids[0], ids[0], {"steady": "PASS"}, code=0, still_running=2)
+open(f"{d}/alive.tsv", "w").write(alive + rows[1])
 json.dump({"run_id": "selftest", "sha": "0" * 40, "jobs": 300}, open(f"{d}/meta.json", "w"))
 PY
   local ok=1
@@ -222,14 +285,16 @@ import json, sys
 d, rc = sys.argv[1], int(sys.argv[2])
 r = json.load(open(f"{d}/main.json"))
 flaky = {e["name"]: e["results"] for e in r["flaky"]}
-red = {e["name"] for e in r["stable_red"]}
+red = {e["name"]: e["results"] for e in r["stable_red"]}
 lines = [json.loads(l) for l in open(f"{d}/flaky.jsonl")]
 checks = {
-    "exit 1 (a test red in every repeat)": rc == 1,
-    "flaky = flip, slow, gone": set(flaky) == {"flip", "slow", "gone"},
+    "exit 1 (a test that passed in no repeat)": rc == 1,
+    "flaky = flip, hang, gone (a PASS and a failure)": set(flaky) == {"flip", "hang", "gone"},
     "a missing result is NOTRUN": flaky.get("gone") == ["PASS", "NOTRUN", "PASS"],
-    "TIMEOUT differs from FAIL": flaky.get("slow") == ["TIMEOUT", "FAIL", "FAIL"],
-    "red = red, crashy": red == {"red", "crashy"},
+    "a PASS and a TIMEOUT are flaky": flaky.get("hang") == ["PASS", "TIMEOUT", "PASS"],
+    "red = red, slow, crashy (no PASS in any repeat)": set(red) == {"red", "slow", "crashy"},
+    "a red test keeps each repeat's result": red.get("slow") == ["TIMEOUT", "FAIL", "FAIL"],
+    "each repeat records its leak count": [run["leaked"]["processes"] for run in r["runs"]] == [1, 2, 3],
     "steady passes": r["stable_pass"] == 1,
     "one flaky.jsonl line per flaky test": sorted(l["test"] for l in lines) == sorted(f"crate::bin {n}" for n in flaky),
     "flaky line names the suite": all(l["suite"] == "rust-tests" and l["run_id"] == "selftest" for l in lines),
@@ -248,6 +313,11 @@ PY
   if [[ "$rc" != 75 ]] || ! grep -q 'nextest exit 101' "$dir/build.out"; then
     note "self-test FAILED: a nextest exit that is not a test result is an error (exit $rc)"; ok=0
   fi
+  rc=0; analyze "$dir/alive.json" "$dir/alive.jsonl" "$dir/meta.json" "$dir/alive.tsv" >"$dir/alive.out" || rc=$?
+  if [[ "$rc" != 75 ]] || ! grep -q 'leftover processes were not all stopped' "$dir/alive.out"; then
+    note "self-test FAILED: a repeat whose leftovers survived is an error (exit $rc)"; ok=0
+  fi
+  reap_self_test || ok=0
   if ((ok)); then note "self-test: all checks pass"; exit 0; fi
   exit 1
 }
@@ -287,6 +357,14 @@ fi
 build_seconds=$((SECONDS - t0))
 note "built in ${build_seconds} s"
 
+# Each repeat's commands carry their own marker, so the next repeat starts with
+# none of its processes; an interrupted run stops the current repeat's too.
+run_tag="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')-$$"
+active_marker="" active_dir=""
+reap_at_exit() { [[ -z "$active_marker" ]] || reap "$active_marker" "at exit" "$active_dir" || true; }
+trap reap_at_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 : >"$out/runs.tsv"
 for ((i = 1; i <= repeats; i++)); do
   dir="$out/repeat-$i"
@@ -294,11 +372,15 @@ for ((i = 1; i <= repeats; i++)); do
   rm -f "$junit"
   t0="$SECONDS"
   rc=0
-  cargo nextest run "${select[@]}" --locked --profile ci --no-tests=fail --no-fail-fast \
-    --retries 0 --test-threads "$jobs" >"$dir/nextest.log" 2>&1 || rc=$?
+  active_marker="CMUX_RUST_TESTS_RUN=$run_tag-$i" active_dir="$dir"
+  nice -n 10 env "$active_marker" cargo nextest run "${select[@]}" --locked --profile ci --no-tests=fail \
+    --no-fail-fast --retries 0 --test-threads "$jobs" >"$dir/nextest.log" 2>&1 || rc=$?
+  seconds=$((SECONDS - t0))
   [[ ! -f "$junit" ]] || cp "$junit" "$dir/junit.xml"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$rc" "$((SECONDS - t0))" "$dir/nextest.log" "$dir/junit.xml" >>"$out/runs.tsv"
-  note "repeat $i of $repeats: nextest exit $rc in $((SECONDS - t0)) s ($(grep -m1 -oE '[0-9]+ tests? run:.*' "$dir/nextest.log" || echo 'no summary'))"
+  note "repeat $i of $repeats: nextest exit $rc in $seconds s ($(grep -m1 -oE '[0-9]+ tests? run:.*' "$dir/nextest.log" || echo 'no summary'))"
+  reap "$active_marker" "after repeat $i" "$dir" || note "the leak check after repeat $i failed; see $dir/leaked.log"
+  active_marker=""
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$rc" "$seconds" "$dir/nextest.log" "$dir/junit.xml" "$dir/leaked.json" >>"$out/runs.tsv"
 done
 
 python3 -I - "$out/meta.json" "$stamp-${sha:0:12}" "$sha" "$dirty" "$load" "$started" "$have" \
@@ -320,6 +402,8 @@ with open(path, "w", encoding="utf-8") as handle:
         "jobs": int(jobs),
         "repeats": int(repeats),
         "retries": 0,
+        "nice": 10,
+        "leak_check": "after each repeat, its processes (marker CMUX_RUST_TESTS_RUN=<tag>-<repeat>) are stopped: runs[].leaked",
         "filter": filterset or None,
         "build_seconds": int(build_seconds),
         "doc_tests": "not run (nextest does not run doc tests)",
