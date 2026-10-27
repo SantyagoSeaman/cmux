@@ -8,8 +8,11 @@ extension TerminalThemeSetting {
     /// main run loop turns, and it hears the day, time zone, clock and wake notices posted to `center`.
     /// `center` is the caller's to keep: the setting's AppEvents hold it weakly, so a released center
     /// leaves the setting deaf.
-    @MainActor static func testing(backdropScope: ThemeScope, center: NotificationCenter) -> TerminalThemeSetting {
+    /// `cursorBlinkTimeout` is the `terminalCursorBlinkTimeout` feature.
+    @MainActor static func testing(backdropScope: ThemeScope, center: NotificationCenter,
+                                   cursorBlinkTimeout: Bool = false) -> TerminalThemeSetting {
         TerminalThemeSetting(backdropScope: backdropScope, deadlines: MainDeadlineScheduler(work: linklessMainWork()),
-                             appEvents: AppEvents(center: center), workspaceEvents: AppEvents(center: center))
+                             appEvents: AppEvents(center: center), workspaceEvents: AppEvents(center: center),
+                             cursorBlinkTimeout: cursorBlinkTimeout)
     }
 }

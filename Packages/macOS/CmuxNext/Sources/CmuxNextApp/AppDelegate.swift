@@ -140,17 +140,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // The rest runs with main()'s settings read, now or when it lands (the startup's main hop, unbudgeted):
         // no wait, no frame in the defaults (p08-startup 025). The launch marks end where the launch work ends.
-        let cursorBlinkTimeout = services?.features.isEnabled(.terminalCursorBlinkTimeout) ?? false
+        // The launch's one feature list: the first config's overrides and the services read the same values.
+        let features = self.features ?? AppServices.launchFeatures(environment)
         settingsRead.whenRead(hop: .userVisible, startup: order.startup, take: { [logger] read in
             DebugTimings.markLaunch("dfl.settings_wait")  // the read in hand: at once warm, after the disk cold
             if let failure = read.bootstrapFailure { logger.error("cmux-next config bootstrap failed: \(failure, privacy: .public)") }
             // cmux.json's appearance goes on the Ghostty overrides; the first config builds with them on a files lane and the launch goes on when it lands (p02-threads-129).
-            TerminalThemeSetting.prime(read.snapshot, cursorBlinkTimeout: cursorBlinkTimeout)
-        }, then: { [self] read in GhosttyRuntime.shared.start(loadingOn: GhosttyLaneConfigLoader(work: launchReads.work, mainWork: mainWork)) { [self] in finishLaunching(settings: read, launchStart: launchStart) } })
+            TerminalThemeSetting.prime(read.snapshot, features: features)
+        }, then: { [self] read in GhosttyRuntime.shared.start(loadingOn: GhosttyLaneConfigLoader(work: launchReads.work, mainWork: mainWork)) { [self] in finishLaunching(settings: read, features: features, launchStart: launchStart) } })
     }
 
     /// The launch steps that need the settings, run after the settings launch read's take (`applicationDidFinishLaunching`).
-    private func finishLaunching(settings settingsRead: SettingsController.LaunchRead, launchStart: UInt64?) {
+    private func finishLaunching(settings settingsRead: SettingsController.LaunchRead, features: FeatureList, launchStart: UInt64?) {
         DebugTimings.markLaunch("dfl.settings_read")
         // Chrome colors derive from the Ghostty theme; load it before any window.
         ThemeBridge.start(store: ThemeScope.app.store)

@@ -2,6 +2,7 @@ import AppKit
 import CmuxNextCompat
 import Foundation
 import CmuxNextDesign
+import CmuxNextFeatures
 import CmuxNextSettings
 import CmuxNextTerminal
 import CmuxNextWakeups
@@ -184,9 +185,9 @@ final class TerminalThemeSetting {
 
     /// Puts `snapshot`'s appearance on the Ghostty overrides before the
     /// runtime starts, so its first config load already has them.
-    /// `cursorBlinkTimeout` is the `terminalCursorBlinkTimeout` feature.
-    static func prime(_ snapshot: CmuxConfigSnapshot, cursorBlinkTimeout: Bool = false) {
-        let state = State(snapshot, cursorBlinkTimeout: cursorBlinkTimeout)
+    /// `features` is the launch's list, the one the services' setting reads (`terminalCursorBlinkTimeout`).
+    static func prime(_ snapshot: CmuxConfigSnapshot, features: FeatureList) {
+        let state = State(snapshot, cursorBlinkTimeout: features.isEnabled(.terminalCursorBlinkTimeout))
         primed = state
         set(state)
     }
