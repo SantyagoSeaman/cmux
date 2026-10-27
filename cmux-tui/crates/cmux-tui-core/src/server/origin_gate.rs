@@ -406,11 +406,52 @@ pub(super) fn open_page_stream(
     Ok(relay_id)
 }
 
-/// Closes page stream `stream` of `client` and every token issued for it.
-/// False when it was not open.
+/// Closes page stream `stream` of `client`, every token issued for it and
+/// its event subscription. False when it was not open. The subscription's
+/// stream is closed when this returns, so nothing of it follows the reply.
 pub(super) fn close_page_stream(mux: &Mux, client: u64, stream: std::num::NonZeroU16) -> bool {
-    let mut state = mux.control_clients.state.lock().recover_poison();
-    state.clients.get_mut(&client).is_some_and(|record| record.origin.close_page_stream(stream))
+    let (closed, subscription) = {
+        let mut state = mux.control_clients.state.lock().recover_poison();
+        let Some(record) = state.clients.get_mut(&client) else { return false };
+        let subscription = record.origin.take_page_stream_subscription(stream);
+        (record.origin.close_page_stream(stream), subscription)
+    };
+    if let Some(subscription) = subscription {
+        subscription.fire();
+    }
+    closed
+}
+
+/// Binds page stream `stream` of `client` to an event subscription that
+/// `ended` ends, and returns the names its page hears (page-router.json
+/// `events`). A subscription the stream had is ended before this returns.
+/// A stream that is not open, or whose page hears no events, keeps its
+/// subscription and gets none.
+pub(super) fn subscribe_page_stream(
+    mux: &Mux,
+    client: u64,
+    stream: std::num::NonZeroU16,
+    ended: Arc<StreamInterrupt>,
+) -> Result<&'static [String], cmd_subscribe::PageStreamSubscribeError> {
+    use super::cmd_subscribe::PageStreamSubscribeError;
+    let (events, replaced) = {
+        let mut state = mux.control_clients.state.lock().recover_poison();
+        let origin =
+            &mut state.clients.get_mut(&client).ok_or(PageStreamSubscribeError::NotOpen)?.origin;
+        let page = origin.page_stream_page(stream).ok_or(PageStreamSubscribeError::NotOpen)?;
+        let events = crate::request_origin::page_router_table::page_events(page);
+        if events.is_empty() {
+            return Err(PageStreamSubscribeError::NoEvents);
+        }
+        let replaced = origin
+            .subscribe_page_stream(stream, ended)
+            .map_err(|_| PageStreamSubscribeError::NotOpen)?;
+        (events, replaced)
+    };
+    if let Some(replaced) = replaced {
+        replaced.fire();
+    }
+    Ok(events)
 }
 
 /// The accepted peer's kernel identity: its process key, whether it runs in
@@ -837,6 +878,10 @@ mod page_access_tests;
 #[cfg(all(test, unix))]
 #[path = "page_stream_tests.rs"]
 mod page_stream_tests;
+
+#[cfg(all(test, unix))]
+#[path = "page_stream_subscribe_tests.rs"]
+mod page_stream_subscribe_tests;
 
 #[cfg(all(test, unix))]
 #[path = "pairing_gate_tests.rs"]

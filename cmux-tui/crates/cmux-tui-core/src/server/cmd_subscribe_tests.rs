@@ -193,3 +193,93 @@ fn a_rendered_event_name_maps_back_to_its_kind() {
         assert!(kinds.accepts(&event), "{name}: {event:?}");
     }
 }
+
+/// A local connection subscribed after set-client-info `capabilities`.
+fn subscribed_with(
+    mux: &Arc<Mux>,
+    capabilities: &[&str],
+) -> (Arc<BoundedOutbound>, Arc<SubscribeProbe>) {
+    let outbound = Arc::new(BoundedOutbound::default());
+    let writer = MessageWriter::new(QueuedSink { outbound: outbound.clone(), control: None });
+    let client = mux.control_clients.register(ClientTransport::Unix, writer.clone());
+    for request in [
+        json!({"cmd": "set-client-info", "capabilities": capabilities}),
+        json!({"cmd": "subscribe"}),
+    ] {
+        handle_command(mux, client, tests::json_command(request), &writer).unwrap();
+    }
+    (outbound, mux.control_clients.subscribe_probe(client))
+}
+
+/// The `bell` lines `outbound` writes until it wrote `count`.
+fn bells(outbound: &BoundedOutbound, count: usize) -> Vec<Value> {
+    let deadline = Instant::now() + WAIT;
+    let mut bells = Vec::new();
+    while bells.len() < count && Instant::now() < deadline {
+        match outbound.try_pop() {
+            Some(line) => {
+                let message: Value = serde_json::from_str(&line).unwrap();
+                if message["event"] == "bell" {
+                    bells.push(message);
+                }
+            }
+            None => std::thread::yield_now(),
+        }
+    }
+    bells
+}
+
+const BELLS: usize = 200;
+
+/// Ten subscribers of one encode class: every event is serialized once
+/// between them, and each still writes it.
+#[test]
+fn ten_subscribers_of_one_class_serialize_each_event_once() {
+    let mux = Mux::new_for_test("subscribe-encode-once", crate::SurfaceOptions::default());
+    let subscribers: Vec<_> = (0..10).map(|_| subscribed_with(&mux, &[])).collect();
+    for surface in 0..BELLS as u64 {
+        mux.emit(MuxEvent::Bell(surface));
+    }
+    for (outbound, _) in &subscribers {
+        let heard = bells(outbound, BELLS);
+        assert_eq!(heard.len(), BELLS);
+        assert_eq!(heard[3], subscribed_event_json(&MuxEvent::Bell(3)));
+    }
+    let encoded: u64 =
+        subscribers.iter().map(|(_, probe)| probe.encoded.of(MuxEventKind::Bell)).sum();
+    assert_eq!(encoded, BELLS as u64, "one serialization per event for one class");
+    mux.shutdown();
+}
+
+/// Subscribers whose lines differ (`event-cause-v1` stamps the cause) are
+/// two classes: each event is serialized once per class. A program cause
+/// is never stamped, so then both write the one line.
+#[test]
+fn each_encode_class_serializes_each_event_once() {
+    use crate::event_cause::{EventCause, EventCauseScope};
+    let mux = Mux::new_for_test("subscribe-encode-class", crate::SurfaceOptions::default());
+    let plain: Vec<_> = (0..5).map(|_| subscribed_with(&mux, &[])).collect();
+    let caused: Vec<_> =
+        (0..5).map(|_| subscribed_with(&mux, &[crate::event_cause::CAPABILITY])).collect();
+    for cause in [EventCause::Automation, EventCause::Program] {
+        let _scope = EventCauseScope::enter(cause);
+        for surface in 0..BELLS as u64 {
+            mux.emit(MuxEvent::Bell(surface));
+        }
+    }
+    for (outbound, _) in &plain {
+        let heard = bells(outbound, 2 * BELLS);
+        assert_eq!(heard.len(), 2 * BELLS);
+        assert!(heard.iter().all(|bell| bell.get("cause").is_none()), "{heard:?}");
+    }
+    for (outbound, _) in &caused {
+        let heard = bells(outbound, 2 * BELLS);
+        assert_eq!(heard.len(), 2 * BELLS);
+        assert!(heard[..BELLS].iter().all(|bell| bell["cause"] == "automation"), "{heard:?}");
+        assert!(heard[BELLS..].iter().all(|bell| bell.get("cause").is_none()), "{heard:?}");
+    }
+    let encoded: u64 =
+        plain.iter().chain(&caused).map(|(_, probe)| probe.encoded.of(MuxEventKind::Bell)).sum();
+    assert_eq!(encoded, 3 * BELLS as u64, "two classes for automation, one for program");
+    mux.shutdown();
+}

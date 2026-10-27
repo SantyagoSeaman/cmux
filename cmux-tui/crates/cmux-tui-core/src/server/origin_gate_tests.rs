@@ -518,14 +518,17 @@ fn hello(mux: &Arc<Mux>, role: &str, peer: &str) -> Conn {
     let mut gate = client_hello::HelloGate::new(ClientTransport::Unix);
     let peer = || client_hello::Peer { key: Some(peer.to_string()), token: None };
     let start = json!({"id": 1, "cmd": "client-hello", "role": role, "install_id": "inst_p8"});
-    let started = gate.observe(mux, conn.client, &start.to_string(), peer).expect("handled");
+    let started =
+        gate.observe(mux, conn.client, &start.to_string(), &conn.writer, peer).expect("handled");
     assert_eq!(started["ok"], true, "{started}");
     if role == "main" {
         let nonce = unhex::<NONCE_LEN>(started["data"]["nonce"].as_str().unwrap()).unwrap();
         let key = unhex::<32>(P8_KEY_HEX).unwrap();
         let proof = json!({"id": 2, "cmd": "client-hello", "install_id": "inst_p8",
             "proof": hello_proof(&key, "inst_p8", &nonce)});
-        let proved = gate.observe(mux, conn.client, &proof.to_string(), peer).expect("handled");
+        let proved = gate
+            .observe(mux, conn.client, &proof.to_string(), &conn.writer, peer)
+            .expect("handled");
         assert_eq!(proved["data"]["verified"], true, "{proved}");
     }
     conn

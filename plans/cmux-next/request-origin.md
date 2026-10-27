@@ -167,17 +167,26 @@ Wire (daemon side; the app side is p05-ipc-104 and p05-ipc-108):
   is a boolean, true only with role `page_relay` and no `page`; anything else is
   `client_hello.bad_request {field: "streams"}`. The reply adds `page_streams: true`.
   Capability `page-streams-v1` in `identify`.
-- Stream 0 is the connection itself. Its only lines are `open-stream {stream, page}` and
-  `close-stream {stream}` (stream 1-65535; page as in `client-hello`), plus `cmux.protocol/2`
-  requests. Every other line (`identify`, `subscribe`, any legacy command) is
-  `origin.forbidden {reason: "stream_zero", derived: "page"}`. A member other than
-  `cmd`, `id`, `stream` (and `page` for open) is `page_stream.bad_request {field}`.
+- Stream 0 is the connection itself. Its only lines are `open-stream {stream, page}`,
+  `close-stream {stream}` and `subscribe {stream}` (stream 1-65535; page as in `client-hello`),
+  plus `cmux.protocol/2` requests. Every other line (`identify`, a `subscribe` without `stream`,
+  any legacy command) is `origin.forbidden {reason: "stream_zero", derived: "page"}`. A member
+  other than `cmd`, `id`, `stream` (and `page` for open) is `page_stream.bad_request {field}`.
 - `open-stream` replies `{stream, page, relay_id, page_operations}`. The page is the stream's for
   its whole life: opening an open id is `page_stream.in_use`; only `close-stream` frees the id.
   At most `MAX_SERVER_CONNECTIONS` (64) streams are open per relay (`page_stream.limit`): each
   stream stands for what was one relay connection, so the bound is the old one.
 - `close-stream` is idempotent (`closed: false` for a stream that was not open) and drops every
-  token issued for the stream.
+  token issued for the stream and ends its event subscription.
+- `subscribe {stream}` (p05-ipc-148) makes an open stream hear its page's events
+  (page-router.json `events`, the same set a one-page relay hears). It replies `{stream}`; every
+  event line of the stream carries `"stream": N` as its first member, and so does its `overflow`
+  notice. A stream that is not open is `origin.forbidden {reason: "stream_not_open"}`; a page with
+  no events is `origin.forbidden {reason: "page_events"}`. A second `subscribe` of a stream
+  replaces its subscription, so each event comes once. `close-stream` ends the subscription
+  before its reply is queued: no line of the stream, not even an overflow notice, follows the
+  reply, so a reopened id never hears the old page. The subscription's kinds filter it on the
+  bus, so a page stream is never queued another page's or a terminal's events.
 - Every `cmux.protocol/2` request on a streamed relay names its stream in the origin claim:
   `"origin": {"claim": "page", "stream": N}` or `{"claim": "user", "confirmation": T,
   "stream": N}`. No claim, or a claim without `stream`, is `origin.forbidden {reason:
@@ -185,9 +194,10 @@ Wire (daemon side; the app side is p05-ipc-104 and p05-ipc-108):
   fails the envelope parse (`validation.invalid`). The request is judged with that stream's page
   exactly as a one-page relay's request is judged with the connection page (catalog
   `page_refusal`, routed `routed_origin`).
-- Any other connection (main, legacy, a one-page relay, a WebSocket) refuses `open-stream` and
-  `close-stream` with `origin.forbidden {reason: "page_stream_not_here", derived}`, also after its
-  hello window closed, and refuses a `stream` member in a v2 origin claim the same way.
+- Any other connection (main, legacy, a one-page relay, a WebSocket) refuses `open-stream`,
+  `close-stream` and a `subscribe` with a `stream` member with `origin.forbidden {reason:
+  "page_stream_not_here", derived}`, also after its hello window closed, and refuses a `stream`
+  member in a v2 origin claim the same way.
 - Confirmation tokens: `origin.confirmation.issue {relay_connection_id}` takes either a one-page
   relay's connection id or a stream's `relay_id`. A `relay_id` comes from the daemon's connection
   id counter, so it never equals a connection id or an earlier stream's id; a reopened stream gets
@@ -208,7 +218,8 @@ Analysis (remote-relay rules applied to a local trust boundary):
   stream fails on the reopened one. A page cannot open a stream itself: page JS has no line on
   the relay, the host opens streams.
 - Local-state exposure: `open-stream` returns only the page's allow list (already public in
-  page-router.json) and an opaque relay id. Nothing on stream 0 reads daemon state.
+  page-router.json) and an opaque relay id. `subscribe {stream}` sends only the events the page
+  hears as a one-page relay (History: `history-changed`), tagged with its own stream.
 - Escalation: `origin.confirmation.issue` stays refused on every page relay, streamed included;
   only the verified app of the same peer mints, as before.
 - Fail-safe defaults: an untagged request is refused, not run as some page; an unknown page id
@@ -216,8 +227,6 @@ Analysis (remote-relay rules applied to a local trust boundary):
   stream, so a bug in the app's stream tagging cannot run a page request as `user`.
 
 Not in this task (follow-ups):
-- Events per stream: a streamed relay has no `subscribe`; the History page's `history-changed`
-  needs `subscribe {stream}` (p05-ipc-148). Until then the app keeps History on a one-page relay.
 - The Chief registry's ledger label (`user_local via page:<page>`) reads the connection page; on
   a streamed relay it records `user_local`. The page is known per request
   (`request.envelope.origin.stream`); chief_registry_resource.rs must read it before

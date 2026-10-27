@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -37,6 +38,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::resource::{ResourceError, ResourceOperation};
+use crate::stream_interrupt::StreamInterrupt;
 
 mod page_access;
 pub(crate) mod page_router_table;
@@ -165,6 +167,9 @@ struct PageStream {
     /// connection id counter, so it names no connection and is never
     /// reused: a token for a closed stream cannot reach a reopened one.
     relay_id: u64,
+    /// Fired to end the stream's `subscribe {stream}` (cmd_subscribe.rs),
+    /// when it has one.
+    subscription: Option<Arc<StreamInterrupt>>,
 }
 
 /// Why a page stream did not open.
@@ -350,7 +355,7 @@ impl ConnectionOrigin {
         if streams.open.len() >= limit {
             return Err(OpenStreamRefusal::Limit);
         }
-        streams.open.insert(stream, PageStream { page, relay_id });
+        streams.open.insert(stream, PageStream { page, relay_id, subscription: None });
         Ok(())
     }
 
@@ -361,6 +366,34 @@ impl ConnectionOrigin {
         let Some(closed) = closed else { return false };
         self.confirmations.retain(|confirmation| confirmation.endpoint != Some(closed.relay_id));
         true
+    }
+
+    /// Makes `ended` the end of open page stream `stream`'s event
+    /// subscription. Returns the end of the subscription it replaces, if
+    /// any; `Err(ended)` when the stream is not open.
+    pub(crate) fn subscribe_page_stream(
+        &mut self,
+        stream: NonZeroU16,
+        ended: Arc<StreamInterrupt>,
+    ) -> Result<Option<Arc<StreamInterrupt>>, Arc<StreamInterrupt>> {
+        match self.page_streams.as_mut().and_then(|streams| streams.open.get_mut(&stream)) {
+            Some(open) => Ok(open.subscription.replace(ended)),
+            None => Err(ended),
+        }
+    }
+
+    /// The page of open page stream `stream`.
+    pub(crate) fn page_stream_page(&self, stream: NonZeroU16) -> Option<&str> {
+        let open = self.page_streams.as_ref()?.open.get(&stream)?;
+        Some(open.page.as_str())
+    }
+
+    /// Takes the end of page stream `stream`'s event subscription, if any.
+    pub(crate) fn take_page_stream_subscription(
+        &mut self,
+        stream: NonZeroU16,
+    ) -> Option<Arc<StreamInterrupt>> {
+        self.page_streams.as_mut()?.open.get_mut(&stream)?.subscription.take()
     }
 
     /// Whether `relay_id` names one of this connection's open page streams.

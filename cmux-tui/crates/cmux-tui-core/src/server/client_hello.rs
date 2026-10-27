@@ -47,9 +47,11 @@
 //! connection carry every page, a stream per page. The connection's own
 //! lines (stream 0) are then only `open-stream {stream, page}` and
 //! `close-stream {stream}`; every `cmux.protocol/2` request names its open
-//! stream in `origin.stream`. Any other connection refuses `open-stream`
-//! with `origin.forbidden {reason: page_stream_not_here}`: page streams
-//! never live on the main connection, whose origin is not page.
+//! stream in `origin.stream`, and `subscribe {stream}` makes one open stream
+//! hear its page's events, each tagged with the stream (cmd_subscribe.rs).
+//! Any other connection refuses `open-stream` with `origin.forbidden
+//! {reason: page_stream_not_here}`: page streams never live on the main
+//! connection, whose origin is not page.
 
 use crate::panic_free::JsonFields;
 use cmux_features::Live;
@@ -142,6 +144,9 @@ impl HelloFeatures {
 }
 const OPEN_STREAM: &str = "open-stream";
 const CLOSE_STREAM: &str = "close-stream";
+const SUBSCRIBE: &str = "subscribe";
+/// The member a `subscribe` names its page stream with (`subscribe {stream}`).
+const STREAM_MEMBER: &str = "\"stream\"";
 
 enum Window {
     /// Step 1 may come; `identified` once the one allowed `identify` came.
@@ -261,9 +266,10 @@ impl HelloGate {
     /// sees it; `None` dispatches it as usual.
     pub(super) fn observe(
         &mut self,
-        mux: &Mux,
+        mux: &Arc<Mux>,
         client: u64,
         line: &str,
+        writer: &MessageWriter,
         peer: impl FnOnce() -> Peer,
     ) -> Option<Value> {
         // After the window closes only a late hello, a page stream command
@@ -275,7 +281,8 @@ impl HelloGate {
         let open = !matches!(self.window, Window::Closed);
         let looked_at = open
             || self.page_relay
-            || [CLIENT_HELLO, OPEN_STREAM, CLOSE_STREAM].iter().any(|cmd| line.contains(cmd));
+            || [CLIENT_HELLO, OPEN_STREAM, CLOSE_STREAM].iter().any(|cmd| line.contains(cmd))
+            || (line.contains(SUBSCRIBE) && line.contains(STREAM_MEMBER));
         if !looked_at {
             return None;
         }
@@ -316,13 +323,22 @@ impl HelloGate {
             Some(OPEN_STREAM | CLOSE_STREAM) if !self.page_streams => {
                 Err(page_stream_not_here(origin_gate::derived_origin(mux, client)))
             }
+            // A subscribe naming a page stream, likewise: dispatch would
+            // drop the member and subscribe the whole connection.
+            Some(SUBSCRIBE) if !self.page_streams && value.get("stream").is_some() => {
+                Err(page_stream_not_here(origin_gate::derived_origin(mux, client)))
+            }
             Some(OPEN_STREAM) => open_stream(mux, client, &value),
             Some(CLOSE_STREAM) => close_stream(mux, client, &value),
             Some("identify") if matches!(window, Window::Open { identified: false }) => {
                 self.window = Window::Open { identified: true };
                 return None;
             }
-            // Stream 0 of a streamed page relay opens and closes streams only.
+            Some(SUBSCRIBE) if self.page_streams && value.get("stream").is_some() => {
+                subscribe_stream(mux, client, writer, &value)
+            }
+            // Stream 0 of a streamed page relay opens, closes and subscribes
+            // page streams only: a subscribe of its own would hear no page.
             _ if self.page_streams => return Some(stream_zero_refusal(id)),
             Some("identify") if self.page_relay => return None,
             Some("subscribe") if self.page_relay => {
@@ -486,12 +502,13 @@ fn page_relay_refusal(id: Option<Value>) -> Value {
 }
 
 /// The answer to any line of a streamed page relay's stream 0 that is not
-/// `open-stream`, `close-stream` or a `cmux.protocol/2` request.
+/// `open-stream`, `close-stream`, `subscribe {stream}` or a
+/// `cmux.protocol/2` request.
 fn stream_zero_refusal(id: Option<Value>) -> Value {
     json!({
         "id": id,
         "ok": false,
-        "error": "stream 0 of a streamed page relay only opens and closes page streams",
+        "error": "stream 0 of a streamed page relay only opens, closes and subscribes page streams",
         "error_code": "origin.forbidden",
         "error_details": {"reason": "stream_zero", "derived": RequestOrigin::Page.wire_name()},
     })
@@ -570,6 +587,39 @@ fn close_stream(mux: &Mux, client: u64, value: &Value) -> Result<Value, Refusal>
     let stream = stream_member(value, &["cmd", "id", "stream"])?;
     let closed = origin_gate::close_page_stream(mux, client, stream);
     Ok(json!({"stream": stream, "closed": closed}))
+}
+
+/// `subscribe {stream}`: open page stream `stream` hears its page's events
+/// (page-router.json `events`), each line tagged `"stream": stream`, until
+/// `close-stream` or a later `subscribe` of the stream. No other member: a
+/// page hears no tree deltas and no terminal output stream.
+fn subscribe_stream(
+    mux: &Arc<Mux>,
+    client: u64,
+    writer: &MessageWriter,
+    value: &Value,
+) -> Result<Value, Refusal> {
+    use super::cmd_subscribe::PageStreamSubscribeError;
+    let stream = stream_member(value, &["cmd", "id", "stream"])?;
+    let page = RequestOrigin::Page.wire_name();
+    cmd_subscribe::subscribe_page_stream(mux, client, writer, stream).map_err(|error| match error {
+        PageStreamSubscribeError::NotOpen => (
+            "origin.forbidden",
+            "the page stream is not open",
+            Some(json!({"reason": "stream_not_open", "derived": page})),
+        ),
+        PageStreamSubscribeError::NoEvents => (
+            "origin.forbidden",
+            "a page stream hears only its page's events (page-router.json), and this page has none",
+            Some(json!({"reason": "page_events", "derived": page})),
+        ),
+        PageStreamSubscribeError::Start(error) => (
+            "page_stream.unavailable",
+            "the daemon could not start the stream's subscription",
+            Some(json!({"stream": stream, "cause": error.to_string()})),
+        ),
+    })?;
+    Ok(json!({"stream": stream}))
 }
 
 /// A page relay's `subscribe`: the page's event stream only, so no member

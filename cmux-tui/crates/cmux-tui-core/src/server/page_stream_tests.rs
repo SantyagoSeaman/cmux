@@ -3,6 +3,8 @@
 //! line goes through the connection's hello gate and then the connection
 //! message handler, as the line loop sends it.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use crate::request_origin::params_sha256;
@@ -50,12 +52,36 @@ impl Line {
     pub(super) fn send(&mut self, mux: &Arc<Mux>, request: &Value) -> Value {
         let text = request.to_string();
         let peer = || Peer { key: Some(PEER.to_string()), token: None };
-        if let Some(reply) = self.gate.observe(mux, self.client, &text, peer) {
+        if let Some(reply) = self.gate.observe(mux, self.client, &text, &self.writer, peer) {
             return reply;
         }
         assert!(handle_connection_message(mux, self.client, &text, &self.writer, &self.scheduler));
         let message = self.outbound.try_pop().expect("a synchronous reply");
         serde_json::from_str(&message).unwrap()
+    }
+
+    /// Sends one stream-0 line the hello gate answers and queues its reply
+    /// on the connection, as the line loop does, behind any event the
+    /// connection queued before it.
+    pub(super) fn send_queued(&mut self, mux: &Arc<Mux>, request: &Value) {
+        let text = request.to_string();
+        let peer = || Peer { key: Some(PEER.to_string()), token: None };
+        let reply = self.gate.observe(mux, self.client, &text, &self.writer, peer);
+        self.writer.send_control(&reply.expect("a gate reply")).unwrap();
+    }
+
+    /// The next line the connection wrote, waiting up to `wait`.
+    pub(super) fn next_line(&self, wait: Duration) -> Option<Value> {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some(line) = self.outbound.try_pop() {
+                return Some(serde_json::from_str(&line).unwrap());
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Opens `stream` for `page` and returns its relay id.

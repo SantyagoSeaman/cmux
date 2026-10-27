@@ -360,7 +360,7 @@ pub(super) fn serve_connection(
                         key: input.stream.peer_process_key(),
                         token: input.stream.peer_token(),
                     };
-                    match hello.observe(&mux, client, &line, peer) {
+                    match hello.observe(&mux, client, &line, &writer, peer) {
                         Some(reply) => writer.send_control(&reply).is_ok(),
                         None => {
                             reader_class.before_line(&mux, client, hello.is_closed());

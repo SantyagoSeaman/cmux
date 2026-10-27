@@ -452,22 +452,27 @@ fn handle_websocket_connection_with_permit(
                 let mut text = text.to_string();
                 // One request of `server-stats` `ipc`, as a line is.
                 let parses = JsonParseScope::enter(&ipc, IpcTransport::Lines);
-                let keep_open =
-                    match hello.observe(&mux, client, &text, client_hello::Peer::unknown) {
-                        Some(reply) => writer.send_control(&reply).is_ok(),
-                        None => {
-                            reader_class.before_line(&mux, client, hello.is_closed());
-                            handle_connection_frame_at(
-                                &mux,
-                                client,
-                                ClientTransport::WebSocket,
-                                &text,
-                                &writer,
-                                &surface_scheduler,
-                                arrived,
-                            )
-                        }
-                    };
+                let keep_open = match hello.observe(
+                    &mux,
+                    client,
+                    &text,
+                    &writer,
+                    client_hello::Peer::unknown,
+                ) {
+                    Some(reply) => writer.send_control(&reply).is_ok(),
+                    None => {
+                        reader_class.before_line(&mux, client, hello.is_closed());
+                        handle_connection_frame_at(
+                            &mux,
+                            client,
+                            ClientTransport::WebSocket,
+                            &text,
+                            &writer,
+                            &surface_scheduler,
+                            arrived,
+                        )
+                    }
+                };
                 drop(parses);
                 zeroize_string(&mut text);
                 if !keep_open {

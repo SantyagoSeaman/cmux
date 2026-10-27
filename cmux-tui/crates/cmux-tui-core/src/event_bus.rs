@@ -3,8 +3,9 @@
 use crate::panic_free::RecoverPoison;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvError, RecvTimeoutError, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use crate::event_cause::EventCause;
@@ -98,16 +99,94 @@ struct MuxEventMailbox {
     /// The subscriber's drain task when it runs on a sequence instead of
     /// blocking on `changed` (attach streams, p05-ipc-079).
     ready_hook: crate::stream_interrupt::ReadyHook,
+    /// The subscriber writes events to a wire and takes each event's shared
+    /// [`EventEncodings`] ([`MuxEventReceiver::share_encodings`]).
+    shares_encodings: AtomicBool,
 }
 
 #[derive(Default)]
 struct MuxEventMailboxState {
     next_sequence: u128,
-    events: VecDeque<(u128, MuxEvent, EventCause)>,
+    events: VecDeque<(u128, DeliveredEvent)>,
     coalesced_sequences: HashMap<CoalescedEventKey, u128>,
-    coalesced: BTreeMap<u128, (CoalescedEventKey, MuxEvent, EventCause)>,
+    coalesced: BTreeMap<u128, (CoalescedEventKey, DeliveredEvent)>,
     closed: bool,
     overflowed: bool,
+}
+
+/// One event as a mailbox hands it to its subscriber.
+#[derive(Clone)]
+pub(crate) struct DeliveredEvent {
+    pub(crate) event: MuxEvent,
+    pub(crate) cause: EventCause,
+    /// The wire encodings of this emit, one slot shared by every mailbox
+    /// that took it; `None` for a subscriber that does not share them and
+    /// for a token only one receiver gets ([`MuxEventReceiver::wake`]).
+    pub(crate) encodings: Option<Arc<EventEncodings>>,
+}
+
+impl DeliveredEvent {
+    fn unshared(event: MuxEvent, cause: EventCause) -> Self {
+        Self { event, cause, encodings: None }
+    }
+}
+
+/// What a subscriber's wire line of an event depends on beyond the event
+/// itself. Subscribers of one class write the same bytes, so the first of
+/// them to take the event serializes it and the others reuse it
+/// ([`EventEncodings`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EncodeClass {
+    /// A tree delta rendered in full (`tree_events: deltas`), not as
+    /// `tree-changed`. Only tree events depend on it.
+    pub(crate) tree_deltas: bool,
+    /// The `cause` member the line carries (`event-cause-v1`).
+    pub(crate) cause: Option<EventCause>,
+}
+
+impl EncodeClass {
+    const COUNT: usize = 8;
+
+    const fn index(self) -> usize {
+        let cause = match self.cause {
+            None => 0,
+            Some(EventCause::Automation) => 1,
+            Some(EventCause::Program) => 2,
+            Some(EventCause::Frontend) => 3,
+        };
+        cause * 2 + self.tree_deltas as usize
+    }
+}
+
+/// One emitted event's wire encodings, one per [`EncodeClass`], made by
+/// the first subscriber of the class that writes it. Chromium serializes a
+/// message for many receivers once and hands each a shallow clone that
+/// shares the encoded bytes (blink::CloneableMessage::ShallowClone, used by
+/// content/browser/broadcast_channel/broadcast_channel_service.cc).
+#[derive(Default)]
+pub(crate) struct EventEncodings {
+    classes: [OnceLock<Option<Arc<EncodedEvent>>>; EncodeClass::COUNT],
+}
+
+impl EventEncodings {
+    /// The event's encoding in `class`: `encode`'s result, run by the first
+    /// caller of the class only (a concurrent caller waits for it). `None`
+    /// when the class writes no line for the event.
+    pub(crate) fn get_or_encode(
+        &self,
+        class: EncodeClass,
+        encode: impl FnOnce() -> Option<EncodedEvent>,
+    ) -> Option<&Arc<EncodedEvent>> {
+        self.classes[class.index()].get_or_init(|| encode().map(Arc::new)).as_ref()
+    }
+}
+
+/// One event as one JSON object, serialized once for every subscriber of
+/// its [`EncodeClass`].
+pub(crate) struct EncodedEvent {
+    /// The object's `event` member, which page relays filter on.
+    pub(crate) name: Box<str>,
+    pub(crate) json: Arc<[u8]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -189,7 +268,8 @@ impl MuxEventBroadcaster {
                 scope.workspace = workspace;
                 scope.screen = screen;
                 scope.pane = pane;
-                return mailbox.push(MuxEvent::TreeChanged, EventCause::current());
+                return mailbox
+                    .push(DeliveredEvent::unshared(MuxEvent::TreeChanged, EventCause::current()));
             }
             true
         });
@@ -227,9 +307,18 @@ impl MuxEventBroadcaster {
 
     pub(crate) fn emit_caused(&self, event: MuxEvent, cause: EventCause) {
         let mut subscribers = self.subscribers.lock().recover_poison();
+        // One encodings slot per emit, made only when a wire subscriber takes it.
+        let mut shared: Option<Arc<EventEncodings>> = None;
         subscribers.retain_mut(|subscriber| {
             let Some(mailbox) = subscriber.mailbox.upgrade() else { return false };
-            !subscriber.filter.accepts(&event) || mailbox.push(event.clone(), cause)
+            if !subscriber.filter.accepts(&event) {
+                return true;
+            }
+            let encodings = mailbox
+                .shares_encodings
+                .load(Ordering::Relaxed)
+                .then(|| shared.get_or_insert_with(Arc::default).clone());
+            mailbox.push(DeliveredEvent { event: event.clone(), cause, encodings })
         });
     }
 }
@@ -487,58 +576,43 @@ impl Drop for MuxEventBroadcaster {
 }
 
 impl MuxEventMailbox {
-    fn push(&self, event: MuxEvent, cause: EventCause) -> bool {
+    fn push(&self, delivered: DeliveredEvent) -> bool {
         let mut state = self.state.lock().recover_poison();
         if state.closed {
             return false;
         }
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
-        let accepted = match event {
-            event @ MuxEvent::AgentChanged { surface, .. } => {
-                state.push_coalesced(sequence, CoalescedEventKey::Agent(surface), event, cause)
+        let coalesced_key = match &delivered.event {
+            MuxEvent::AgentChanged { surface, .. } => Some(CoalescedEventKey::Agent(*surface)),
+            MuxEvent::TitleChanged { surface, .. } => Some(CoalescedEventKey::Title(*surface)),
+            MuxEvent::ProgramStatusChanged { surface, .. } => {
+                Some(CoalescedEventKey::ProgramStatus(*surface))
             }
-            event @ MuxEvent::TitleChanged { surface, .. } => {
-                state.push_coalesced(sequence, CoalescedEventKey::Title(surface), event, cause)
-            }
-            event @ MuxEvent::ProgramStatusChanged { surface, .. } => state.push_coalesced(
-                sequence,
-                CoalescedEventKey::ProgramStatus(surface),
-                event,
-                cause,
-            ),
-            event @ MuxEvent::SurfaceOutput(surface) => state.push_coalesced(
-                sequence,
-                CoalescedEventKey::SurfaceOutput(surface),
-                event,
-                cause,
-            ),
-            event @ MuxEvent::ScrollChanged { surface, .. } => {
-                state.push_coalesced(sequence, CoalescedEventKey::Scroll(surface), event, cause)
-            }
-            MuxEvent::ConfigReloadRequested => state.push_coalesced(
-                sequence,
-                CoalescedEventKey::ConfigReload,
-                MuxEvent::ConfigReloadRequested,
-                cause,
-            ),
-            event @ MuxEvent::SurfaceExited(surface, _) => {
-                state.discard_surface_state(surface);
+            MuxEvent::SurfaceOutput(surface) => Some(CoalescedEventKey::SurfaceOutput(*surface)),
+            MuxEvent::ScrollChanged { surface, .. } => Some(CoalescedEventKey::Scroll(*surface)),
+            MuxEvent::ConfigReloadRequested => Some(CoalescedEventKey::ConfigReload),
+            _ => None,
+        };
+        let accepted = match (coalesced_key, &delivered.event) {
+            (Some(key), _) => state.push_coalesced(sequence, key, delivered),
+            (None, MuxEvent::SurfaceExited(surface, _)) => {
+                state.discard_surface_state(*surface);
                 if !state.reserve_pending_slot() {
                     false
                 } else {
-                    state.events.push_back((sequence, event, cause));
+                    state.events.push_back((sequence, delivered));
                     true
                 }
             }
-            MuxEvent::Empty => {
+            (None, MuxEvent::Empty) => {
                 let mut terminal_events = state
                     .events
                     .iter()
-                    .filter(|(_, event, _)| {
-                        matches!(event, MuxEvent::SurfaceExited(..))
+                    .filter(|(_, queued)| {
+                        matches!(queued.event, MuxEvent::SurfaceExited(..))
                             || matches!(
-                                event,
+                                &queued.event,
                                 MuxEvent::TreeDelta(delta)
                                     if delta.kind == TreeDeltaKind::WorkspaceClosed
                             )
@@ -553,14 +627,14 @@ impl MuxEventMailbox {
                 state.coalesced_sequences.clear();
                 state.coalesced.clear();
                 state.events.extend(terminal_events);
-                state.events.push_back((sequence, MuxEvent::Empty, cause));
+                state.events.push_back((sequence, delivered));
                 true
             }
-            event => {
+            (None, _) => {
                 if !state.reserve_pending_slot() {
                     false
                 } else {
-                    state.events.push_back((sequence, event, cause));
+                    state.events.push_back((sequence, delivered));
                     true
                 }
             }
@@ -591,19 +665,17 @@ impl MuxEventMailboxState {
         &mut self,
         sequence: u128,
         key: CoalescedEventKey,
-        event: MuxEvent,
-        cause: EventCause,
+        mut delivered: DeliveredEvent,
     ) -> bool {
-        let mut cause = cause;
         if let Some(previous) = self.coalesced_sequences.get(&key).copied() {
-            if let Some((_, _, previous_cause)) = self.coalesced.remove(&previous) {
-                cause = cause.merge(previous_cause);
+            if let Some((_, previous)) = self.coalesced.remove(&previous) {
+                delivered.cause = delivered.cause.merge(previous.cause);
             }
         } else if !self.reserve_pending_slot() {
             return false;
         }
         self.coalesced_sequences.insert(key, sequence);
-        self.coalesced.insert(sequence, (key, event, cause));
+        self.coalesced.insert(sequence, (key, delivered));
         true
     }
 
@@ -632,19 +704,23 @@ impl MuxEventMailboxState {
     }
 
     fn pop(&mut self) -> Option<MuxEvent> {
-        self.pop_caused().map(|(event, _)| event)
+        self.pop_delivered().map(|delivered| delivered.event)
     }
 
     fn pop_caused(&mut self) -> Option<(MuxEvent, EventCause)> {
+        self.pop_delivered().map(|delivered| (delivered.event, delivered.cause))
+    }
+
+    fn pop_delivered(&mut self) -> Option<DeliveredEvent> {
         let event_sequence = self.events.front().map(|(sequence, ..)| *sequence);
         let coalesced_sequence = self.coalesced.first_key_value().map(|(sequence, _)| *sequence);
         let next_sequence = [event_sequence, coalesced_sequence].into_iter().flatten().min()?;
         if event_sequence == Some(next_sequence) {
-            self.events.pop_front().map(|(_, event, cause)| (event, cause))
+            self.events.pop_front().map(|(_, delivered)| delivered)
         } else {
-            let (_, (key, event, cause)) = self.coalesced.pop_first()?;
+            let (_, (key, delivered)) = self.coalesced.pop_first()?;
             self.coalesced_sequences.remove(&key);
-            Some((event, cause))
+            Some(delivered)
         }
     }
 }
@@ -661,10 +737,17 @@ impl MuxEventReceiver {
         self.mailbox.close();
     }
 
+    /// Hands this subscriber each later event with the encodings slot it
+    /// shares with every other wire subscriber of the same emit
+    /// ([`DeliveredEvent::encodings`]).
+    pub(crate) fn share_encodings(&self) {
+        self.mailbox.shares_encodings.store(true, Ordering::Relaxed);
+    }
+
     /// Wake this receiver alone with a `TreeChanged` token. Owner-internal
     /// consumers use it for state changes that no broadcast event carries.
     pub(crate) fn wake(&self) {
-        self.mailbox.push(MuxEvent::TreeChanged, EventCause::Program);
+        self.mailbox.push(DeliveredEvent::unshared(MuxEvent::TreeChanged, EventCause::Program));
     }
 
     pub fn overflowed(&self) -> bool {
@@ -709,10 +792,20 @@ impl MuxEventReceiver {
         &self,
         interrupt: &crate::stream_interrupt::StreamInterrupt,
     ) -> Result<(MuxEvent, EventCause), RecvTimeoutError> {
+        self.recv_delivered_until_interrupted(interrupt)
+            .map(|delivered| (delivered.event, delivered.cause))
+    }
+
+    /// [`Self::recv_until_interrupted`] with the event's cause and shared
+    /// encodings.
+    pub(crate) fn recv_delivered_until_interrupted(
+        &self,
+        interrupt: &crate::stream_interrupt::StreamInterrupt,
+    ) -> Result<DeliveredEvent, RecvTimeoutError> {
         let mut state = self.mailbox.state.lock().recover_poison();
         loop {
-            if let Some(event) = state.pop_caused() {
-                return Ok(event);
+            if let Some(delivered) = state.pop_delivered() {
+                return Ok(delivered);
             }
             if state.closed {
                 return Err(RecvTimeoutError::Disconnected);
@@ -796,3 +889,7 @@ impl MuxEventReceiver {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "event_bus_encode_tests.rs"]
+mod encode_tests;

@@ -376,6 +376,18 @@ impl RenderService {
         writer.finish_tagged()
     }
 
+    /// `json`, one JSON object serialized already, as an outbound text of
+    /// this service (tagged like [`Self::serialize_for`]).
+    pub(super) fn copy_json_for(
+        &self,
+        json: &[u8],
+        stream: Option<ClientStreamId>,
+    ) -> std::io::Result<Arc<BudgetedText>> {
+        let mut writer = BudgetedJsonWriter::tagged(self.outbound_budget.clone(), stream);
+        writer.write_all(json)?;
+        writer.finish_tagged()
+    }
+
     pub(super) fn serialize_control<T: Serialize + ?Sized>(
         &self,
         value: &T,

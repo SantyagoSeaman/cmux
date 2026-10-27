@@ -99,6 +99,13 @@ impl OutboundStream {
         self.open.load(Ordering::Acquire)
     }
 
+    /// Closes the stream as its client ended it: no item of it, not even a
+    /// terminal (an overflow notice), is queued after this returns.
+    pub(super) fn close_by_client(&self) {
+        self.terminal_enqueued.store(true, Ordering::Release);
+        self.close();
+    }
+
     pub(super) fn close(&self) {
         self.open.store(false, Ordering::Release);
         self.closed.fire();
@@ -381,6 +388,24 @@ impl MessageWriter {
         ))
     }
 
+    /// [`Self::start_control_stream`] whose every item, its overflow
+    /// terminal included, carries `"stream": id` (a streamed page relay's
+    /// page stream, client_hello.rs).
+    pub(super) fn start_tagged_control_stream(
+        &self,
+        id: ClientStreamId,
+        overflow: &Value,
+    ) -> std::io::Result<OutboundStream> {
+        let mut stream = OutboundStream::with_sequence(
+            self.next_stream_id.fetch_add(1, Ordering::Relaxed),
+            self.render_service.serialize_control_for(overflow, Some(id))?,
+            true,
+            StreamLane::Bulk,
+        );
+        stream.client_stream = Some(id);
+        Ok(stream)
+    }
+
     /// The stream's overflow terminal (`overflow`, or `stream-end{overflow}`
     /// on a client-minted stream), dropping what the stream still queues.
     pub(super) fn send_overflow_terminal(&self, stream: &OutboundStream) -> std::io::Result<()> {
@@ -454,6 +479,20 @@ impl MessageWriter {
             return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection closed"));
         }
         self.send_encoded_backpressured(self.encode(value, stream), stream)
+    }
+
+    /// [`Self::send_stream_backpressured`] of one JSON object serialized
+    /// already (an event encoded once for many subscribers, event_bus.rs
+    /// `EventEncodings`): only its bytes are copied to this connection.
+    pub(super) fn send_json_backpressured(
+        &self,
+        json: &[u8],
+        stream: &OutboundStream,
+    ) -> std::io::Result<()> {
+        self.send_encoded_backpressured(
+            self.render_service.copy_json_for(json, stream.client_stream),
+            stream,
+        )
     }
 
     /// The first half of [`Self::send_stream_backpressured`]: `value` as
