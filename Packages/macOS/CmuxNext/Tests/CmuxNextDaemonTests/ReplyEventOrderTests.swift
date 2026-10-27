@@ -46,14 +46,19 @@ import Testing
 
         /// Reads one request line and returns its `id`.
         func readRequestID() throws -> UInt64 {
+            let request = try readRequest()
+            return try #require((request["id"] as? NSNumber)?.uint64Value)
+        }
+
+        /// Reads one request line, whole.
+        func readRequest() throws -> [String: Any] {
             var line = Data()
             var byte: UInt8 = 0
             while byte != 0x0A {
                 guard read(peer, &byte, 1) == 1 else { throw POSIXError(.ECONNRESET) }
                 line.append(byte)
             }
-            let object = try JSONSerialization.jsonObject(with: line) as? [String: Any]
-            return try #require((object?["id"] as? NSNumber)?.uint64Value)
+            return try #require(try JSONSerialization.jsonObject(with: line) as? [String: Any])
         }
 
         func write(_ lines: [String]) {

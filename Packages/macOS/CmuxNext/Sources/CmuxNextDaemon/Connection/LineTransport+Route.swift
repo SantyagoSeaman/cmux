@@ -24,22 +24,26 @@ extension LineTransport {
             recorder?.lineRead(.ignored)
             return
         }
-        // A v2 stream line goes to the stream handler of a dedicated
-        // connection (`SessionJournalRead`); on the control connection it
-        // travels with the raw events, in socket order (`session.events`).
-        let streamed = envelope.type == "stream_item" || envelope.type == "stream_end"
-        let streamKind: DaemonWireStats.FrameKind = envelope.type == "stream_end" ? .streamEnd : .streamItem
+        // A v2 stream line on the control sequence (`session.events`) travels with the raw events, in
+        // socket order; any other goes to its stream's sink (`SessionJournalRead`) and stays off it.
+        let ended = envelope.type == "stream_end"
+        let streamed = envelope.type == "stream_item" || ended
+        let streamKind: DaemonWireStats.FrameKind = ended ? .streamEnd : .streamItem
         if streamed, let streamID = envelope.streamID {
             let streamRoute = state.withLock { state -> StreamRoute in
                 if state.controlStreams.contains(streamID) {
-                    if envelope.type == "stream_end" { state.controlStreams.remove(streamID) }
+                    if ended { state.controlStreams.remove(streamID) }
                     return .control
                 }
+                if let sink = ended ? state.streamSinks.removeValue(forKey: streamID) : state.streamSinks[streamID] { return .sink(sink) }
                 if let handler = state.streamHandler { return .handler(handler) }
                 return .unrouted
             }
             switch streamRoute {
             case .control: break
+            case .sink(let sink):
+                recorder?.lineRead(streamKind)
+                return sink(ended ? .end(line) : .item(line))
             case .handler(let handler):
                 recorder?.lineRead(streamKind)
                 return handler(streamID, line)

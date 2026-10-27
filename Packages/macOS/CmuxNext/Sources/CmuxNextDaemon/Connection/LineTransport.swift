@@ -171,6 +171,7 @@ final class LineTransport: Sendable {
     var isClosed: Bool { state.withLock { $0.closed != nil } }
     /// The writer queue's class (``DaemonWireStats/Role/writerQoS``; tests).
     var writerQoS: DispatchQoS { writer.queueQoS }
+    /// Gets the lines of every stream that is neither on the control sequence nor routed to its own sink.
     func setStreamHandler(_ handler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?) { state.withLock { $0.streamHandler = handler } }
 
     /// Counts `streamID`'s lines as stream-0 events until its `stream_end`;
@@ -335,13 +336,17 @@ final class LineTransport: Sendable {
     }
 
     private func failAll(_ reason: TransportCloseReason) {
-        let unanswered: [PendingRequest] = state.withLock { state in
+        let (unanswered, sinks) = state.withLock { state -> ([PendingRequest], [StreamSink]) in
             if state.closed == nil { state.closed = reason }
             state.deadlines.removeAll()
             state.armedAt = nil
-            return state.pending.removeAllInSendOrder()
+            let sinks = Array(state.streamSinks.values)
+            state.streamSinks.removeAll()
+            return (state.pending.removeAllInSendOrder(), sinks)
         }
         deadlineTimer.cancel()
+        // A stream the connection closed under never gets its `stream_end`.
+        for sink in sinks { sink(.closed(reason)) }
         let error = Self.closedError(reason)
         for entry in unanswered {
             // A request the connection closed under never gets its reply.

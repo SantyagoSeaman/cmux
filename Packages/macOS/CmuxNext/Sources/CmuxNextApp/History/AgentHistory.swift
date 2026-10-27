@@ -36,14 +36,13 @@ final class AgentHistory {
 
     private func readAll() async {
         for daemon in services.machines.daemons where daemon.supports("session-journal-v1") {
-            guard case .connected = daemon.store.connectionState, let endpoint = try? await daemon.endpoint() else { continue }
+            guard case .connected = daemon.store.connectionState, let connection = daemon.connection else { continue }
             let machine = daemon.machineID
             let fold = folds[machine] ?? AgentSessionFold(machine: machine)
             let cursor = generations[machine].map { (generation: $0, sequence: fold.cursor) }
             do {
-                let result = try await SessionJournalRead.shared.read(socketPath: endpoint.socketPath, wireStats: endpoint.wireStats,
-                                                               kinds: AgentSessionFold.journalKinds,
-                                                               cursor: fold.cursor > 0 ? cursor : nil)
+                let result = try await SessionJournalRead(connection: connection).read(kinds: AgentSessionFold.journalKinds,
+                                                                                       cursor: fold.cursor > 0 ? cursor : nil)
                 apply(result, machine: machine)
             } catch {
                 logger.info("agent history: journal read on \(machine, privacy: .public) failed: \(String(describing: error), privacy: .public)")

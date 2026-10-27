@@ -14,7 +14,9 @@ extension LineTransport {
     enum StreamRoute {
         /// A control-sequence stream (`session.events`): counted with the raw events.
         case control
-        /// The dedicated connection's stream handler (`SessionJournalRead`).
+        /// The stream's own sink (``LineTransport/routeStream(_:to:)``; `SessionJournalRead`).
+        case sink(StreamSink)
+        /// The connection-wide stream handler (``LineTransport/setStreamHandler(_:)``).
         case handler(@Sendable (_ streamID: String, _ line: Data) -> Void)
         /// A stream nobody registered (one whose open failed): dropped, so it never
         /// reaches the store under another event's sequence.

@@ -18,7 +18,10 @@ extension LineTransport {
         var eventCount: UInt64 = 0
         /// Streams the daemon writes in its reply FIFO (`session.events`).
         var controlStreams: Set<String> = []
-        /// Gets resource API stream lines (`stream_item`, `stream_end`).
+        /// Client-minted streams routed to their own sink (``LineTransport/routeStream(_:to:)``), until
+        /// their `stream_end` or the close.
+        var streamSinks: [String: StreamSink] = [:]
+        /// Gets the lines of every other stream (`stream_item`, `stream_end`) not on the control sequence.
         var streamHandler: (@Sendable (_ streamID: String, _ line: Data) -> Void)?
 
         /// Takes every deadline due at `now` out and marks its request expired: what each one's
