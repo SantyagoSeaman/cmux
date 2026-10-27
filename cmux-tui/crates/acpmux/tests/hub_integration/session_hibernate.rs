@@ -198,8 +198,9 @@ async fn a_prompt_wakes_a_hibernated_session_and_reaches_its_agent_once() {
     let echoed = r.hub.events(&id, 0, 10_000).unwrap();
     let echoed = echoed
         .iter()
-        .filter(|e| e.kind == "session/update" && e.msg.to_string().contains("after-sleep"));
-    assert_eq!(echoed.count(), 1, "the agent did not answer the prompt exactly once");
+        .filter(|e| e.dir == "out" && e.kind == method::SESSION_PROMPT)
+        .filter(|e| e.msg.to_string().contains("after-sleep"));
+    assert_eq!(echoed.count(), 1, "the prompt did not reach the agent exactly once");
     let kinds: Vec<String> =
         r.hub.events(&id, 0, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
     assert!(
