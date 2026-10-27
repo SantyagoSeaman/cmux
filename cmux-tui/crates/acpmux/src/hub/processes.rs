@@ -310,7 +310,10 @@ async fn read_output(
 
 impl Hub {
     /// The session's table, read from its whole log the first time.
-    fn process_table<'a>(&self, session: &'a Session) -> std::sync::MutexGuard<'a, ProcessTable> {
+    fn process_table<'a>(
+        &self,
+        session: &'a Session,
+    ) -> crate::lock_rank::RankedGuard<'a, ProcessTable> {
         let mut table = session.processes.lock().unwrap_or_else(|e| e.into_inner());
         if !table.loaded {
             *table = self.read_processes(session);

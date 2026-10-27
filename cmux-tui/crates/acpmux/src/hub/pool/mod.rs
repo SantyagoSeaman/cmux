@@ -357,7 +357,8 @@ impl Hub {
         let PrewarmRequest { harness, preset, wait, trust_gate, trust_web, .. } = req;
         let task = tokio::spawn(async move {
             if !debounce.is_zero() {
-                let clock = lock(&hub.clock).clone();
+                let clock =
+                    hub.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
                 let at = clock.now() + debounce;
                 clock.sleep_until(at).await;
             }
@@ -415,7 +416,7 @@ impl Hub {
             return;
         }
         let idle = self.config.read().await.pool.idle();
-        let now = lock(&self.clock).now();
+        let now = self.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).now();
         let wanted = {
             let mut pool = lock(&self.pool.pool);
             pool.set_idle(idle);
@@ -432,7 +433,11 @@ impl Hub {
                     let back = if hub.pool.stopping.load(Ordering::SeqCst) {
                         Some(p)
                     } else {
-                        let now = lock(&hub.clock).now();
+                        let now = hub
+                            .clock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .now();
                         lock(&hub.pool.pool).complete(&spec.key, generation, p, now)
                     };
                     // In the pool now (or ended below): `stop_pool` finds it there.
@@ -507,7 +512,7 @@ impl Hub {
             self.pool_discard(vec![p]);
             return;
         }
-        let now = lock(&self.clock).now();
+        let now = self.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).now();
         let key = p.key.clone();
         match lock(&self.pool.pool).restore(&key, p, now) {
             Some(p) => self.pool_discard(vec![p]),
@@ -815,8 +820,12 @@ impl Hub {
                     stopped,
                     || {
                         let empty = lock(&state.pool).is_empty();
-                        (!empty && !state.stopping.load(Ordering::SeqCst))
-                            .then(|| lock(&hub.clock).clone())
+                        (!empty && !state.stopping.load(Ordering::SeqCst)).then(|| {
+                            hub.clock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone()
+                        })
                     },
                     |expired| {
                         tracing::info!(count = expired.len(), "idle pooled sessions exit");

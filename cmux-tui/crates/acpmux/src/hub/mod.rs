@@ -180,6 +180,7 @@ pub(crate) fn question_prompt(request: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|p| !p.is_empty())
 }
+use crate::lock_rank::{LockRank, RankedMutex};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -339,31 +340,31 @@ pub struct Hub {
     pub(super) mailbox: Mailbox,
     /// The forum log (`forum.rs`, `hub/forum.rs`).
     pub(super) forum: std::sync::OnceLock<crate::forum::Forum>,
-    pub(super) sessions: StdMutex<HashMap<String, Arc<Session>>>,
+    pub(super) sessions: RankedMutex<HashMap<String, Arc<Session>>>,
     /// Where adopt looks for harness sessions.
-    pub(super) harness_homes: StdMutex<crate::adopt::HarnessHomes>,
+    pub(super) harness_homes: RankedMutex<crate::adopt::HarnessHomes>,
     pub(super) events: broadcast::Sender<HubEvent>,
     /// `_acpmux/models` replies now asking peers for theirs (`server/models_fanout.rs`): a remote
     /// asker meanwhile gets this daemon's own catalog, so mutual peers cannot ping-pong.
     pub models_fanouts: std::sync::atomic::AtomicUsize,
     pub shutdown: Notify,
     pub started_at: u64,
-    pub(super) peers: StdMutex<HashMap<String, Arc<crate::peer::Peer>>>,
-    pub(super) remote_sessions: StdMutex<HashMap<String, RemoteSession>>,
+    pub(super) peers: RankedMutex<HashMap<String, Arc<crate::peer::Peer>>>,
+    pub(super) remote_sessions: RankedMutex<HashMap<String, RemoteSession>>,
     /// Leased peers by name, with the generation of the peer each lease started (`peer_lease.rs`);
     /// never saved. Lock order: this, then `peers`; never `peers` first.
-    pub(super) peer_leases: StdMutex<HashMap<String, u64>>,
+    pub(super) peer_leases: RankedMutex<HashMap<String, u64>>,
     pub(super) peer_notices: mpsc::Sender<(String, u64, crate::peer::PeerNotice)>,
     pub(super) peer_notices_rx:
         Mutex<Option<mpsc::Receiver<(String, u64, crate::peer::PeerNotice)>>>,
     /// Models each agent has advertised, keyed by agent profile name. Filled whenever a session
     /// starts, so the picker can list a harness that has no live session.
-    pub(super) known_models: StdMutex<HashMap<String, Vec<(String, String)>>>,
+    pub(super) known_models: RankedMutex<HashMap<String, Vec<(String, String)>>>,
     /// Model lists from Claude Code's and Codex's own CLIs, by profile name
     /// (`hub/live_models.rs`): richer than `known_models` (efforts, fast).
-    pub(super) live_models: StdMutex<HashMap<String, Vec<crate::live_models::LiveModel>>>,
+    pub(super) live_models: RankedMutex<HashMap<String, Vec<crate::live_models::LiveModel>>>,
     /// (harness, model) pairs whose backend refused them, with its message (model_availability.rs).
-    pub(super) refused_models: StdMutex<HashMap<(String, String), String>>,
+    pub(super) refused_models: RankedMutex<HashMap<(String, String), String>>,
     /// False while the daemon finishes startup work (login environment, launcher checks) in the
     /// background. Session creation and agent spawns wait for it; every other request is answered
     /// at once.
@@ -373,33 +374,33 @@ pub struct Hub {
     pub(super) logs_ready: tokio::sync::watch::Sender<bool>,
     /// Sessions that were waiting for a permission when the last daemon stopped;
     /// `load_logs` settles them.
-    pub(super) waiting_at_load: StdMutex<Vec<String>>,
+    pub(super) waiting_at_load: RankedMutex<Vec<String>>,
     /// Startup has read the login environment: the catalog sees its PATH.
     pub(super) catalog_ready: tokio::sync::watch::Sender<bool>,
     pub(super) login_env_requested: AtomicBool,
     /// Session ids an `import` is writing right now.
-    pub(super) importing: StdMutex<std::collections::HashSet<String>>,
+    pub(super) importing: RankedMutex<std::collections::HashSet<String>>,
     pub(super) handoffs: handoff::Handoffs,
     /// New agents run under agent hosts (`enable_agent_hosts`).
     pub(super) agent_hosts: AtomicBool,
     /// What the coming shutdown does with hosted agents, decided once:
     /// `_acpmux/shutdown endAgents` sets it until the shutdown takes it.
-    pub(super) shutdown_plan: StdMutex<shutdown::ShutdownPlan>,
+    pub(super) shutdown_plan: RankedMutex<shutdown::ShutdownPlan>,
     /// Turns a shutdown with `endAgents` settled as cancelled: their prompt
     /// futures must not write a second result when the agent ends.
-    pub(super) settled_by_shutdown: StdMutex<std::collections::HashSet<String>>,
+    pub(super) settled_by_shutdown: RankedMutex<std::collections::HashSet<String>>,
     /// `npx -y PACKAGE` launches resolved to their bin: (npx, package) to path.
-    pub(super) launchers: StdMutex<HashMap<(String, String), String>>,
+    pub(super) launchers: RankedMutex<HashMap<(String, String), String>>,
     /// Harnesses whose last model probe failed, with the reason; reported in
     /// `_acpmux/models` and `_acpmux/harnesses` (`probeError`).
-    pub probe_errors: StdMutex<HashMap<String, String>>,
+    pub probe_errors: RankedMutex<HashMap<String, String>>,
     /// Lifecycle timers (the idle harness exit) run on this clock.
-    pub(super) clock: StdMutex<Arc<dyn crate::clock::Clock>>,
+    pub(super) clock: RankedMutex<Arc<dyn crate::clock::Clock>>,
     /// A session harness unused for this long exits (`idle.rs`); None: never.
-    pub(super) idle_child: StdMutex<Option<std::time::Duration>>,
+    pub(super) idle_child: RankedMutex<Option<std::time::Duration>>,
     /// The harnesses the model probes may start (`ACPMUX_PROBE_HARNESSES`);
     /// None: every harness.
-    pub(super) probe_only: StdMutex<Option<std::collections::BTreeSet<String>>>,
+    pub(super) probe_only: RankedMutex<Option<std::collections::BTreeSet<String>>>,
     pub(super) idle_wake: Arc<Notify>,
     pub(super) idle_reaper: AtomicBool,
     /// Set when `shutdown_all` starts: the idle reaper stops for good.
@@ -409,15 +410,15 @@ pub struct Hub {
     /// Hidden pre-created sessions for instant harness switches (`pool/`).
     pub(super) pool: Arc<pool::PoolState>,
     /// The merged asking-mode table for Web connections (`web_control.rs`).
-    pub(super) web_modes: StdMutex<web_control::WebModeCache>,
+    pub(super) web_modes: RankedMutex<web_control::WebModeCache>,
     /// Where the folder-trust gate reads (`server/trust_gate.rs`); None: no gate.
-    pub(super) trust_gate: StdMutex<Option<crate::trust::Paths>>,
+    pub(super) trust_gate: RankedMutex<Option<crate::trust::Paths>>,
     /// The `sandbox-exec` remote chains run Claude Code under (`remote_sandbox.rs`).
-    pub(super) remote_sandbox_exec: StdMutex<PathBuf>,
+    pub(super) remote_sandbox_exec: RankedMutex<PathBuf>,
     /// The device-wide chat index, once started (`chats/`).
     pub(crate) chats: std::sync::OnceLock<Arc<crate::chats::ChatService>>,
     /// Work that waits for the chat index to start (`Hub::when_chats_ready`).
-    pub(crate) chats_waiters: StdMutex<Vec<crate::chats::ChatsWaiter>>,
+    pub(crate) chats_waiters: RankedMutex<Vec<crate::chats::ChatsWaiter>>,
     /// The forced start mode and the setting's change count (`start_mode_state.rs`).
     pub(super) start_mode_state: start_mode_state::StartModeCell,
     pub(super) harness_watch: harness_watch::HarnessWatchState,
@@ -435,9 +436,9 @@ pub struct Hub {
     /// This launch's person key (`person.rs`): who may allow and grant.
     pub person: person::PersonGate,
     /// How long a move may go without its client (`transfer_watch.rs`).
-    pub(super) transfer_lease: StdMutex<std::time::Duration>,
+    pub(super) transfer_lease: RankedMutex<std::time::Duration>,
     /// How long Ctrl-B waits for Claude Code's answer (`processes.rs`).
-    pub(super) background_timeout: StdMutex<std::time::Duration>,
+    pub(super) background_timeout: RankedMutex<std::time::Duration>,
     /// Chats agents offered the person, still open (`offers.rs`).
     pub(super) offers: offers::Offers,
     /// Open sub-sessions per parent and starts in flight (`subsessions.rs`).
@@ -502,45 +503,73 @@ impl Hub {
             store,
             mailbox,
             forum: std::sync::OnceLock::new(),
-            sessions: StdMutex::new(HashMap::new()),
-            harness_homes: StdMutex::new(crate::adopt::HarnessHomes::from_env()),
+            sessions: RankedMutex::new(LockRank::Sessions, "hub.sessions", HashMap::new()),
+            harness_homes: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.harness_homes",
+                crate::adopt::HarnessHomes::from_env(),
+            ),
             events,
             models_fanouts: std::sync::atomic::AtomicUsize::new(0),
             shutdown: Notify::new(),
             started_at: now_ms(),
-            peers: StdMutex::new(HashMap::new()),
-            remote_sessions: StdMutex::new(HashMap::new()),
-            peer_leases: StdMutex::new(HashMap::new()),
+            peers: RankedMutex::new(LockRank::Peers, "hub.peers", HashMap::new()),
+            remote_sessions: RankedMutex::new(
+                LockRank::RemoteSessions,
+                "hub.remote_sessions",
+                HashMap::new(),
+            ),
+            peer_leases: RankedMutex::new(LockRank::PeerLeases, "hub.peer_leases", HashMap::new()),
             peer_notices,
             peer_notices_rx: Mutex::new(Some(peer_notices_rx)),
-            known_models: StdMutex::new(HashMap::new()),
-            live_models: StdMutex::new(HashMap::new()),
-            refused_models: StdMutex::new(HashMap::new()),
+            known_models: RankedMutex::new(
+                LockRank::KnownModels,
+                "hub.known_models",
+                HashMap::new(),
+            ),
+            live_models: RankedMutex::new(LockRank::Leaf, "hub.live_models", HashMap::new()),
+            refused_models: RankedMutex::new(LockRank::Leaf, "hub.refused_models", HashMap::new()),
             startup_ready: tokio::sync::watch::channel(true).0,
             logs_ready: tokio::sync::watch::channel(true).0,
-            waiting_at_load: StdMutex::new(Vec::new()),
+            waiting_at_load: RankedMutex::new(LockRank::Leaf, "hub.waiting_at_load", Vec::new()),
             catalog_ready: tokio::sync::watch::channel(true).0,
             login_env_requested: AtomicBool::new(false),
-            importing: StdMutex::new(std::collections::HashSet::new()),
+            importing: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.importing",
+                std::collections::HashSet::new(),
+            ),
             handoffs,
             agent_hosts: AtomicBool::new(false),
-            shutdown_plan: StdMutex::new(shutdown::ShutdownPlan::default()),
-            settled_by_shutdown: StdMutex::new(Default::default()),
-            launchers: StdMutex::new(HashMap::new()),
-            probe_errors: StdMutex::new(HashMap::new()),
-            clock: StdMutex::new(crate::clock::TokioClock::new()),
-            idle_child: StdMutex::new(Some(IDLE_CHILD)),
-            probe_only: StdMutex::new(None),
+            shutdown_plan: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.shutdown_plan",
+                shutdown::ShutdownPlan::default(),
+            ),
+            settled_by_shutdown: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.settled_by_shutdown",
+                Default::default(),
+            ),
+            launchers: RankedMutex::new(LockRank::Leaf, "hub.launchers", HashMap::new()),
+            probe_errors: RankedMutex::new(LockRank::Leaf, "hub.probe_errors", HashMap::new()),
+            clock: RankedMutex::new(LockRank::Clock, "hub.clock", crate::clock::TokioClock::new()),
+            idle_child: RankedMutex::new(LockRank::Leaf, "hub.idle_child", Some(IDLE_CHILD)),
+            probe_only: RankedMutex::new(LockRank::Leaf, "hub.probe_only", None),
             idle_wake: Arc::new(Notify::new()),
             idle_reaper: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             idle_pass: Mutex::new(()),
             pool: Arc::new(pool::PoolState::new()),
-            web_modes: StdMutex::new(Default::default()),
-            trust_gate: StdMutex::new(None),
-            remote_sandbox_exec: StdMutex::new(PathBuf::from(remote_sandbox::SANDBOX_EXEC)),
+            web_modes: RankedMutex::new(LockRank::Leaf, "hub.web_modes", Default::default()),
+            trust_gate: RankedMutex::new(LockRank::Leaf, "hub.trust_gate", None),
+            remote_sandbox_exec: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.remote_sandbox_exec",
+                PathBuf::from(remote_sandbox::SANDBOX_EXEC),
+            ),
             chats: std::sync::OnceLock::new(),
-            chats_waiters: StdMutex::new(Vec::new()),
+            chats_waiters: RankedMutex::new(LockRank::Leaf, "hub.chats_waiters", Vec::new()),
             start_mode_state: Default::default(),
             harness_watch: Default::default(),
             settings_watch: Default::default(),
@@ -551,8 +580,16 @@ impl Hub {
             web_token: WebToken::new(String::new()),
             person: Default::default(),
             workflow_index: Default::default(),
-            transfer_lease: StdMutex::new(transfer_watch::TRANSFER_LEASE),
-            background_timeout: StdMutex::new(processes::STOP_TIMEOUT),
+            transfer_lease: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.transfer_lease",
+                transfer_watch::TRANSFER_LEASE,
+            ),
+            background_timeout: RankedMutex::new(
+                LockRank::Leaf,
+                "hub.background_timeout",
+                processes::STOP_TIMEOUT,
+            ),
             offers: Default::default(),
             subsessions: Default::default(),
             subsession_runs: Default::default(),
@@ -776,39 +813,55 @@ impl Hub {
         Arc::new(Session {
             id: meta.id.clone(),
             seq: AtomicU64::new(meta.last_seq),
-            meta: StdMutex::new(meta),
+            meta: RankedMutex::new(LockRank::SessionMeta, "session.meta", meta),
             child: Mutex::new(None),
             spawn_lock: Mutex::new(()),
-            append_lock: StdMutex::new(()),
+            append_lock: RankedMutex::new(LockRank::SessionAppend, "session.append_lock", ()),
             loading: AtomicBool::new(false),
             caught_up: AtomicBool::new(true),
             turn_lock: Mutex::new(()),
-            turn: StdMutex::new(None),
+            turn: RankedMutex::new(LockRank::Leaf, "session.turn", None),
             queued: AtomicU64::new(0),
-            queue: StdMutex::new(Vec::new()),
+            queue: RankedMutex::new(LockRank::SessionQueue, "session.queue", Vec::new()),
             queue_moved: Notify::new(),
-            moving: StdMutex::new(None),
-            restored: StdMutex::new(Vec::new()),
-            stream: StdMutex::new(StreamState::default()),
-            permissions: StdMutex::new(permission_groups::PermissionState::default()),
+            moving: RankedMutex::new(LockRank::SessionMoving, "session.moving", None),
+            restored: RankedMutex::new(LockRank::Leaf, "session.restored", Vec::new()),
+            stream: RankedMutex::new(LockRank::Leaf, "session.stream", StreamState::default()),
+            permissions: RankedMutex::new(
+                LockRank::SessionPermissions,
+                "session.permissions",
+                permission_groups::PermissionState::default(),
+            ),
             permission_epoch: AtomicU64::new(0),
             input_since: AtomicU64::new(0),
             asks_in_flight: std::sync::atomic::AtomicUsize::new(0),
             asks_landed: Notify::new(),
             rehydrate: AtomicBool::new(false),
             forum_retell: AtomicBool::new(false),
-            forum_retold: std::sync::Mutex::default(),
-            forum_telling: std::sync::Mutex::default(),
+            forum_retold: RankedMutex::new(
+                LockRank::Leaf,
+                "session.forum_retold",
+                Default::default(),
+            ),
+            forum_telling: RankedMutex::new(
+                LockRank::Leaf,
+                "session.forum_telling",
+                Default::default(),
+            ),
             launched_with_tools: std::sync::atomic::AtomicU8::new(0),
             route_switch: AtomicBool::new(false),
             inbound_tx,
             inbound_rx: Mutex::new(Some(inbound_rx)),
             steering: AtomicBool::new(steering),
             backgrounds_work: AtomicBool::new(backgrounds_work),
-            steer_now: Default::default(),
+            steer_now: RankedMutex::new(LockRank::Leaf, "session.steer_now", Default::default()),
             steer_end: tokio::sync::watch::channel(None).0,
-            fork_from: StdMutex::new(None),
-            applied: StdMutex::new(session::Applied::default()),
+            fork_from: RankedMutex::new(LockRank::Leaf, "session.fork_from", None),
+            applied: RankedMutex::new(
+                LockRank::Leaf,
+                "session.applied",
+                session::Applied::default(),
+            ),
             purged: Arc::new(AtomicBool::new(false)),
             watch_end: Notify::new(),
             replaced: AtomicBool::new(false),
@@ -816,25 +869,41 @@ impl Hub {
             state_seq: AtomicU64::new(0),
             attached: std::sync::atomic::AtomicUsize::new(0),
             hidden: std::sync::atomic::AtomicUsize::new(0),
-            stderr_tail: StdMutex::new(std::collections::VecDeque::new()),
-            prompts: StdMutex::new(std::collections::VecDeque::new()),
+            stderr_tail: RankedMutex::new(
+                LockRank::Leaf,
+                "session.stderr_tail",
+                std::collections::VecDeque::new(),
+            ),
+            prompts: RankedMutex::new(
+                LockRank::SessionPrompts,
+                "session.prompts",
+                std::collections::VecDeque::new(),
+            ),
             append_errors: AtomicU64::new(0),
             last_progress: AtomicU64::new(0),
             heard: AtomicU64::new(0),
             heard_at: std::sync::atomic::AtomicI64::new(0),
             stalled_recheck: AtomicU64::new(0),
-            open_tools: StdMutex::new(Default::default()),
-            stalled_counted: StdMutex::new(None),
+            open_tools: RankedMutex::new(LockRank::Leaf, "session.open_tools", Default::default()),
+            stalled_counted: RankedMutex::new(LockRank::Leaf, "session.stalled_counted", None),
             stalled_gen: AtomicU64::new(0),
             last_model_at: AtomicU64::new(0),
-            silent_turn: StdMutex::new(None),
+            silent_turn: RankedMutex::new(LockRank::SessionSilentTurn, "session.silent_turn", None),
             last_active: AtomicU64::new(self.clock_now()),
             web_control_ended: AtomicBool::new(false),
             floor: Default::default(),
-            subagents: StdMutex::new(Default::default()),
-            processes: StdMutex::new(Default::default()),
-            pr_creates: StdMutex::new(Default::default()),
-            composers: StdMutex::new(Default::default()),
+            subagents: RankedMutex::new(LockRank::Leaf, "session.subagents", Default::default()),
+            processes: RankedMutex::new(
+                LockRank::SessionProcesses,
+                "session.processes",
+                Default::default(),
+            ),
+            pr_creates: RankedMutex::new(LockRank::Leaf, "session.pr_creates", Default::default()),
+            composers: RankedMutex::new(
+                LockRank::SessionComposers,
+                "session.composers",
+                Default::default(),
+            ),
         })
     }
 

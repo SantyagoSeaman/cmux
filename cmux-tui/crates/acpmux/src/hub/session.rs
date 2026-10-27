@@ -13,7 +13,7 @@ pub(super) struct SteerNow {
 
 pub struct Session {
     pub id: String,
-    pub(super) meta: StdMutex<SessionMeta>,
+    pub(super) meta: RankedMutex<SessionMeta>,
     pub(super) child: Mutex<Option<Arc<ChildAgent>>>,
     /// Held while a child is spawned and initialized, so concurrent
     /// requests for a stopped session start one agent, not several.
@@ -21,25 +21,25 @@ pub struct Session {
     pub(super) seq: AtomicU64,
     /// Held from sequence allocation until the record is stored and sent,
     /// so the log and fan-out always see sequences in order.
-    pub(super) append_lock: StdMutex<()>,
+    pub(super) append_lock: RankedMutex<()>,
     pub(super) loading: AtomicBool,
     /// The log's records past the saved `lastSeq` are counted (`Hub::catch_up`).
     /// False from a deferred daemon start until the first append or the log load.
     pub(super) caught_up: AtomicBool,
     pub(super) turn_lock: Mutex<()>,
-    pub(super) turn: StdMutex<Option<TurnInfo>>,
+    pub(super) turn: RankedMutex<Option<TurnInfo>>,
     pub(super) queued: AtomicU64,
-    pub(super) queue: StdMutex<Vec<QueuedPrompt>>,
+    pub(super) queue: RankedMutex<Vec<QueuedPrompt>>,
     /// Fired when the queue's head may have changed (a prompt left the queue,
     /// a turn ended): queued prompts wait on it for their turn (`queue.rs`).
     pub(super) queue_moved: Notify,
     /// Being moved to another daemon (`transfer_out.rs`): the transfer id. It takes no prompt
     /// and starts nothing queued until the move commits (it closes) or aborts.
-    pub(super) moving: StdMutex<Option<String>>,
+    pub(super) moving: RankedMutex<Option<String>>,
     /// Prompts `restore_queues` rebuilt, `(promptId, turnId)`, until their run asks for its turn.
-    pub(super) restored: StdMutex<Vec<(String, String)>>,
-    pub(super) stream: StdMutex<StreamState>,
-    pub(super) permissions: StdMutex<permission_groups::PermissionState>,
+    pub(super) restored: RankedMutex<Vec<(String, String)>>,
+    pub(super) stream: RankedMutex<StreamState>,
+    pub(super) permissions: RankedMutex<permission_groups::PermissionState>,
     /// Bumped (under the `permissions` lock) whenever pending
     /// permissions are cancelled; a request that started before the bump
     /// is answered `cancelled` instead of being registered.
@@ -60,10 +60,10 @@ pub struct Session {
     /// The posts already told again since the context was emptied, while a
     /// retell takes more than one prompt (agents' posts past one block's
     /// share, `hub/forum.rs`).
-    pub(super) forum_retold: std::sync::Mutex<std::collections::HashSet<String>>,
+    pub(super) forum_retold: RankedMutex<std::collections::HashSet<String>>,
     /// The forum posts the running turn's prompt tells, until it ends: an
     /// urgent retirement of their key reaches this session too.
-    pub(super) forum_telling: std::sync::Mutex<Vec<String>>,
+    pub(super) forum_telling: RankedMutex<Vec<String>>,
     /// Whether its running agent was launched with cmux's tools (0: not
     /// launched yet, 1: with, 2: without), so forum rules follow the launch,
     /// not a profile reloaded since (`hub/tools.rs`).
@@ -80,17 +80,17 @@ pub struct Session {
     pub(super) backgrounds_work: AtomicBool,
     /// Steers into the running turn by prompt id (`steer_end.rs`): Send now stops the agent's
     /// step for one that waits (`queue_edit.rs`).
-    pub(super) steer_now: StdMutex<SteerNow>,
+    pub(super) steer_now: RankedMutex<SteerNow>,
     /// The answer of a steer that ended its turn, with the turn's id: the
     /// turn's other prompts take it (`steer_end.rs`, codex-acp).
     pub(super) steer_end: tokio::sync::watch::Sender<Option<(String, Value)>>,
     /// Set on a freshly forked Claude session: the parent's agent session id
     /// to pass as `--resume <id> --fork-session` on first spawn.
-    pub(super) fork_from: StdMutex<Option<String>>,
+    pub(super) fork_from: RankedMutex<Option<String>>,
     /// The model and the effort acpmux last set on this session (its own
     /// start values or a client's set), so a repeated set is no new pick
     /// (`start_defaults.rs`).
-    pub(super) applied: StdMutex<Applied>,
+    pub(super) applied: RankedMutex<Applied>,
     /// Set once the session is purged, so late events do not recreate its
     /// files while the directory is being removed.
     pub(super) purged: std::sync::Arc<AtomicBool>,
@@ -112,10 +112,10 @@ pub struct Session {
     pub(super) hidden: std::sync::atomic::AtomicUsize,
     /// Last stderr lines of the current turn, quoted when the agent
     /// process dies without an answer ("Not logged in", a launcher error).
-    pub(super) stderr_tail: StdMutex<std::collections::VecDeque<String>>,
+    pub(super) stderr_tail: RankedMutex<std::collections::VecDeque<String>>,
     /// All pending client prompt ids and a bounded cache of completed outcomes,
     /// newest last: retries wait for the original prompt while it is pending.
-    pub(super) prompts: StdMutex<std::collections::VecDeque<(String, PromptOutcome)>>,
+    pub(super) prompts: RankedMutex<std::collections::VecDeque<(String, PromptOutcome)>>,
     /// Bumped when a record failed to reach the store; an agent host entry
     /// is acknowledged only when its record was stored.
     pub(super) append_errors: AtomicU64,
@@ -136,10 +136,10 @@ pub struct Session {
     pub(super) stalled_recheck: AtomicU64,
     /// The running turn's tool calls that have not ended (`stalled_turn.rs`): a turn quiet
     /// inside one gets longer before it counts as stalled.
-    pub(super) open_tools: StdMutex<std::collections::HashSet<String>>,
+    pub(super) open_tools: RankedMutex<std::collections::HashSet<String>>,
     /// The turn whose stalled count runs: its prompt was written (`stalled_turn.rs`). None
     /// before that, so a turn whose prompt has not reached its agent is never stalled.
-    pub(super) stalled_counted: StdMutex<Option<String>>,
+    pub(super) stalled_counted: RankedMutex<Option<String>>,
     /// Bumps on every sign of the model and every new or held count (`stalled_turn.rs`): a
     /// stalled end decided at one value is not carried out at another.
     pub(super) stalled_gen: AtomicU64,
@@ -147,7 +147,7 @@ pub struct Session {
     /// A running turn quiet since then, with no tool call in flight, stalls (`views.rs`).
     pub(super) last_model_at: AtomicU64,
     /// The turn that logged `turn_silent` and has not heard its model since (`silent_turn.rs`).
-    pub(super) silent_turn: StdMutex<Option<String>>,
+    pub(super) silent_turn: RankedMutex<Option<String>>,
     /// The hub clock's time (`Hub::clock_now`) of the last record or
     /// attach change; the idle harness exit counts from it (`idle.rs`).
     pub(super) last_active: AtomicU64,
@@ -156,14 +156,14 @@ pub struct Session {
     /// The remote floor's per-session marks (`remote_floor.rs`).
     pub(super) floor: remote_floor::FloorState,
     /// The subagents the agent reported, for attributing their updates.
-    pub(super) subagents: StdMutex<crate::subagents::SubagentTree>,
+    pub(super) subagents: RankedMutex<crate::subagents::SubagentTree>,
     /// The commands its harness runs in the background (`processes.rs`).
-    pub(super) processes: StdMutex<processes::ProcessTable>,
+    pub(super) processes: RankedMutex<processes::ProcessTable>,
     /// Tool calls that run `gh pr create`, and the URL each printed so far, until they end
     /// (`pull_requests.rs`).
-    pub(super) pr_creates: StdMutex<std::collections::HashMap<String, Option<String>>>,
+    pub(super) pr_creates: RankedMutex<std::collections::HashMap<String, Option<String>>>,
     /// The places typing into it, and who sent its prompts (`composers.rs`).
-    pub(super) composers: StdMutex<super::composers::Composers>,
+    pub(super) composers: RankedMutex<super::composers::Composers>,
 }
 
 impl Session {
@@ -311,3 +311,7 @@ pub(crate) fn newest_first(sessions: Vec<Arc<Session>>) -> Vec<Arc<Session>> {
     keyed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
     keyed.into_iter().map(|(_, s)| s).collect()
 }
+
+#[cfg(all(test, debug_assertions))]
+#[path = "lock_order_tests.rs"]
+mod lock_order_tests;

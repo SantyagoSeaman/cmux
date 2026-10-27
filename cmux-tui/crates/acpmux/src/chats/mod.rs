@@ -490,7 +490,9 @@ impl crate::hub::Hub {
             .map_err(|e| format!("chat index start: {e}"))?;
         let _ = self.chats.set(service.clone());
         // Taken under the waiters' lock after the set: a later waiter sees the index.
-        let waiters = std::mem::take(&mut *lock(&self.chats_waiters));
+        let waiters = std::mem::take(
+            &mut *self.chats_waiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         for waiter in waiters {
             waiter(&service);
         }
@@ -522,7 +524,8 @@ impl crate::hub::Hub {
 
     /// Runs `waiter` once the chat index has started: now when it runs.
     pub fn when_chats_ready(&self, waiter: ChatsWaiter) {
-        let mut waiters = lock(&self.chats_waiters);
+        let mut waiters =
+            self.chats_waiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.chats.get() {
             Some(service) => {
                 drop(waiters);
