@@ -18,16 +18,18 @@
 //!
 //! The wait ends early for anything that orders against the output or waits
 //! for a receipt: a barrier, a resize or gap, any durable-lane event, writer
-//! shutdown, or a batch that reaches its byte or chunk bound.
+//! shutdown, or a batch that reaches its byte or chunk bound. A durable event
+//! that ends it commits before the held output (`lane_order.rs`).
 
 use cmux_threads::checked::sync as waits;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use super::lane_order::drain_lane;
 use super::{
     JOURNAL_DURABLE_BATCH_BYTES, JOURNAL_DURABLE_QUEUE_CAPACITY, JOURNAL_TERMINAL_BATCH_CHUNKS,
     JOURNAL_TERMINAL_QUEUE_CAPACITY, JournalIngressEvent, JournalIngressReceivers, JournalLane,
-    QueuedJournalEvent, TERMINAL_OUTPUT_INGRESS_BYTES, drain_lane,
+    QueuedJournalEvent, TERMINAL_OUTPUT_INGRESS_BYTES,
 };
 
 /// How long a batch of plain terminal output waits for more output before it
@@ -83,7 +85,8 @@ pub(super) fn push_coalesced(batch: &mut Vec<QueuedJournalEvent>, next: QueuedJo
 /// Holds a batch of plain terminal output for up to
 /// [`TERMINAL_OUTPUT_COALESCE_WINDOW`], draining more terminal output into
 /// it as readers send it. Durable-lane events drained meanwhile go to
-/// `durable`, and their arrival ends the wait.
+/// `durable`, and their arrival ends the wait: the writer commits them
+/// first, so a held batch never delays an intent.
 pub(super) fn hold_terminal_output(
     receivers: &JournalIngressReceivers,
     batch: &mut Vec<QueuedJournalEvent>,

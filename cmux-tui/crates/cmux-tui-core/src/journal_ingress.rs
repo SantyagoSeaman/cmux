@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,7 @@ mod coalesce;
 mod completion;
 pub(crate) mod contention;
 mod effect_intents;
+mod lane_order;
 mod writer_qos;
 pub(crate) use completion::JournalBatchReceipt;
 use completion::{JournalIngressCompletion, complete_batch_error, complete_batch_success};
@@ -1103,8 +1104,8 @@ fn run(mux: Weak<Mux>, receivers: JournalIngressReceivers) {
         "mux-session-journal-writer",
     );
     loop {
-        let Some(batch) = receive_batch(&receivers) else { return };
-        let mut pending = VecDeque::from([batch]);
+        // Durable-lane batches first (lane_order.rs).
+        let Some(mut pending) = lane_order::receive_round(&receivers) else { return };
         while let Some(mut batch) = pending.pop_front() {
             let mut delay = JOURNAL_RETRY_INITIAL_DELAY;
             let mut nonretryable_delay = JOURNAL_NONRETRYABLE_RETRY_DELAY;
@@ -1346,71 +1347,6 @@ fn complete_queued_error(receivers: &JournalIngressReceivers, error: &str) {
     if terminal_drained + durable_drained != 0 {
         receivers.state.publish_queue_space();
     }
-}
-
-fn receive_batch(receivers: &JournalIngressReceivers) -> Option<Vec<QueuedJournalEvent>> {
-    loop {
-        // Producers share one SQLite writer and therefore one commit order, but
-        // terminal bytes and external producers have separate bounded lanes.
-        // Cap each transaction at 4 MiB of unmerged terminal input so a large
-        // output burst does not inflate durable producer receipt latency.
-        // Share an fsync across small producer events, while bounding a single
-        // transaction even when producers submit their maximum payloads.
-        while receivers.wake.try_recv().is_ok() {}
-        let mut batch =
-            Vec::with_capacity(JOURNAL_TERMINAL_BATCH_CHUNKS + JOURNAL_DURABLE_QUEUE_CAPACITY);
-        let terminal_drained =
-            drain_lane(&receivers.terminal, &mut batch, JOURNAL_TERMINAL_BATCH_CHUNKS, usize::MAX);
-        let mut durable = Vec::new();
-        let durable_drained = drain_lane(
-            &receivers.durable,
-            &mut durable,
-            JOURNAL_DURABLE_QUEUE_CAPACITY,
-            JOURNAL_DURABLE_BATCH_BYTES,
-        );
-        receivers.state.stats.drained(JournalLane::Terminal, terminal_drained);
-        receivers.state.stats.drained(JournalLane::Durable, durable_drained);
-        if terminal_drained + durable_drained != 0 {
-            receivers.state.publish_queue_space();
-        }
-        // Test builds: plain terminal output waits a bounded window for more
-        // output (coalesce.rs). Shipped builds journal no output.
-        #[cfg(test)]
-        coalesce::hold_terminal_output(receivers, &mut batch, &mut durable, terminal_drained);
-        batch.append(&mut durable);
-        if !batch.is_empty() {
-            return Some(batch);
-        }
-        if receivers.state.closed.load(Ordering::Acquire) {
-            return None;
-        }
-        if waits::recv(&receivers.wake).is_err() {
-            return None;
-        }
-    }
-}
-
-fn drain_lane(
-    receiver: &Receiver<QueuedJournalEvent>,
-    batch: &mut Vec<QueuedJournalEvent>,
-    limit: usize,
-    byte_limit: usize,
-) -> usize {
-    let mut drained = 0;
-    let mut drained_bytes = 0_usize;
-    while drained < limit && drained_bytes < byte_limit {
-        let next = match receiver.try_recv() {
-            Ok(event) => event,
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-        };
-        drained += 1;
-        drained_bytes = drained_bytes.saturating_add(next.event.estimated_bytes());
-        #[cfg(test)]
-        coalesce::push_coalesced(batch, next);
-        #[cfg(not(test))]
-        batch.push(next);
-    }
-    drained
 }
 
 #[cfg(test)]
@@ -2971,8 +2907,8 @@ mod tests {
                 .unwrap();
         }
 
-        let batch = receive_batch(&receivers).unwrap();
-        assert_eq!(batch.len(), 8);
+        let round = lane_order::receive_round(&receivers).unwrap();
+        assert_eq!(round.iter().map(Vec::len).collect::<Vec<_>>(), [8]);
         assert_eq!(receivers.durable.try_iter().count(), 1);
     }
 
