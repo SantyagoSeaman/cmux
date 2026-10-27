@@ -1,11 +1,36 @@
+//! The wire lane of each mux message over cmux-remote (p05-ipc task 152).
+//!
+//! The routes come from the schema: cmux-ipc's build.rs computes one per
+//! framed command and event from spec/sdk-schema.json and the reviewed
+//! exceptions in cmux-ipc/remote-lanes.json (`cmux_ipc::RemoteLanes`). This
+//! file only maps the schema's priority vocabulary onto the wire lanes and
+//! reads the one or two envelope fields a route may be refined on.
+//!
+//! A JSON line costs one borrowed envelope parse. A binary frame (first byte
+//! 0xFF, which never starts a UTF-8 line) is routed by the method or event id
+//! in its header and is never parsed, as Mojo routes a message by its header
+//! ordinal (chromium mojo/core/channel.cc, `Channel::Message::Deserialize`).
+
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 
+use cmux_ipc::methods::{EVENT_FAMILIES, EventId, MethodId};
+use cmux_ipc::{FrameHeader, FrameKind, HEADER_LEN, MAGIC, PriorityHint, RefineField, RemoteLanes};
 use cmux_remote_protocol::Lane;
 use serde::Deserialize;
 
 const MAX_TRACKED_REQUESTS: usize = 4096;
+
+/// The wire lane of a schema priority. `background` rides bulk, the lowest
+/// lane: protocol-5 peers know only the four lanes of `Lane::ALL`.
+pub(crate) const fn lane_of(priority: PriorityHint) -> Lane {
+    match priority {
+        PriorityHint::Input => Lane::Interactive,
+        PriorityHint::Control => Lane::Control,
+        PriorityHint::Bulk | PriorityHint::Background => Lane::Bulk,
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct MuxLaneTracker {
@@ -94,12 +119,81 @@ struct MuxEnvelope<'a> {
     op: Option<MuxName<'a>>,
 }
 
+impl MuxEnvelope<'_> {
+    fn field(&self, field: RefineField) -> Option<&str> {
+        match field {
+            RefineField::Op => self.op.as_ref(),
+            RefineField::Mode => self.mode.as_ref(),
+            RefineField::Scope => self.scope.as_ref(),
+        }
+        .map(MuxName::as_str)
+    }
+}
+
 fn parse_envelope(line: &[u8]) -> Result<MuxEnvelope<'_>, serde_json::Error> {
     serde_json::from_slice(line)
 }
 
+/// The header of a binary frame, `None` for a JSON line. A frame whose header
+/// does not decode is `Err`: it rides control, where the receiver refuses it.
+fn frame_header(message: &[u8]) -> Option<Result<FrameHeader, cmux_ipc::BadMessage>> {
+    if message.first() != Some(&MAGIC) {
+        return None;
+    }
+    let header = message.first_chunk::<HEADER_LEN>().copied().map_or(
+        Err(cmux_ipc::BadMessage::Truncated { have: message.len(), need: HEADER_LEN }),
+        |bytes| FrameHeader::decode(bytes, cmux_ipc::MAX_FRAME_PAYLOAD),
+    );
+    Some(header)
+}
+
+/// The lane of a binary frame, from its header alone.
+///
+/// A call frame (REQUEST, REPLY, ERROR, CANCEL, TYPED_EVENT) carries its
+/// method or event id, so a reply rides its request's lane with no request
+/// tracking. A refined route takes `RemoteRoute::frame_lane`, since the field
+/// it refines on is in the payload. Stream data (output, grid, snapshots,
+/// replay, ring) rides bulk like the attach events it replaces, terminal input
+/// rides interactive, and an id the schema does not route stays in the
+/// interactive sequence, as an unknown command line does.
+pub(crate) fn classify_frame(header: &FrameHeader) -> Lane {
+    let lanes = RemoteLanes::schema();
+    match header.kind() {
+        FrameKind::Input => Lane::Interactive,
+        FrameKind::Output
+        | FrameKind::Grid
+        | FrameKind::Event
+        | FrameKind::Snapshot
+        | FrameKind::SnapshotMore
+        | FrameKind::Replay
+        | FrameKind::Ring
+        | FrameKind::RingAdvance
+        | FrameKind::SharedBuffer => Lane::Bulk,
+        FrameKind::RingAck => Lane::Control,
+        FrameKind::Request
+        | FrameKind::Reply
+        | FrameKind::Error
+        | FrameKind::Cancel
+        | FrameKind::TypedEvent => {
+            let Some(call) = header.call() else { return Lane::Control };
+            let id = call.method_id;
+            let family = id.to_be_bytes()[0];
+            let route = if (EVENT_FAMILIES.0..=EVENT_FAMILIES.1).contains(&family) {
+                lanes.event_id(EventId::new(id))
+            } else {
+                lanes.command_id(MethodId::new(id))
+            };
+            route.map_or(Lane::Interactive, |route| lane_of(route.frame_lane()))
+        }
+    }
+}
+
 impl MuxLaneTracker {
     pub(crate) fn observe_request(&self, line: &[u8], lane: Lane) {
+        // A frame's reply names its method; only lines need tracking.
+        if line.first() == Some(&MAGIC) {
+            return;
+        }
         let Ok(envelope) = parse_envelope(line) else { return };
         if let Some(id) = envelope.id {
             self.track(id, ResponseDisposition::Forward(lane));
@@ -111,25 +205,19 @@ impl MuxLaneTracker {
     }
 
     pub(crate) fn classify_server_line(&self, line: &[u8]) -> Option<Lane> {
+        if let Some(header) = frame_header(line) {
+            return Some(header.map_or(Lane::Control, |header| classify_frame(&header)));
+        }
         let Ok(envelope) = parse_envelope(line) else {
             return Some(Lane::Control);
         };
         if let Some(event) = envelope.event.as_ref().map(MuxName::as_str) {
-            return Some(match event {
-                "output" | "vt-state" | "render-state" | "render-delta" | "frame"
-                | "browser-state" | "resized" | "colors-changed" | "scroll-changed"
-                | "detached" => Lane::Bulk,
-                // Forwarded loopback bytes and their stream lifecycle stay in
-                // one ordered lane, away from keystrokes and control replies.
-                name if name.starts_with("loopback-") => Lane::Bulk,
-                // Agent session records and the attachment's close follow
-                // the attach reply in one ordered lane (they can be large).
-                name if name.starts_with("agent-session-") => Lane::Bulk,
-                "overflow" if envelope.scope.as_ref().map(MuxName::as_str) == Some("surface") => {
-                    Lane::Bulk
-                }
-                _ => Lane::Control,
-            });
+            let route = RemoteLanes::schema().event(event);
+            // An event the schema does not know rides control, beside the
+            // replies and events it cannot be ordered against.
+            return Some(route.map_or(Lane::Control, |route| {
+                lane_of(route.lane_for(route.refine.and_then(|r| envelope.field(r.field))))
+            }));
         }
         match envelope
             .id
@@ -165,172 +253,21 @@ impl MuxLaneTracker {
     }
 }
 
+/// The lane of a message the local mux client sends.
 pub(crate) fn classify_client_line(line: &[u8]) -> Lane {
+    if let Some(header) = frame_header(line) {
+        return header.map_or(Lane::Control, |header| classify_frame(&header));
+    }
     let Ok(envelope) = parse_envelope(line) else { return Lane::Control };
-    match envelope.cmd.as_ref().map(MuxName::as_str) {
-        Some("paste-image") if envelope.op.as_ref().map(MuxName::as_str) == Some("commit") => {
-            Lane::Interactive
-        }
-        // Image transactions acknowledge every chunk before commit, so they can
-        // use bulk backpressure without delaying interactive keys or reordering paste.
-        Some("attach-surface" | "read-screen" | "read-scrollback" | "vt-state" | "paste-image") => {
-            Lane::Bulk
-        }
-        Some("copy") if envelope.mode.as_ref().map(MuxName::as_str) == Some("scrollback") => {
-            Lane::Bulk
-        }
-        // `loopback-forward-v1`: open, data, credit and close of one stream
-        // must stay ordered, and forwarded bytes must never queue ahead of
-        // PTY input, so every loopback command uses the bulk lane.
-        Some(name) if name.starts_with("loopback-") => Lane::Bulk,
-        // `agent-session-attach-v1`: the attach reply, the replay pages and
-        // the live records of one attachment stay in one ordered lane, so a
-        // record never overtakes the reply it follows.
-        Some(name) if name.starts_with("agent-session-") => Lane::Bulk,
-        // `agent-transfer-v1`: bundle pages of up to 4 MiB never queue ahead
-        // of PTY input.
-        Some(name) if name.starts_with("agent-transfer-") => Lane::Bulk,
-        // Read-only lookups never wait behind PTY input or a slow mutation
-        // commit; a stalled Interactive lane must not make a live terminal
-        // look missing to the client resolving it.
-        Some(
-            "identify" | "ping" | "list-clients" | "list-workspaces" | "export-layout" | "wait-for"
-            | "ids" | "list-agents" | "pane-neighbor" | "process-info" | "terminal-ports"
-            | "terminal-resources" | "subscribe" | "resolve-terminal",
-        ) => Lane::Control,
-        // Mutations default to one ordered lane with compact PTY input. This
-        // keeps a later close, move, focus, resize, or configuration change
-        // from overtaking input already accepted from the local mux client.
-        Some(_) => Lane::Interactive,
-        None => Lane::Control,
+    let Some(name) = envelope.cmd.as_ref().map(MuxName::as_str) else { return Lane::Control };
+    match RemoteLanes::schema().command(name) {
+        Some(route) => lane_of(route.lane_for(route.refine.and_then(|r| envelope.field(r.field)))),
+        // A command this build does not know may mutate: it stays in the
+        // interactive sequence, behind input the client sent first.
+        None => Lane::Interactive,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn loopback_forward_lines_use_the_bulk_lane_in_both_directions() {
-        for line in [
-            &br#"{"id":1,"cmd":"loopback-open","stream":1,"host":"localhost","port":3000}"#[..],
-            br#"{"cmd":"loopback-data","stream":1,"data":"eA=="}"#,
-            br#"{"cmd":"loopback-credit","stream":1,"bytes":65536}"#,
-            br#"{"cmd":"loopback-shutdown","stream":1}"#,
-            br#"{"cmd":"loopback-close","stream":1}"#,
-        ] {
-            assert_eq!(classify_client_line(line), Lane::Bulk);
-        }
-        let tracker = MuxLaneTracker::default();
-        for line in [
-            &br#"{"event":"loopback-data","stream":1,"data":"eA=="}"#[..],
-            br#"{"event":"loopback-credit","stream":1,"bytes":65536}"#,
-            br#"{"event":"loopback-eof","stream":1}"#,
-            br#"{"event":"loopback-closed","stream":1}"#,
-        ] {
-            assert_eq!(tracker.classify_server_line(line), Some(Lane::Bulk));
-        }
-        tracker.observe_request(br#"{"id":7,"cmd":"loopback-open"}"#, Lane::Bulk);
-        assert_eq!(tracker.classify_server_line(br#"{"id":7,"ok":true}"#), Some(Lane::Bulk));
-    }
-
-    #[test]
-    fn agent_transfer_pages_use_the_bulk_lane() {
-        for line in [
-            &br#"{"id":1,"cmd":"agent-transfer-write","receive_id":"r","path":"a","offset":0,"data":""}"#[..],
-            br#"{"id":2,"cmd":"agent-transfer-read","transfer_id":"t","path":"a","offset":0}"#,
-        ] {
-            assert_eq!(classify_client_line(line), Lane::Bulk);
-        }
-    }
-
-    #[test]
-    fn agent_session_attach_lines_use_the_bulk_lane_in_both_directions() {
-        for line in [
-            &br#"{"id":1,"cmd":"agent-session-attach","surface":3}"#[..],
-            br#"{"id":2,"cmd":"agent-session-events","surface":3,"after_seq":9}"#,
-            br#"{"id":3,"cmd":"agent-session-prompt","surface":3,"prompt_id":"p","text":"hi"}"#,
-            br#"{"id":4,"cmd":"agent-session-detach","surface":3}"#,
-        ] {
-            assert_eq!(classify_client_line(line), Lane::Bulk);
-        }
-        let tracker = MuxLaneTracker::default();
-        for line in [
-            &br#"{"event":"agent-session-record","surface":3,"record":{"seq":2}}"#[..],
-            br#"{"event":"agent-session-permission","surface":3,"request":{}}"#,
-            br#"{"event":"agent-session-closed","surface":3,"reason":"lagged"}"#,
-        ] {
-            assert_eq!(tracker.classify_server_line(line), Some(Lane::Bulk));
-        }
-        tracker.observe_request(br#"{"id":1,"cmd":"agent-session-attach"}"#, Lane::Bulk);
-        assert_eq!(tracker.classify_server_line(br#"{"id":1,"ok":true}"#), Some(Lane::Bulk));
-    }
-
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    use super::*;
-
-    struct CountingAllocator;
-
-    std::thread_local! {
-        static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
-        static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
-    }
-
-    // Rust installs this allocator for the whole cmux-remote unit-test binary;
-    // thread-local counting keeps unrelated test threads out of each sample.
-    #[global_allocator]
-    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            COUNT_ALLOCATIONS
-                .try_with(|enabled| {
-                    if enabled.get() {
-                        ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-                    }
-                })
-                .ok();
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            COUNT_ALLOCATIONS
-                .try_with(|enabled| {
-                    if enabled.get() {
-                        ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-                    }
-                })
-                .ok();
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(pointer, layout) };
-        }
-
-        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            COUNT_ALLOCATIONS
-                .try_with(|enabled| {
-                    if enabled.get() {
-                        ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-                    }
-                })
-                .ok();
-            unsafe { System.realloc(pointer, layout, new_size) }
-        }
-    }
-
-    #[test]
-    fn keystrokes_and_terminal_output_use_distinct_lanes() {
-        let tracker = MuxLaneTracker::default();
-        let request = br#"{"id":7,"cmd":"send","surface":1,"bytes":"YQ=="}"#;
-        let lane = classify_client_line(request);
-        assert_eq!(lane, Lane::Interactive);
-        tracker.observe_request(request, lane);
-        assert_eq!(tracker.classify_server_line(br#"{"id":7,"ok":true}"#), Some(Lane::Interactive));
-        assert_eq!(
-            tracker.classify_server_line(br#"{"event":"output","surface":1,"data":"Yg=="}"#),
-            Some(Lane::Bulk)
-        );
-    }
-}
+#[path = "mux_lanes_tests.rs"]
+mod tests;

@@ -1,0 +1,124 @@
+{
+  "description": "Reviewed exceptions to the cmux-remote lane rules (p05-ipc task 152; build-support/remote_lanes.rs states the rules). cmux-ipc build.rs routes every framed command and event of spec/sdk-schema.json by rule, then applies these. A key is a command or event name, a `prefix-*` pattern, or (under `families`) a schema family. `when` refines the lane on one line envelope field (op, mode or scope) the schema declares; a frame never parses its payload, so it rides input when either lane is input and the base lane otherwise. `events.unlisted` routes events a daemon emits that the schema does not declare yet; each leaves the list when the schema declares it. The build refuses an entry that names nothing, repeats its rule's lane or refines on an undeclared field.",
+  "commands": {
+    "families": {
+      "loopback": {
+        "lane": "bulk",
+        "reason": "loopback-forward-v1: open, data, credit, shutdown and close of one stream stay ordered, and forwarded bytes never queue ahead of PTY input."
+      },
+      "agent-sessions": {
+        "lane": "bulk",
+        "reason": "agent-session-attach-v1: the attach reply, the replay pages and the live records of one attachment stay in one ordered lane, so a record never overtakes the reply it follows."
+      }
+    },
+    "names": {
+      "agent-transfer-*": {
+        "lane": "bulk",
+        "reason": "agent-transfer-v1: bundle pages of up to 4 MiB never queue ahead of PTY input, and the steps of one transfer stay ordered."
+      },
+      "read-screen": {
+        "lane": "bulk",
+        "reason": "The reply carries a whole screen; on bulk it never holds control replies behind it."
+      },
+      "vt-state": {
+        "lane": "bulk",
+        "reason": "The reply carries the terminal's whole VT state; on bulk it never holds control replies behind it."
+      },
+      "paste-image": {
+        "lane": "bulk",
+        "when": {
+          "field": "op",
+          "equals": "commit",
+          "lane": "input"
+        },
+        "reason": "Image chunks are acknowledged before commit, so they take bulk backpressure; the commit rides input, so the paste keeps its place among keystrokes."
+      },
+      "copy": {
+        "lane": "input",
+        "when": {
+          "field": "mode",
+          "equals": "scrollback",
+          "lane": "bulk"
+        },
+        "reason": "Copying the scrollback returns all of it; the other modes are ordinary mutations."
+      },
+      "identify": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "ping": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "list-clients": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "list-workspaces": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "export-layout": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "wait-for": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "ids": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "pane-neighbor": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      },
+      "resolve-terminal": {
+        "lane": "control",
+        "reason": "A read-only lookup never waits behind PTY input or a slow mutation commit; a stalled input lane must not make a live terminal look missing to the client resolving it."
+      }
+    }
+  },
+  "events": {
+    "families": {
+      "loopback-events": {
+        "lane": "bulk",
+        "reason": "Forwarded loopback bytes and their stream lifecycle stay in one ordered lane, away from keystrokes and control replies."
+      }
+    },
+    "names": {
+      "overflow": {
+        "lane": "control",
+        "when": {
+          "field": "scope",
+          "equals": "surface",
+          "lane": "bulk"
+        },
+        "reason": "An attach overflow (scope surface) ends its stream after the stream's output; a subscription overflow rides control."
+      },
+      "scroll-changed": {
+        "lane": "bulk",
+        "reason": "Attach streams send it in order with the output that scrolled; a subscription's copy rides with them."
+      }
+    },
+    "unlisted": {
+      "agent-session-record": {
+        "lane": "bulk",
+        "reason": "agent-session-attach-v1 stream (core:server/agent_session_stream.rs): follows the attach reply in one ordered lane."
+      },
+      "agent-session-permission": {
+        "lane": "bulk",
+        "reason": "agent-session-attach-v1 stream (core:server/agent_session_stream.rs): follows the attach reply in one ordered lane."
+      },
+      "agent-session-changed": {
+        "lane": "bulk",
+        "reason": "agent-session-attach-v1 stream (core:server/agent_session_stream.rs): follows the attach reply in one ordered lane."
+      },
+      "agent-session-closed": {
+        "lane": "bulk",
+        "reason": "agent-session-attach-v1 stream (core:server/agent_session_attach.rs): ends the attachment after its records."
+      }
+    }
+  }
+}

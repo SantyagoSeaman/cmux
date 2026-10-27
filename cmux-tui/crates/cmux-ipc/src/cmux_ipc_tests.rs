@@ -9,6 +9,7 @@ mod golden_tests;
 mod lane_writer_tests;
 mod methods_table_tests;
 mod reader_tests;
+mod remote_lanes_tests;
 mod schema_tests;
 mod server_families_tests;
 
