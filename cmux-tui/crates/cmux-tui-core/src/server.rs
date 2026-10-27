@@ -2363,6 +2363,7 @@ use render_service::{
 use render_service::{OutboundByteBudget, RenderGraphicBase64Cache};
 
 mod message_writer;
+mod reply_order;
 use message_writer::{MessageSink, MessageWriter, OutboundStream};
 
 mod request_watchdog;

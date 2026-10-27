@@ -1,14 +1,11 @@
 //! The reply/event order rule (spec/transports.md "Reply and event order").
 //!
 //! The `*_under_stream_flood_*` tests run a request through the server's
-//! request path (`handle_message`: the command runs, then its reply is
-//! enqueued at once, as the connection loop does). The request emits its
-//! event before it returns, but the subscription thread moves that event from
-//! the subscriber mailbox to the writer later, so today the reply is written
-//! first. They stay red, and ignored, until p05-ipc-120 emits a request's
-//! events into the writer before its reply is enqueued; run them with
-//! `cargo test -p cmux-tui-core --lib reply_event_order -- --include-ignored`.
-//! The other tests check the writer's FIFOs alone.
+//! request path (`handle_message`, as the connection loop does). The request
+//! emits its event before it returns and the subscription thread moves it
+//! from the subscriber mailbox to the writer later; the reply parks behind it
+//! in that mailbox (server/reply_order.rs, p05-ipc-120), so it is written
+//! after. The other tests check the writer's FIFOs alone.
 
 use super::*;
 
@@ -82,7 +79,6 @@ fn run_under_flood(mux: &Arc<Mux>, mut request: Value, echo: &str) -> (usize, us
 /// `tree-changed` (the request emits no `layout-changed`; set-split-ratio
 /// below is the `layout-changed` case).
 #[test]
-#[ignore = "red until p05-ipc-120: the subscriber mailbox hop writes the reply first"]
 fn reply_event_order_new_tab_under_stream_flood_writes_its_tree_event_before_reply() {
     let mux = test_mux();
     let workspace = mux.new_workspace(None, Some((80, 24))).unwrap().id;
@@ -93,7 +89,6 @@ fn reply_event_order_new_tab_under_stream_flood_writes_its_tree_event_before_rep
 }
 
 #[test]
-#[ignore = "red until p05-ipc-120: the subscriber mailbox hop writes the reply first"]
 fn reply_event_order_split_ratio_under_stream_flood_writes_layout_changed_before_reply() {
     let mux = test_mux();
     let workspace = mux.new_workspace(None, Some((80, 24))).unwrap().id;
