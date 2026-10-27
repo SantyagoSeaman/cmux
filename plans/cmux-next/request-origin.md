@@ -150,6 +150,38 @@ and no rule exists for "the terminal this page was opened for". An entry also ne
 that calls it, a rule that scopes it to that page's own object (never "any terminal by id"), and
 its own allowed and refused tests.
 
+## Output ring (p05-ipc-111, risk:high)
+
+The terminal output ring (`terminal-output-ring-v1`,
+`app-daemon-connection-DESIGN.md` section 4) gives a reader a descriptor of
+shared memory that holds a terminal's output. Analysis:
+
+- What crosses the boundary: the output bytes the parser accepted, which the
+  same attach stream carries already as OUTPUT frames or JSON `output` events.
+  The ring adds no new data for the peer; it changes how the bytes travel.
+- Who may get it: `grants_output_ring` (server/capabilities.rs) asks two kernel
+  facts the daemon fixed at accept, never a request field: the connection is a
+  direct same-euid process on the Unix socket (`IpcPeer::Local`, from
+  `getpeereid` / `SO_PEERCRED` and the peer executable check), and it holds the
+  grant, which `set-client-info` gives only to such a peer at the daemon's own
+  API revision. WebSocket, the remote entry, relays, bridged byte splices
+  (`cmux relay`, `cmux link dial`, the phone lane), page relays and page
+  connections, and unverified peers never get it (`output_ring_attach` tests).
+  A grant that lapses is removed and checked again at every use.
+- What the reader can do with it: the descriptor is read-only
+  (`cmux_ipc::shm::create_read_only`: on macOS the name is opened `O_RDONLY`
+  before the unlink; on Linux the memfd is sealed `F_SEAL_FUTURE_WRITE` and
+  reopened read-only), so a reader cannot change the ring for another reader,
+  and the daemon never reads the data area back, so nothing a reader does
+  reaches the parser. The segment has no name after it is made.
+- Unowned objects: one ring per terminal; a stream gets the ring of the
+  terminal it attached, which the attach already authorized.
+- Local state exposure: none beyond the terminal's own output. The daemon's
+  writable mapping never leaves the daemon; only read-only copies of the
+  descriptor are passed.
+- Command execution: none. The ring carries output only; input still takes the
+  PTY input path.
+
 ## Red tests (first commit)
 
 - page_relay call claiming user with no token -> origin.forbidden.
