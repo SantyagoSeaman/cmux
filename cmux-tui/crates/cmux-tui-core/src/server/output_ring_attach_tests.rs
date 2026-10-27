@@ -152,3 +152,38 @@ fn output_ring_attach_advances_carry_their_sidecar_and_keep_the_stream_rules() {
     drop(attach.stream);
     surface.kill();
 }
+
+/// p05-ipc-119: the app's RING_ACK is an empty frame of the ring stream,
+/// after its RING, whose aux is an offset; anything else is refused.
+#[test]
+fn output_ring_attach_a_ring_ack_is_an_empty_offset_frame_of_its_ring_stream() {
+    use cmux_ipc::FrameHeader;
+    let (_mux, surface) = quiet_terminal("output-ring-ack-frame");
+    let attach =
+        surface.attach_snapshot_ring_stream(AttachLifecycle::default(), 1 << 20, false).unwrap();
+    let grant = attach.ring.unwrap();
+    let budget = Arc::new(OutboundByteBudget::new(1 << 20));
+    let mut encoder =
+        AttachFrameEncoder::new(STREAM, SURFACE, AttachWireShape::default(), grant.end).unwrap();
+    let ack = |stream: u16, len: u32, offset: u64| {
+        FrameHeader::new(FrameKind::RingAck, stream, len, Aux::Offset(offset)).unwrap()
+    };
+    assert!(matches!(encoder.ring_ack(&ack(STREAM, 0, 7)), Err(AttachFrameError::NoRing)));
+    encoder.ring(grant, &budget).unwrap();
+    assert_eq!(encoder.ring_ack(&ack(STREAM, 0, 7)).unwrap(), 7);
+    assert!(matches!(
+        encoder.ring_ack(&ack(STREAM + 1, 0, 7)),
+        Err(AttachFrameError::RingAckStream { stream }) if stream == STREAM + 1
+    ));
+    assert!(matches!(
+        encoder.ring_ack(&ack(STREAM, 3, 7)),
+        Err(AttachFrameError::RingAckPayload { len: 3 })
+    ));
+    let advance = FrameHeader::new(FrameKind::RingAdvance, STREAM, 0, Aux::Offset(7)).unwrap();
+    assert!(matches!(
+        encoder.ring_ack(&advance),
+        Err(AttachFrameError::NotRingAck { kind: FrameKind::RingAdvance })
+    ));
+    drop(attach.stream);
+    surface.kill();
+}

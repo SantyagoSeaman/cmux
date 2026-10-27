@@ -292,6 +292,29 @@ impl Surface {
         Ok(RingAttachStream { stream, ring: ring.unwrap_or(Err(RingUnavailable::Exited)) })
     }
 
+    /// A ring viewer's RING_ACK (p05-ipc-119): its app holds no span of the
+    /// ring below `offset`, so the ring may write up to `offset + capacity`.
+    /// The ack of a gap lets the viewer's READY go. Takes only the `pty.taps`
+    /// lock, never the terminal lock: an ack never waits for the parser.
+    #[cfg(unix)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "routed by attach frames once bound"))]
+    pub(crate) fn ring_ack(
+        &self,
+        receiver: &AttachFrameReceiver,
+        offset: u64,
+    ) -> cmux_ipc::output_ring::RingAck {
+        let Some(pty) = self.as_pty() else {
+            return cmux_ipc::output_ring::RingAck::Unknown;
+        };
+        pty.taps.lock().unwrap().ring_ack(receiver, offset)
+    }
+
+    /// Chunks the terminal's ring skipped for a viewer's cursor.
+    #[cfg(all(test, unix))]
+    pub(crate) fn ring_skips_for_test(&self) -> u64 {
+        self.as_pty().map_or(0, |pty| pty.taps.lock().unwrap().ring_skips())
+    }
+
     /// Both attaches: the viewer's queue is made and registered, and its
     /// ring granted, under one terminal lock, so no output byte lands
     /// between the ring's end and the viewer's first READY cut.
@@ -324,12 +347,25 @@ impl Surface {
             SnapshotViewerOutput::Ring => {
                 let offset = pty.snapshot_position.load().1;
                 let grant = pty.taps.lock().unwrap().ring_grant(offset);
-                let pair =
-                    if grant.is_ok() { AttachTap::ring_pair } else { AttachTap::snapshot_pair };
-                (
-                    pair(lifecycle.clone(), ATTACH_STREAM_CAPACITY, backlog_bytes),
-                    Some(grant.map_err(RingUnavailable::Ring)),
-                )
+                match grant {
+                    Ok((grant, cursor)) => (
+                        AttachTap::ring_pair(
+                            lifecycle.clone(),
+                            ATTACH_STREAM_CAPACITY,
+                            backlog_bytes,
+                            Some(cursor),
+                        ),
+                        Some(Ok(grant)),
+                    ),
+                    Err(error) => (
+                        AttachTap::snapshot_pair(
+                            lifecycle.clone(),
+                            ATTACH_STREAM_CAPACITY,
+                            backlog_bytes,
+                        ),
+                        Some(Err(RingUnavailable::Ring(error))),
+                    ),
+                }
             }
         };
         receiver.set_local_history(local_history);

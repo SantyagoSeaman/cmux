@@ -53,7 +53,7 @@ fn output_ring_attach_ring_bytes_equal_the_parser_bytes_at_their_offsets() {
     let (_mux, surface) = quiet_terminal("output-ring-bytes");
     let pty = surface.as_pty().unwrap();
     let bytes_viewer = surface.attach_stream().unwrap();
-    let (_stream, grant) = ring_attach(&surface);
+    let (stream, grant) = ring_attach(&surface);
     assert_eq!((grant.layout, grant.capacity), (LAYOUT, DEFAULT_CAPACITY as u64));
     assert_eq!(grant.end, grant.base, "a new ring starts empty at the snapshot offset");
     assert!(grant.base >= bytes_viewer.offset);
@@ -70,6 +70,8 @@ fn output_ring_attach_ring_bytes_equal_the_parser_bytes_at_their_offsets() {
             .collect();
         parsed.extend(feed(pty, &chunk));
         drain_output(&bytes_viewer.stream, &mut received);
+        // The ring viewer's app parsed it all (p05-ipc-119: else the ring skips).
+        surface.ring_ack(&stream.receiver, ring.end());
     }
     drain_output(&bytes_viewer.stream, &mut received);
 
@@ -87,7 +89,7 @@ fn output_ring_attach_ring_bytes_equal_the_parser_bytes_at_their_offsets() {
     ring.read_into(from, end, &mut in_ring).unwrap();
     let at = (from - grant.base) as usize;
     assert_eq!(in_ring, parsed[at..], "the ring holds the parser's last capacity bytes");
-    drop(bytes_viewer);
+    drop((bytes_viewer, stream));
     surface.kill();
 }
 
@@ -128,7 +130,7 @@ fn output_ring_attach_a_viewer_that_does_not_read_has_one_advance_waiting() {
 #[test]
 fn output_ring_attach_colors_keep_their_end_and_a_resize_resyncs() {
     let lifecycle = AttachLifecycle::default();
-    let (tap, receiver) = AttachTap::ring_pair(lifecycle, 16, 1 << 20);
+    let (tap, receiver) = AttachTap::ring_pair(lifecycle, 16, 1 << 20, None);
     receiver.finish_snapshot_locked();
     let colors = Box::new(TerminalColors::default());
     assert!(tap.try_send_ring(RingAdvance::new(10, 0, None)));
@@ -176,5 +178,117 @@ fn output_ring_attach_viewers_share_one_ring_and_byte_viewers_keep_their_bytes()
     drain_output(&bytes_viewer.stream, &mut received);
     assert_eq!(received, more);
     drop(bytes_viewer);
+    surface.kill();
+}
+
+/// p05-ipc-119, flood while holding: the app holds the span right after its
+/// READY (Ghostty parsing it) and acks nothing while the program floods past
+/// the ring. The daemon never overwrites the held span: it skips, gaps the
+/// viewer once and holds its READY (an app `snapshot-request` included)
+/// until the app acks the gap. The READY then continues the ring exactly.
+#[test]
+fn output_ring_attach_a_held_span_is_skipped_never_overwritten() {
+    use cmux_ipc::output_ring::{RingAck, SpanError};
+    use snapshot_attach::SnapshotAdmission;
+    let (_mux, surface) = quiet_terminal("output-ring-ack-flood");
+    let pty = surface.as_pty().unwrap();
+    let (stream, grant) = ring_attach(&surface);
+    let ring = OutputRingReader::open(grant.descriptor.as_fd()).unwrap();
+    let ready = surface.take_viewer_snapshot(&stream.receiver, None).unwrap();
+    let held = feed(pty, b"held span\r\n");
+    let held_from = ready.offset;
+    let held_to = held_from + held.len() as u64;
+    ring.cut(held_from, held_to).unwrap();
+    assert_eq!(surface.ring_ack(&stream.receiver, held_from), RingAck::Stale);
+
+    let mut index = 0;
+    while ring.base() == grant.base {
+        index += 1;
+        feed(pty, &line(index));
+        assert!(index < 100_000, "the ring never skipped");
+    }
+    let skips = surface.ring_skips_for_test();
+    for _ in 0..2_000 {
+        index += 1;
+        feed(pty, &line(index));
+    }
+    assert!(surface.ring_skips_for_test() > skips, "it keeps skipping, it never waits");
+    // The writer never reserved past the held span's slots; the ring's base
+    // moved past it, so nothing cuts it again.
+    assert_eq!(ring.check(held_from), Ok(()), "the held span was never overwritten");
+    let end = ring.end();
+    assert!(matches!(ring.cut(held_to, end), Err(SpanError::BeforeBase { .. })));
+
+    // The gap holds the READY, whatever asks for it.
+    assert!(stream.receiver.ring_gap_pending());
+    assert_eq!(stream.receiver.resyncs(), 1);
+    // The app's `snapshot-request` for the gap is answered by that resync.
+    stream.requests.sent(Instant::now() - Duration::from_secs(1));
+    assert_eq!(stream.requests.request(Instant::now()), SnapshotAdmission::Collapsed);
+    assert!(stream.receiver.ring_gap_pending());
+    let interrupt = crate::stream_interrupt::StreamInterrupt::new();
+    let now = || Some(Instant::now());
+    assert!(matches!(
+        stream.receiver.recv_viewer_event(&interrupt, now()),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    // The held span is parsed; the app still holds a later one: not the gap yet.
+    assert_eq!(surface.ring_ack(&stream.receiver, held_to), RingAck::Moved);
+    assert!(stream.receiver.ring_gap_pending());
+    // It holds nothing: it acks the ring's base, and the READY goes.
+    assert_eq!(surface.ring_ack(&stream.receiver, ring.base()), RingAck::GapReleased);
+    assert!(matches!(
+        stream.receiver.recv_viewer_event(&interrupt, now()),
+        Ok(ViewerEvent::Snapshot)
+    ));
+    let resync = surface.take_viewer_snapshot(&stream.receiver, None).unwrap();
+    assert_eq!(stream.receiver.resyncs(), 1, "one gap, one resync");
+    assert!(resync.offset >= end);
+
+    let after = feed(pty, b"after the gap\r\n");
+    let ViewerEvent::Ring(advance) = stream.receiver.recv_viewer_event(&interrupt, now()).unwrap()
+    else {
+        panic!("a ring viewer's output is an advance");
+    };
+    assert_eq!(advance.end, resync.offset + after.len() as u64);
+    let mut continued = Vec::new();
+    ring.read_into(resync.offset, advance.end, &mut continued).unwrap();
+    assert_eq!(continued, after, "the READY continues the ring exactly");
+    drop(stream);
+    surface.kill();
+}
+
+/// A viewer whose app acks what it parsed is never gapped however much the
+/// program prints, and a ring viewer that detached holds nothing.
+#[test]
+fn output_ring_attach_an_acking_viewer_never_gaps_and_a_gone_one_holds_nothing() {
+    use cmux_ipc::output_ring::RingAck;
+    let (_mux, surface) = quiet_terminal("output-ring-ack-keeps-up");
+    let pty = surface.as_pty().unwrap();
+    let (stream, grant) = ring_attach(&surface);
+    let (idle, _idle_grant) = ring_attach(&surface);
+    let ring = OutputRingReader::open(grant.descriptor.as_fd()).unwrap();
+    let ready = surface.take_viewer_snapshot(&stream.receiver, None).unwrap();
+    drop(idle); // gone without an ack: its cursor closes with its tap
+    let interrupt = crate::stream_interrupt::StreamInterrupt::new();
+    let (mut parsed, mut index) = (ready.offset, 0);
+    while parsed < ready.offset + 3 * DEFAULT_CAPACITY as u64 {
+        for _ in 0..50 {
+            index += 1;
+            feed(pty, &line(index));
+        }
+        let Ok(ViewerEvent::Ring(advance)) =
+            stream.receiver.recv_viewer_event(&interrupt, Some(Instant::now()))
+        else {
+            panic!("an advance");
+        };
+        let mut bytes = Vec::new();
+        ring.read_into(parsed, advance.end, &mut bytes).unwrap();
+        parsed = advance.end;
+        assert_eq!(surface.ring_ack(&stream.receiver, parsed), RingAck::Moved);
+    }
+    assert_eq!(surface.ring_skips_for_test(), 0, "a viewer that keeps up is never skipped");
+    assert_eq!(stream.receiver.resyncs(), 0);
+    drop(stream);
     surface.kill();
 }

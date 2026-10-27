@@ -121,6 +121,8 @@ struct TerminalRingRun: Sendable {
         // SAFETY: `bytes.count` bytes from `pointer` lie in the read-only mapping (the ring cut them there), and the
         // deallocator holds `ring`, which keeps the mapping until it runs; nothing writes through the pointer.
         let checked = unsafe Data(bytesNoCopy: pointer, count: bytes.count, deallocator: .custom { _, _ in
+            // The ring's own span lives until the parse ends: it holds the consumer cursor (RING_ACK, p05-ipc-119).
+            withExtendedLifetime(bytes) {}
             do throws(TerminalRingCutError) {
                 try Self.checkWhole(ring, from: start)
             } catch {

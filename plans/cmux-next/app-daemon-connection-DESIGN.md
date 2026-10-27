@@ -115,6 +115,7 @@ one byte that matters for the framing is `0xFF`. No code sends `\xFFCO` yet.
 | 6 | REPLAY | `meta_len u32`, JSON meta (`vt-state` / `resized` fields without `data`, plus `pending_len`), replay bytes then pending bytes | stream offset of the replay's end |
 | 7 | RING | JSON meta `{capacity, base, layout}`; one descriptor rides on this frame (SCM_RIGHTS) | ring end when sent |
 | 8 | RING_ADVANCE | empty | new ring end: bytes up to here are published |
+| 11 | RING_ACK (client to daemon) | empty | the reader's consumer cursor: it holds no span of the ring below this offset (4.6) |
 
 - A colors sidecar (`OutputWithColors`) is an OUTPUT (or RING_ADVANCE) followed by an EVENT
   `colors-changed` at the same offset; the client applies colors after the bytes up to that offset. Order
@@ -143,6 +144,8 @@ Daemon to client, per stream:
   (`pop_locked`: initial, control, regular).
 - With the ring, output bytes do not travel on the socket at all: a stream sends one 16-byte RING_ADVANCE per
   drained batch; the viewer queue merges advances (keeps the newest end), so one is in flight at a time.
+- The app answers with at most one RING_ACK per display frame (4.6); the ring never writes past a stream's
+  acked offset plus the capacity, and skips output (a gap) rather than wait.
 
 Client side (`app:CmuxNextDaemon/Connection`):
 - The connection's reader thread never waits for a consumer. Each stream has its own bounded queue
@@ -171,7 +174,7 @@ Client to daemon (requests), per stream lane:
 ### 3.4 Gaps and resync
 
 A gap is: an OUTPUT offset that does not continue the stream, an overflowing client queue, a lapped ring
-(4.4). The client answers every gap the same way: drop the stream's pending output, `snapshot-request`,
+(4.4), a range the ring skipped for the stream's cursor (4.6). The client answers every gap the same way: drop the stream's pending output, `snapshot-request`,
 apply nothing until a READY, continue at the READY's offset. The daemon's READY is taken under the
 terminal lock at the parser's offset (existing `take_viewer_snapshot`), so ring bytes and OUTPUT from that
 offset on continue it exactly.
@@ -220,7 +223,9 @@ to the remote entry transport (`ClientTransport::Remote`) or a WebSocket.
 ```
 
 Writer, per chunk of n bytes at `e = end`: `reserve.store(e+n)`; release fence; copy the bytes (one or two
-`memcpy` across the wrap); `end.store(e+n, Release)`. A chunk larger than the capacity keeps its last
+`memcpy` across the wrap); `end.store(e+n, Release)`. A chunk the writer skips for a consumer cursor (4.6)
+stores `base = e+n`, then `end.store(e+n, Release)`, and copies nothing; `base` (offset 16) is therefore an
+atomic that only grows, and a reader loads `end` before `base`. A chunk larger than the capacity keeps its last
 `capacity` bytes. Reader of `[s, t)`: read the bytes (Ghostty parses them in place), acquire fence, then
 `reserve.load()`: if `reserve > s + capacity` the writer may have overwritten part of `[s, t)` while it was
 read: a gap. This is the seqlock rule; the reader detects every overwrite, the writer never waits.
@@ -285,6 +290,37 @@ the size is raised with that number as its reason.
   a relay, a WebSocket, or a `DaemonBridge` link.
 - The reader's descriptor is read-only (opened `O_RDONLY` before the unlink), so a reader cannot change the
   ring. The daemon never reads the data area back, so nothing a reader does reaches the parser.
+
+### 4.6 Consumer cursor (RING_ACK, p05-ipc-119)
+
+The seqlock alone lets the writer lap a span Ghostty is parsing in place; the release-time check then finds
+the torn bytes only after the parser used them. The consumer cursor removes that case, as a Mojo data pipe's
+producer is bounded by its consumer's read position (`mojo/core/data_pipe_producer_dispatcher.cc`).
+
+- App: every span a `SharedOutputRing` cuts holds a slot with its start until its `Data` is released, after
+  Ghostty's lane parsed it (32 slots; past them the ack waits). Once per display frame `takeAck()` gives the
+  offset to send: the start of the oldest live span, or with none live the end of the last cut and at least
+  the ring's `base`; nothing when it did not move. A slot is taken before the cut reads `base`, and the ack
+  reads `base` before the slots (sequentially consistent), so no live span starts below an acked offset.
+  A wrapper that hands the parser other `Data` keeps the ring's span alive until it is released
+  (`TerminalRingSpan`).
+- Daemon: each ring viewer has a cursor in its terminal's `OutputRingWriter` (`open_reader` at grant, closed
+  with the viewer's tap), acked at the ring's end when granted. RING_ACK moves it (an older offset is stale;
+  one past the end counts as the end). A chunk that would write a published byte at or after a cursor's
+  acked offset plus the capacity is skipped: the writer moves `base` past it and gaps every cursor. It
+  never waits; the PTY read, the parse and the other viewers do not slow down.
+- A gapped viewer drops its queued advances and owes a READY, but the READY waits until its app acks an
+  offset at or past the gap (the app does once it holds no span: the ack then reaches `base`). The app's own
+  `snapshot-request` for the gap collapses into that one resync. The READY is taken after the ack, at or
+  after the ring's end then, and the ring writes again from there. One stall is one gap and one resync.
+- The ring is shared by a terminal's viewers, so a skip costs every viewer the skipped bytes. A gapped
+  cursor holds the writer back for at most `GAP_HOLD_CAPACITIES` (2) capacities of skipped output, the
+  time to finish the span it parses; a reader still holding one after that has stopped (a hung app), the
+  writer writes again for the others, and that reader's release check finds the lap. One hung app costs the
+  other viewers one resync, never a frozen ring.
+- An app that never acks freezes its own stream at the first gap (its READY waits for the ack):
+  RING_ACK is part of `terminal-output-ring-v1`, so a client that asks for the ring acks.
+- The release-time check stays, as a counter: with a cursor-honoring daemon `releaseLapCount` is 0.
 
 ## 5. App side
 
@@ -352,4 +388,5 @@ touched: `CmuxNextTerminal` (TerminalSession, TerminalOutputLane, TerminalSurfac
 
 | Date | Row | Host / sha / Hz | Light | STRESS | Note |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-10-27 | RING_ACK writer cost: `OutputRingWriter::push` of 4 KiB, 1 MiB ring, 200k pushes (`cargo test --release -p cmux-ipc --test output_ring -- --ignored --nocapture`) | 360-core Linux VM / cp/p05-ipc-119 / - | 0 cursors 86.3 ns, 3 cursors acked every push 75.5 ns | not run | Within noise: the cursor check is one pass over the open cursors per chunk. ipc-soak.py not run (fleet) |
+| 2026-10-27 | RING_ACK flood while holding (`output_ring_flood_while_holding_tears_no_span`, 4 MiB through a 4 KiB ring, one held span) | 360-core Linux VM / cp/p05-ipc-119 / - | 0 torn spans, 1 gap, 20 of 20 runs | not run | Daemon side: `output_ring_attach_a_held_span_is_skipped_never_overwritten` (1 resync) |

@@ -25,6 +25,8 @@ use std::ops::DerefMut;
 mod output_arena;
 mod output_ring;
 mod output_rope;
+#[cfg(unix)]
+use cmux_ipc::output_ring::{RingAck, RingReader};
 #[cfg(test)]
 pub(super) use output_arena::OUTPUT_ARENA_BLOCK_BYTES;
 pub(super) use output_arena::OutputArena;
@@ -61,15 +63,49 @@ impl AttachTaps {
 
     /// Writes `bytes` into the terminal's ring, if it has one: its new end.
     /// The caller counted them in the snapshot offset under the same
-    /// terminal lock, so the ring's end stays that offset.
+    /// terminal lock, so the ring's end stays that offset, written or
+    /// skipped. A ring viewer the write gapped resyncs once its app acks
+    /// the gap ([`AttachTap::ring_gap`]).
     #[cfg(unix)]
     fn publish_ring(&mut self, bytes: &[u8]) -> Option<u64> {
-        self.ring.as_mut().map(|ring| ring.publish(bytes))
+        let publish = self.ring.as_mut()?.publish(bytes);
+        if !publish.gapped.is_empty() {
+            for tap in &self.taps {
+                if tap.cursor.as_ref().is_some_and(|cursor| publish.gapped.contains(&cursor.id())) {
+                    tap.ring_gap();
+                }
+            }
+        }
+        Some(publish.end)
     }
 
     #[cfg(not(unix))]
     fn publish_ring(&mut self, _bytes: &[u8]) -> Option<u64> {
         None
+    }
+
+    /// The RING_ACK of the ring viewer whose queue `receiver` reads: its app
+    /// holds no span below `offset`. The ack of a gap ends the viewer's wait
+    /// for it: its READY follows, taken after this ack.
+    #[cfg(unix)]
+    pub(super) fn ring_ack(&mut self, receiver: &AttachFrameReceiver, offset: u64) -> RingAck {
+        let Some(ring) = self.ring.as_mut() else { return RingAck::Unknown };
+        let Some(tap) = self.taps.iter().find(|tap| Arc::ptr_eq(&tap.state, &receiver.state))
+        else {
+            return RingAck::Unknown;
+        };
+        let Some(cursor) = tap.cursor.as_ref() else { return RingAck::Unknown };
+        let ack = ring.ack(cursor, offset);
+        if ack == RingAck::GapReleased {
+            tap.ring_gap_released();
+        }
+        ack
+    }
+
+    /// Chunks the terminal's ring skipped for a viewer's cursor.
+    #[cfg(all(test, unix))]
+    pub(super) fn ring_skips(&self) -> u64 {
+        self.ring.as_ref().map_or(0, TerminalOutputRing::skips)
     }
 
     /// PTY output the parser accepted, to every viewer: byte viewers share
@@ -107,13 +143,14 @@ impl AttachTaps {
     }
 
     /// The ring a ring viewer attached at snapshot `offset` reads, made now
-    /// when the terminal has none. The caller holds the terminal lock, so
-    /// no output moves the offset meanwhile.
+    /// when the terminal has none, and the viewer's consumer cursor in it.
+    /// The caller holds the terminal lock, so no output moves the offset
+    /// meanwhile.
     #[cfg(unix)]
     pub(super) fn ring_grant(
         &mut self,
         offset: u64,
-    ) -> Result<OutputRingGrant, cmux_ipc::output_ring::RingError> {
+    ) -> Result<(OutputRingGrant, RingReader), cmux_ipc::output_ring::RingError> {
         let ring = match &mut self.ring {
             Some(ring) => ring,
             None => self.ring.insert(TerminalOutputRing::create(offset)?),
@@ -519,6 +556,10 @@ pub(super) struct AttachTap {
     /// A ring viewer: its output is the terminal's ring, so it is queued
     /// as [`RingAdvance`]s, never as bytes. Always a snapshot viewer.
     ring: bool,
+    /// A ring viewer's consumer cursor in the terminal's ring: dropped with
+    /// the tap, which closes it.
+    #[cfg(unix)]
+    cursor: Option<RingReader>,
 }
 
 pub(super) struct AttachTapState {
@@ -546,6 +587,10 @@ pub(super) struct AttachTapQueue {
     /// The viewer reflows its own history: a resize reaches it as a
     /// local-history READY while it is not behind.
     local_history: bool,
+    /// A ring viewer the ring skipped output for: its READY waits until its
+    /// app acks the gap, so the app holds no span of the old screen when
+    /// the ring writes again (output_ring.rs).
+    ring_gap: bool,
 }
 
 impl AttachTapQueue {
@@ -569,6 +614,7 @@ impl AttachTapQueue {
             && self.receiver_alive
             && !self.needs_snapshot
             && !self.snapshot_deferred
+            && !self.ring_gap
     }
 }
 
@@ -619,7 +665,8 @@ impl AttachFrameReceiver {
     }
 
     /// Next event of a snapshot viewer: a pending snapshot comes before any
-    /// frame. Blocks until an event, `deadline`, or `interrupt`.
+    /// frame, once the app acked a ring gap. Blocks until an event,
+    /// `deadline`, or `interrupt`.
     pub(crate) fn recv_viewer_event(
         &self,
         interrupt: &crate::stream_interrupt::StreamInterrupt,
@@ -627,7 +674,7 @@ impl AttachFrameReceiver {
     ) -> Result<ViewerEvent, RecvTimeoutError> {
         let mut queue = self.state.queue.lock().unwrap();
         loop {
-            if queue.needs_snapshot {
+            if queue.needs_snapshot && !queue.ring_gap {
                 return Ok(ViewerEvent::Snapshot);
             }
             match Self::pop_item(&mut queue) {
@@ -702,6 +749,12 @@ impl AttachFrameReceiver {
     pub(crate) fn queued_items(&self) -> usize {
         self.state.queue.lock().unwrap().frames.len()
     }
+
+    /// Whether the viewer waits for its app's ack of a ring gap.
+    #[cfg(test)]
+    pub(crate) fn ring_gap_pending(&self) -> bool {
+        self.state.queue.lock().unwrap().ring_gap
+    }
 }
 
 impl AttachTap {
@@ -724,14 +777,20 @@ impl AttachTap {
     }
 
     /// A ring viewer's queue: a snapshot viewer whose output is queued as
-    /// ring advances ([`Self::try_send_ring`]).
+    /// ring advances ([`Self::try_send_ring`]), with its consumer cursor
+    /// (none in tests that only check the queue).
     pub(super) fn ring_pair(
         lifecycle: AttachLifecycle,
         max_frames: usize,
         backlog_bytes: usize,
+        #[cfg(unix)] cursor: Option<RingReader>,
     ) -> (Self, AttachFrameReceiver) {
         let (mut tap, receiver) = Self::snapshot_pair(lifecycle, max_frames, backlog_bytes);
         tap.ring = true;
+        #[cfg(unix)]
+        {
+            tap.cursor = cursor;
+        }
         (tap, receiver)
     }
 
@@ -755,11 +814,18 @@ impl AttachTap {
                 resyncs: 0,
                 snapshot_deferred: false,
                 local_history: false,
+                ring_gap: false,
             }),
             ready: Condvar::new(),
         });
         (
-            Self { state: state.clone(), lifecycle: lifecycle.clone(), ring: false },
+            Self {
+                state: state.clone(),
+                lifecycle: lifecycle.clone(),
+                ring: false,
+                #[cfg(unix)]
+                cursor: None,
+            },
             AttachFrameReceiver { state, lifecycle },
         )
     }
@@ -767,6 +833,27 @@ impl AttachTap {
     /// A snapshot viewer resyncs by snapshot; a replay viewer needs a replay.
     pub(super) fn is_snapshot(&self) -> bool {
         self.state.queue.lock().unwrap().snapshot_mode
+    }
+
+    /// The ring skipped output for this viewer's cursor: its queued advances
+    /// go and it resyncs, but its READY waits for its app's ack of the gap
+    /// ([`Self::ring_gap_released`]). The app's own `snapshot-request` for
+    /// the gap joins that one resync.
+    #[cfg(unix)]
+    fn ring_gap(&self) {
+        let mut queue = self.state.queue.lock().unwrap();
+        queue.fall_behind();
+        queue.ring_gap = true;
+    }
+
+    /// The app acked the gap: it holds no span of the old screen, and the
+    /// cursor is at the ring's end. The READY it waited for goes now.
+    #[cfg(unix)]
+    fn ring_gap_released(&self) {
+        let mut queue = self.state.queue.lock().unwrap();
+        queue.ring_gap = false;
+        drop(queue);
+        self.state.ready.notify_one();
     }
 
     /// Ask a snapshot viewer for a resync (a grid change without a replay).

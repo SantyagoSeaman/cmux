@@ -34,6 +34,13 @@
 //! is one empty RING_ADVANCE whose aux is the new end; colors or an echoed
 //! flow follow as the same `output` sidecar EVENT, at that end. The viewer
 //! queue merges advances, so one waits per stream (surface/attach_tap.rs).
+//!
+//! The app answers with RING_ACK (kind 11, p05-ipc-119): an empty frame on
+//! the ring stream whose aux is the offset below which it holds no span of
+//! the ring, sent at most once per display frame. [`AttachFrameEncoder::ring_ack`]
+//! checks it against the stream; the offset moves the viewer's consumer
+//! cursor (`Surface::ring_ack`), and the ring never writes past it plus the
+//! capacity.
 
 use super::AttachWireShape;
 use super::render_service::{
@@ -71,6 +78,12 @@ pub(super) enum AttachFrameError {
     RingAgain,
     /// A RING_ADVANCE behind the stream's offset: ring ends only grow.
     RingBehind { end: u64, offset: u64 },
+    /// A client frame that is not a RING_ACK where one was read.
+    NotRingAck { kind: FrameKind },
+    /// A RING_ACK addressed to another stream.
+    RingAckStream { stream: u16 },
+    /// A RING_ACK with a payload: it is the header alone.
+    RingAckPayload { len: u32 },
 }
 
 impl std::fmt::Display for AttachFrameError {
@@ -84,6 +97,9 @@ impl std::fmt::Display for AttachFrameError {
             Self::RingBehind { end, offset } => {
                 write!(f, "ring advance to {end}, behind the stream's offset {offset}")
             }
+            Self::NotRingAck { kind } => write!(f, "a {} frame where a ring ack goes", kind.name()),
+            Self::RingAckStream { stream } => write!(f, "ring ack for stream {stream}"),
+            Self::RingAckPayload { len } => write!(f, "ring ack with a {len}-byte payload"),
         }
     }
 }
@@ -135,7 +151,10 @@ impl From<AttachFrameError> for std::io::Error {
             AttachFrameError::ControlStream
             | AttachFrameError::NoRing
             | AttachFrameError::RingAgain
-            | AttachFrameError::RingBehind { .. } => {
+            | AttachFrameError::RingBehind { .. }
+            | AttachFrameError::NotRingAck { .. }
+            | AttachFrameError::RingAckStream { .. }
+            | AttachFrameError::RingAckPayload { .. } => {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
             }
             AttachFrameError::Frame(_) => {
@@ -462,6 +481,37 @@ impl AttachFrameEncoder {
         let frame =
             BudgetedFrame::new(header, BudgetedBytes::share(&bytes::Bytes::new(), budget)?)?;
         Ok(EncodedAttachFrame { frame, sidecar })
+    }
+
+    /// The offset of the app's RING_ACK `header` on this stream: the offset
+    /// below which the app holds no span of the ring. Refused unless it is
+    /// an empty RING_ACK of this stream after its RING; each refusal is a
+    /// bad message from the app. The offset is not checked against what
+    /// the stream announced: after a gap the app acks the ring's base, which
+    /// may be past the last advance, and the ring clamps an ack to its end.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the attach-frames reader once bound")
+    )]
+    pub(super) fn ring_ack(&self, header: &FrameHeader) -> Result<u64, AttachFrameError> {
+        if header.kind() != FrameKind::RingAck {
+            return Err(AttachFrameError::NotRingAck { kind: header.kind() });
+        }
+        if header.stream() != self.stream {
+            return Err(AttachFrameError::RingAckStream { stream: header.stream() });
+        }
+        if !header.is_empty() {
+            return Err(AttachFrameError::RingAckPayload { len: header.len() });
+        }
+        if !self.ring {
+            return Err(AttachFrameError::NoRing);
+        }
+        match header.aux() {
+            Aux::Offset(offset) => Ok(offset),
+            Aux::FlowId(_) | Aux::SharedBufferSize(_) | Aux::Call(_) => {
+                Err(AttachFrameError::Frame(BadMessage::AuxMismatch { kind: FrameKind::RingAck }))
+            }
+        }
     }
 
     /// Another attach event (`detached`, `overflow`) as an EVENT frame at

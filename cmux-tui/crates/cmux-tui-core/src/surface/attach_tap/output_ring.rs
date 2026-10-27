@@ -15,8 +15,25 @@
 //! arrives: the reader learns the state "readable up to here", not each
 //! write, as a Mojo data pipe's consumer is signalled readable once for any
 //! number of writes (mojo/core/data_pipe_consumer_dispatcher.cc).
+//!
+//! Each ring viewer has a consumer cursor in the ring (p05-ipc-119): its app
+//! acks the offset below which it holds no span (RING_ACK), and the ring
+//! never writes a byte the app may still parse. Output that would skips the
+//! ring instead and gaps the viewers ([`RingPublish::gapped`]); a gapped
+//! viewer's resync waits for its app's ack of the gap, so the READY it gets
+//! is taken after the app let go of every old span (attach_tap.rs,
+//! `ring_gap`).
 
 use super::super::TerminalColors;
+
+/// What publishing one chunk in the ring did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RingPublish {
+    /// The ring's end after the chunk: what the viewers' advance names.
+    pub(crate) end: u64,
+    /// Cursors the chunk gapped (the ring skipped it for one of them).
+    pub(crate) gapped: Vec<u64>,
+}
 
 /// The end of the published ring bytes a ring viewer may read next: one
 /// RING_ADVANCE on its stream.
@@ -63,7 +80,10 @@ pub(crate) use ring::{OutputRingGrant, TerminalOutputRing};
 
 #[cfg(unix)]
 mod ring {
-    use cmux_ipc::output_ring::{DEFAULT_CAPACITY, LAYOUT, OutputRingWriter, RingError};
+    use super::RingPublish;
+    use cmux_ipc::output_ring::{
+        DEFAULT_CAPACITY, LAYOUT, OutputRingWriter, RingAck, RingError, RingReader,
+    };
     use std::os::fd::OwnedFd;
 
     /// One terminal's ring and its only writer.
@@ -78,10 +98,22 @@ mod ring {
             OutputRingWriter::create(base, DEFAULT_CAPACITY).map(|writer| Self { writer })
         }
 
-        /// Writes and publishes `bytes`; the new end. Never waits for a reader.
-        pub(crate) fn publish(&mut self, bytes: &[u8]) -> u64 {
-            self.writer.push(bytes);
-            self.writer.end()
+        /// Writes and publishes `bytes`, or skips them when a viewer's app
+        /// may still hold a byte they would overwrite. Never waits.
+        pub(crate) fn publish(&mut self, bytes: &[u8]) -> RingPublish {
+            let publish = self.writer.push(bytes);
+            RingPublish { end: publish.end, gapped: publish.gapped }
+        }
+
+        /// A viewer's RING_ACK.
+        pub(crate) fn ack(&mut self, cursor: &RingReader, offset: u64) -> RingAck {
+            self.writer.ack(cursor, offset)
+        }
+
+        /// Chunks skipped for a cursor since the ring was made.
+        #[cfg(test)]
+        pub(crate) fn skips(&self) -> u64 {
+            self.writer.skips()
         }
 
         /// Offset after the last published byte.
@@ -90,15 +122,18 @@ mod ring {
         }
 
         /// What one ring viewer's RING frame announces, with its own
-        /// read-only descriptor.
-        pub(crate) fn grant(&self) -> Result<OutputRingGrant, RingError> {
-            Ok(OutputRingGrant {
+        /// read-only descriptor, and the viewer's consumer cursor, acked at
+        /// the ring's end now. The viewer's tap keeps the cursor: it closes
+        /// when the viewer goes.
+        pub(crate) fn grant(&mut self) -> Result<(OutputRingGrant, RingReader), RingError> {
+            let grant = OutputRingGrant {
                 descriptor: self.writer.reader_fd()?,
                 layout: LAYOUT,
                 capacity: self.writer.capacity(),
                 base: self.writer.base(),
                 end: self.writer.end(),
-            })
+            };
+            Ok((grant, self.writer.open_reader()))
         }
     }
 

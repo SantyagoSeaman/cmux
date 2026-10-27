@@ -123,6 +123,61 @@ import Testing
         #expect(watched == nil)
     }
 
+    /// p05-ipc-119: the ack is the start of the oldest live span, or the end of the last cut when none is, sent only
+    /// when it moved (one per display frame).
+    @Test func theAckIsTheOldestLiveSpanAndOnlyWhenItMoved() throws {
+        let file = try RingFile()
+        let ring = try SharedOutputRing(adopting: file.readOnlyDescriptor())
+        file.push(Self.bytes(100, seed: 9))
+        #expect(ring.takeAck() == nil) // nothing cut: the cursor is where the ring started
+        var first: SharedOutputRing.Spans? = try ring.cut(from: 0, to: 40)
+        var second: SharedOutputRing.Spans? = try ring.cut(from: 40, to: 100)
+        #expect(first?.head != nil && second?.head != nil)
+        #expect(ring.takeAck() == nil) // the span at 0 is live
+        first = nil
+        #expect(ring.takeAck() == 40)
+        #expect(ring.takeAck() == nil) // coalesced: it did not move
+        second = nil
+        #expect(ring.takeAck() == 100)
+        #expect(ring.takeAck() == nil)
+    }
+
+    /// p05-ipc-119, flood while holding: Ghostty holds a span while the daemon floods a full ring and more. A daemon
+    /// that honors the cursor skips instead of overwriting it: the span is never torn (0 release laps), the stream
+    /// finds exactly one gap, its ack of the gap comes once it holds nothing, and the stream continues at the READY.
+    @Test func aFloodWhileASpanIsHeldTearsNothingAndGapsOnce() throws {
+        let file = try RingFile()
+        let ring = try SharedOutputRing(adopting: file.readOnlyDescriptor())
+        let printed = Self.bytes(100, seed: 11)
+        file.push(printed)
+        var held: SharedOutputRing.Spans? = try ring.cut(from: 0, to: 100)
+        var cursor: UInt64 = 0
+        var skips = 0
+        for round in 0 ..< 60 {
+            if let ack = ring.takeAck() { cursor = ack } // one ack per display frame
+            if file.push(Self.bytes(200, seed: UInt8(truncatingIfNeeded: round)), cursor: cursor) { skips += 1 }
+        }
+        #expect(skips > 0)
+        #expect(held?.head == Data(printed), "the held span is whole")
+        held = nil
+        #expect(ring.releaseLapCount == 0, "no span was torn")
+
+        // The next advance is the gap: the range after the held span was skipped.
+        let end = ring.end
+        var gaps = 0
+        do { _ = try ring.cut(from: 100, to: end) } catch { if case .beforeBase = error { gaps += 1 } }
+        #expect(gaps == 1)
+        // It holds nothing now: the ack reaches the base, which releases the gap; the READY is taken after it.
+        let ack = try #require(ring.takeAck())
+        #expect(ack == ring.base)
+        let ready = file.publishedEnd
+        let after = Self.bytes(300, seed: 12)
+        #expect(!file.push(after, cursor: ack))
+        let continued = try ring.cut(from: ready, to: ready + 300)
+        #expect((continued.head ?? Data()) + (continued.tail ?? Data()) == Data(after))
+        #expect(ring.cutLapCount == 0 && ring.releaseLapCount == 0)
+    }
+
     private static func bytes(_ count: Int, seed: UInt8) -> [UInt8] {
         (0 ..< count).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ Int(seed)) }
     }
@@ -199,6 +254,25 @@ nonisolated private final class RingFile {
 
     /// Appends and publishes `bytes`: reserve, the copy (split at the wrap), then end. The test thread is the
     /// ring's only reader here, so plain stores in this order are what the reader sees.
+    /// The daemon's push with one consumer cursor acked at `cursor` (cmux-ipc output_ring.rs `OutputRingWriter::push`,
+    /// p05-ipc-119): a chunk that could overwrite a published byte at or after the cursor is skipped instead, the
+    /// base moving past it before the end does. Returns whether it skipped.
+    func push(_ bytes: [UInt8], cursor: UInt64) -> Bool {
+        let newEnd = end + UInt64(bytes.count)
+        guard cursor < end, newEnd > cursor + capacity else {
+            push(bytes)
+            return false
+        }
+        // SAFETY: header words below 64, inside the mapping.
+        unsafe mapping.storeBytes(of: newEnd.littleEndian, toByteOffset: 16, as: UInt64.self)
+        unsafe mapping.storeBytes(of: newEnd.littleEndian, toByteOffset: 24, as: UInt64.self)
+        end = newEnd
+        return true
+    }
+
+    /// Offset after the last published byte.
+    var publishedEnd: UInt64 { end }
+
     func push(_ bytes: [UInt8]) {
         let newEnd = end + UInt64(bytes.count)
         let kept = bytes.suffix(Int(capacity))
