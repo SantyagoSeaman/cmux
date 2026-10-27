@@ -144,6 +144,9 @@ from cmux.errors import TimeoutError as SdkTimeout  # noqa: E402
 from cmux.raw import CmuxClient  # noqa: E402
 
 MARKER_ENV = "CMUX_ORACLE_CASE"
+# The case id (`suite/case`): a wrapper around the binary (linux_run.sh sanitize) files each process's
+# sanitizer reports under its case.
+CASE_ID_ENV = "CMUX_ORACLE_CASE_ID"
 # The fixture's session name, as the facet shows it; each case runs as `oracle-<token>` (CasePaths.session).
 SESSION_NAME = "oracle"
 # prctl(2) option: orphaned descendants are re-parented to the caller, not to init.
@@ -419,10 +422,14 @@ def host_platform() -> str:
     return "linux" if sys.platform.startswith("linux") else "mac"
 
 
-def case_environment(paths: CasePaths, seed: str, isolation: hermetic_env.Isolation) -> hermetic_env.CaseEnv:
-    """The case daemon's whole environment, from hermetic_env.py, with this driver's process marker."""
-    return hermetic_env.daemon_case(paths.root, isolation, platform=host_platform(), seed=seed,
-                                    extra={MARKER_ENV: str(paths.root)})
+def case_environment(paths: CasePaths, seed: str, isolation: hermetic_env.Isolation,
+                     case_id: Optional[str] = None) -> hermetic_env.CaseEnv:
+    """The case daemon's whole environment, from hermetic_env.py, with this driver's process marker and the
+    case id."""
+    extra = {MARKER_ENV: str(paths.root)}
+    if case_id:
+        extra[CASE_ID_ENV] = case_id
+    return hermetic_env.daemon_case(paths.root, isolation, platform=host_platform(), seed=seed, extra=extra)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1055,7 +1062,7 @@ class CaseRun:
                                         str(ctx.get("key") or self.case_id))
         fixture = case.get("fixture") or {}
         seed = str(fixture.get("seed") or case.get("id") or "oracle")
-        self.case_env = case_environment(self.paths, seed, isolation)
+        self.case_env = case_environment(self.paths, seed, isolation, self.case_id)
         self.daemon = Daemon(binary, self.paths, self.case_env, self.scale)
         self.sha = sha
         # v0 facets (facets_v0.py, p15-oracle-006): only the push-base methods and a wall clock, so a capture

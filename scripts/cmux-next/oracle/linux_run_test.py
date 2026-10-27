@@ -27,30 +27,76 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import oracle  # noqa: E402
+import sanitizer_results  # noqa: E402
 
 STUB_CARGO = """#!/bin/sh
-# cargo build --locked --profile P [--features F] -p cmux-tui -j N
-profile=""
+# cargo build --locked --profile P [--features F] [-Zbuild-std --target T] -p cmux-tui -j N
+profile="" target="" zflags=""
 while [ $# -gt 0 ]; do
-  case "$1" in --profile) profile="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in
+    --profile) profile="$2"; shift 2 ;;
+    --target) target="$2/"; shift 2 ;;
+    -Z*) zflags="$zflags$1,"; shift ;;
+    *) shift ;;
+  esac
 done
-echo "cargo $(git -C .. rev-parse HEAD) $CARGO_TARGET_DIR changed=$(git -C .. diff --name-only | tr '\\n' ,)" >> "$ORACLE_TEST_LOG"
+rustflags="$(printf '%s' "${CARGO_ENCODED_RUSTFLAGS:-}" | tr '\\037' ,)"
+echo "cargo $(git -C .. rev-parse HEAD) $CARGO_TARGET_DIR z=$zflags target=$target rustflags=$rustflags changed=$(git -C .. diff --name-only | tr '\\n' ,)" >> "$ORACLE_TEST_LOG"
 sleep 0.5
-mkdir -p "$CARGO_TARGET_DIR/$profile"
-printf '#!/bin/sh\\necho stub\\n' > "$CARGO_TARGET_DIR/$profile/cmux-tui"
-chmod +x "$CARGO_TARGET_DIR/$profile/cmux-tui"
+mkdir -p "$CARGO_TARGET_DIR/$target$profile"
+cp "$ORACLE_TEST_BINARY" "$CARGO_TARGET_DIR/$target$profile/cmux-tui"
+chmod +x "$CARGO_TARGET_DIR/$target$profile/cmux-tui"
+"""
+
+# The built "daemon": records its runtime options and, when the case asks, writes a sanitizer report where
+# log_path says (as a sanitizer runtime writes report.<pid>).
+STUB_BINARY = """#!/bin/sh
+options="${ASAN_OPTIONS:-}${TSAN_OPTIONS:-}"
+if [ -n "${STUB_OPTIONS_OUT:-}" ]; then printf '%s\\n' "$options" >> "$STUB_OPTIONS_OUT"; fi
+log_path="$(printf '%s' "$options" | sed -n "s/^log_path='\\\\([^']*\\\\)'.*/\\\\1/p")"
+if [ -n "${STUB_REPORT:-}" ] && [ -n "$log_path" ]; then cp "$STUB_REPORT" "$log_path.$$"; fi
+echo stub
+"""
+
+# rustup run CHANNEL CMD ARGS: the pinned nightly of a sanitizer build.
+STUB_RUSTUP = """#!/bin/sh
+[ "$1" = run ] || exit 1
+echo "rustup $2" >> "$ORACLE_TEST_LOG"
+shift 2
+case "$1" in
+  rustc)
+    case "$2" in
+      -V|--version) echo "rustc 0.0.0-nightly-stub" ;;
+      -vV) printf 'rustc 0.0.0-nightly-stub\\nhost: x86_64-unknown-linux-gnu\\ncommit-hash: c0ffee\\n' ;;
+      --print) echo "$ORACLE_TEST_SYSROOT" ;;
+    esac ;;
+  cargo) shift; exec cargo "$@" ;;
+  *) exit 1 ;;
+esac
 """
 
 STUB_ORACLE = """#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 args = sys.argv[1:]
 log = os.environ["ORACLE_TEST_LOG"]
 if args[0] == "run":
     out = args[args.index("--out") + 1]
     os.makedirs(out, exist_ok=True)
     code = int(os.environ.get("ORACLE_TEST_RUN_EXIT", "0"))
+    cases = {}
+    if "--build" in args:
+        # A sanitizer run: each case starts the binary with a case environment built from nothing.
+        binary = args[args.index("--binary") + 1]
+        for case in ("daemon-ops/a", "daemon-ops/b"):
+            env = {"PATH": "/usr/bin:/bin", "CMUX_ORACLE_CASE_ID": case,
+                   "STUB_OPTIONS_OUT": os.environ["ORACLE_TEST_OPTIONS"]}
+            if case == "daemon-ops/a" and os.environ.get("ORACLE_TEST_REPORT"):
+                env["STUB_REPORT"] = os.environ["ORACLE_TEST_REPORT"]
+            subprocess.run([binary, "--headless"], env=env, check=True, stdout=subprocess.DEVNULL)
+            cases[case] = {"status": "Pass", "outcome": "expected", "flaky": False}
     with open(os.path.join(out, "receipt.json"), "w") as handle:
-        json.dump({"ok": code == 0, "args": args}, handle)
+        json.dump({"ok": code == 0, "args": args, "cases": cases, "platform": "linux", "product": "daemon",
+                   "arm": None, "unexpected": [], "leaked_state": [], "infra_errors": []}, handle)
     with open(log, "a") as handle:
         handle.write("run " + " ".join(args) + "\\n")
     time.sleep(0.3)
@@ -80,11 +126,18 @@ class LinuxRunCase(unittest.TestCase):
         oracle_dir = repo / "scripts" / "cmux-next" / "oracle"
         oracle_dir.mkdir(parents=True)
         git("init", "-q", cwd=repo)
-        for name in ("linux_run.sh", "runnerd.py", "patch_mutants.py", "baselines.py"):
+        for name in ("linux_run.sh", "runnerd.py", "patch_mutants.py", "baselines.py", "expectations.py",
+                     "sanitizer_results.py"):
             shutil.copy(HERE / name, oracle_dir / name)
+        for name in ("crash_signature.py", "signature-ignore.txt"):
+            shutil.copy(HERE.parent / name, oracle_dir.parent / name)
         (oracle_dir / "oracle.py").write_text(STUB_ORACLE)
         (repo / "cmux-tui").mkdir()
         (repo / "cmux-tui" / "Cargo.toml").write_text("[workspace]\n\n[profile.oracle]\ninherits = \"release\"\n")
+        (repo / "cmux-tui" / "sanitize").mkdir()
+        (repo / "cmux-tui" / "sanitize" / "rust-toolchain.toml").write_text(
+            '[toolchain]\nchannel = "nightly-2026-01-01"\n')
+        (repo / "tests" / "oracle" / "SanitizerExpectations.d").mkdir(parents=True)
         lib = repo / "cmux-tui" / "crates" / "core" / "src" / "lib.rs"
         lib.parent.mkdir(parents=True)
         lib.write_text("pub fn index(i: usize) -> usize {\n    i\n}\n")
@@ -114,8 +167,13 @@ class LinuxRunCase(unittest.TestCase):
         bin_dir.mkdir()
         (bin_dir / "cargo").write_text(STUB_CARGO)
         (bin_dir / "rustc").write_text("#!/bin/sh\necho rustc 0.0.0-stub\n")
-        for name in ("cargo", "rustc"):
+        (bin_dir / "rustup").write_text(STUB_RUSTUP)
+        for name in ("cargo", "rustc", "rustup"):
             (bin_dir / name).chmod(0o755)
+        cls.stub_binary = base / "stub-binary"
+        cls.stub_binary.write_text(STUB_BINARY)
+        cls.sysroot = base / "sysroot"
+        (cls.sysroot / "lib" / "rustlib" / "src" / "rust" / "library").mkdir(parents=True)
 
     @classmethod
     def write_mutant(cls, path: Path, old: str, new: str, context: Optional[str] = None) -> Path:
@@ -146,7 +204,8 @@ class LinuxRunCase(unittest.TestCase):
                if not k.startswith(("RUNNERD_", "GIT_", "ORACLE_")) and k != "CMUX_GHOSTTY_SRC"}
         env.update({"PATH": f"{self.bin_dir}:{env.get('PATH', '/usr/bin:/bin')}", "ORACLE_RUNNERD_SCOPE": "none",
                     "ORACLE_RUNNERD_ROOT": str(self.work / "root"), "ORACLE_TEST_LOG": str(self.log),
-                    "TMPDIR": str(self.work)})
+                    "ORACLE_TEST_BINARY": str(self.stub_binary), "ORACLE_TEST_SYSROOT": str(self.sysroot),
+                    "ORACLE_TEST_OPTIONS": str(self.work / "options"), "TMPDIR": str(self.work)})
         env.update(extra)
         return env
 
@@ -365,6 +424,100 @@ class MutantTests(LinuxRunCase):
         self.assertIsNone(receipt["base"]["build"]["mutant"])
         self.assertEqual(receipt["head"]["build"]["mutant"]["id"], "daemon/index-off-by-one")
         self.assertEqual(receipt["mutant"]["id"], "daemon/index-off-by-one")
+
+
+class SanitizerTests(LinuxRunCase):
+    """The sanitizer lane (p15-oracle-187): a -Zsanitizer build in its own target dir, and a run whose reports
+    become Crash results with stack keys, one MQ-races line per stack."""
+
+    def receipt(self, result: subprocess.CompletedProcess) -> dict:
+        return json.loads((Path(result.stdout.strip().splitlines()[-1]).parent / "build.json").read_text())
+
+    def test_a_sanitized_build_uses_the_pinned_nightly_and_its_own_target_dir(self) -> None:
+        sanitized = self.linux_run("build", self.base_sha, "--sanitizer", "thread")
+        self.assertEqual(sanitized.returncode, 0, sanitized.stderr)
+        plain = self.linux_run("build", self.base_sha)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        builds = self.logged("cargo")
+        self.assertEqual(len(builds), 2, "a sanitized and a plain build are two keys")
+        self.assertIn("z=-Zbuild-std, target=x86_64-unknown-linux-gnu/", builds[0])
+        self.assertIn("rustflags=-Zsanitizer=thread,-Cforce-frame-pointers=yes,"
+                      f"--remap-path-prefix={self.sysroot}/lib/rustlib/src/rust=/rustc/c0ffee ", builds[0])
+        self.assertIn("z= target= rustflags= ", builds[1])
+        self.assertIn("rustup nightly-2026-01-01", self.log.read_text())
+        receipt = self.receipt(sanitized)
+        self.assertEqual((receipt["sanitizer"], receipt["toolchain"]), ("thread", "nightly-2026-01-01"))
+        self.assertEqual(receipt["rustc"], "rustc 0.0.0-nightly-stub")
+        self.assertEqual(Path(receipt["targetDir"]).name, f"{self.base_sha}-oracle-feat-oracle+tsan")
+        self.assertEqual(Path(self.receipt(plain)["targetDir"]).name, f"{self.base_sha}-oracle-feat-oracle")
+        self.assertIsNone(self.receipt(plain)["sanitizer"])
+
+    def test_an_unknown_sanitizer_is_refused_before_anything_is_queued(self) -> None:
+        for command in (["build", self.base_sha], ["sanitize", self.base_sha]):
+            result = self.linux_run(*command, "--sanitizer", "memory")
+            self.assertEqual(result.returncode, 2, command)
+            self.assertIn("address or thread", result.stderr)
+        result = self.linux_run("sanitize", self.base_sha)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("needs --sanitizer", result.stderr)
+        self.assertFalse((self.work / "root").exists())
+
+    def test_walks_need_the_walk_generator(self) -> None:
+        result = self.linux_run("sanitize", self.base_sha, "--sanitizer", "thread", "--walks", "10")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("p15-oracle-098", result.stderr)
+
+    def test_a_report_is_a_crash_with_a_stack_key_until_a_line_expects_it(self) -> None:
+        report = self.work / "tsan-report"
+        report.write_text(sanitizer_results.TSAN_REPORT)
+        key = sanitizer_results.reports_from_text(sanitizer_results.TSAN_REPORT)[0].key
+        out = self.work / "lane"
+        red = self.linux_run("sanitize", self.base_sha, "--sanitizer", "thread", "--suite", "daemon-ops",
+                             "--out", str(out), ORACLE_TEST_REPORT=str(report))
+        self.assertEqual(red.returncode, 1, red.stderr)
+        self.assertEqual(red.stdout.strip().splitlines()[-1], str(out))
+        doc = json.loads((out / "sanitize.json").read_text())
+        self.assertEqual(doc["schema"], "cmux-oracle-sanitize-v1")
+        self.assertFalse(doc["ok"])
+        self.assertEqual(doc["unexpected"], [{"case": "daemon-ops/a", "stacks": [key]}])
+        self.assertEqual(doc["cases"]["daemon-ops/a"]["result"], "Crash")
+        self.assertEqual(doc["binary"]["sanitizer"], "thread")
+        races = [json.loads(line) for line in (out / "races.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["key"], r["cases"], r["expected"]) for r in races], [(key, ["daemon-ops/a"], False)])
+        # Every daemon process got TSan's options and its case's report folder; the run used the tsan build tag.
+        options = (self.work / "options").read_text().splitlines()
+        self.assertEqual(len(options), 2)
+        self.assertTrue(all("halt_on_error=0:exitcode=0" in line for line in options), options)
+        self.assertIn("/reports/daemon-ops/a/report'", options[0])
+        self.assertIn("/reports/daemon-ops/b/report'", options[1])
+        run_args = self.logged("run")[0]
+        self.assertIn("--build tsan", run_args)
+        self.assertIn("/bin/cmux-tui", run_args.split("--binary ")[1].split()[0])
+
+        line = f"p15-oracle-187 [ linux tsan ] daemon-ops/a@{key} [ Crash ]\n"
+        expectations = self.repo / "tests" / "oracle" / "SanitizerExpectations.d" / "daemon-ops.txt"
+        expectations.write_text(line)
+        try:
+            green = self.linux_run("sanitize", self.base_sha, "--sanitizer", "thread", "--suite", "daemon-ops",
+                                   "--out", str(out), ORACLE_TEST_REPORT=str(report))
+        finally:
+            expectations.unlink()
+        self.assertEqual(green.returncode, 0, green.stderr)
+        doc = json.loads((out / "sanitize.json").read_text())
+        self.assertTrue(doc["ok"])
+        races = [json.loads(line) for line in (out / "races.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["key"], r["expected"], r["lines"]) for r in races], [(key, True, [line.strip()])])
+        self.assertEqual(len(self.logged("cargo")), 1, "both runs used one sanitized build")
+
+    def test_asan_runs_leak_checks_in_the_same_process(self) -> None:
+        result = self.linux_run("sanitize", self.base_sha, "--sanitizer", "address", "--suite", "daemon-ops",
+                                "--out", str(self.work / "lane"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = (self.work / "options").read_text().splitlines()
+        self.assertTrue(options and all(":detect_leaks=1" in line for line in options), options)
+        self.assertIn("--build asan", self.logged("run")[0])
+        races = (self.work / "lane" / "races.jsonl").read_text()
+        self.assertEqual(races, "")
 
 
 class QueuedDiffArgsTests(unittest.TestCase):

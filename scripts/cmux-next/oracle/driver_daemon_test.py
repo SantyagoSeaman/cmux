@@ -77,10 +77,21 @@ class PathTests(unittest.TestCase):
         self.assertEqual(d.stable_token(""), "cbf29ce484222325")
         self.assertEqual(d.stable_token("a"), "af63dc4c8601ec8c")
 
+    def test_environment_names_the_case(self):
+        # linux_run.sh sanitize files each process's sanitizer reports under this id (p15-oracle-187).
+        paths = d.CasePaths(Path("/tmp/o/aaaaaa/bbbbbb"))
+        env = d.case_environment(paths, "seed-1", d.hermetic_env.NO_ISOLATION_REQUESTED, "daemon-ops/a").env
+        self.assertEqual(env[d.CASE_ID_ENV], "daemon-ops/a")
+        run = d.CaseRun("/bin/true", "0" * 40, None, {"suite": "daemon-ops", "id": "a"},
+                        {"case_id": "daemon-ops/a", "state_root": str(paths.root)}, {},
+                        d.hermetic_env.NO_ISOLATION_REQUESTED)
+        self.assertEqual(run.case_env.env[d.CASE_ID_ENV], "daemon-ops/a")
+
     def test_environment_is_built_from_nothing(self):
         paths = d.CasePaths(Path("/tmp/o/aaaaaa/bbbbbb"))
         env = d.case_environment(paths, "seed-1", d.hermetic_env.NO_ISOLATION_REQUESTED).env
         self.assertEqual(env[d.MARKER_ENV], "/tmp/o/aaaaaa/bbbbbb")
+        self.assertNotIn(d.CASE_ID_ENV, env)
         self.assertEqual(env["CMUX_TUI_SOCKET"], "/tmp/o/aaaaaa/bbbbbb/s.sock")
         self.assertTrue(all(value.startswith("/tmp/o/aaaaaa/bbbbbb") for key, value in env.items()
                             if key in ("HOME", "TMPDIR", "XDG_RUNTIME_DIR", "CMUX_TUI_STATE_DIR")))

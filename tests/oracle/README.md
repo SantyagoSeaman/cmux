@@ -8,6 +8,7 @@ section 3E). The tool that reads the expectation files is
 | --- | --- |
 | `Expectations.d/<suite>.txt` | Known results that are not Pass, for one suite |
 | `NeverFix.d/<suite>.txt` | Cases that never run on a configuration (`[ Skip ]` only) |
+| `SanitizerExpectations.d/<suite>.txt` | Known ASan, LSan and TSan stacks, and sanitizer Skip or Slow lines (task 187; see [Sanitizer lines](#sanitizer-lines)) |
 | `corpus/<suite>/<case>.json` | Cases (task 012); the linter reads them for stale and budget checks |
 | `blocked/<suite>/<case>.json` | Converted cases that no driver can run yet; no run reads them. The suite's `coverage.json` names what blocks each one |
 | `baselines/` | Reviewed baselines of golden suites (task 016) |
@@ -71,6 +72,33 @@ then pointer, then step, then case, then `suite/*`. Then a deeper pointer wins.
 Tags do not change the order. If two lines have the same target and one run can match both
 tag sets, the run gets the results of both lines (typ `expectations_for`). The linter refuses
 such lines (typ `check_for_conflicts`), so make their tag sets disjoint.
+
+## Sanitizer lines
+
+The sanitizer lanes (task 187) run the daemon suites and the walks on an ASan or TSan build
+(`scripts/cmux-next/oracle/linux_run.sh sanitize REF --sanitizer address|thread [--walks 10000]`), and the
+Swift tier with `swift test --sanitize` (`scripts/cmux-next/linux/swift-tier.sh --all --sanitize thread`).
+Each sanitizer report is a `Crash` of its case (or Swift test target) with a stack key
+`<kind>-<hash12>`: the kind is `asan`, `lsan` or `tsan`, and the hash is the
+`scripts/cmux-next/crash_signature.py` signature of the report's stack. One stack gives one line in the
+MQ-races queue (`races.jsonl`, or the Swift runner's errors queue), however many cases hit it.
+
+A line in `SanitizerExpectations.d/<suite>.txt` (the same format as Chromium's `ASANExpectations` and
+`LeakExpectations`) names the one stack it expects with `@`:
+
+```
+p15-oracle-187 [ linux tsan ] daemon-ops/terminal-create-ok@tsan-0123456789ab [ Pass Crash ]
+p15-oracle-187 [ linux asan ] daemon-ops/*@lsan-0123456789ab [ Crash ]
+p15-oracle-187 [ linux tsan ] daemon-ops/* [ Slow ]
+```
+
+- Every line has the build tag of its run, `asan` or `tsan`. An `lsan` stack comes from an `asan` build.
+- A stack line has `[ Crash ]`, or `[ Pass Crash ]` for a race that does not fire every run.
+- A line without a stack has only `Skip` or `Slow`, so no line can hide a new stack.
+- A sanitizer `Crash` is expected when each of its stacks has a line, or when a case-level `Crash` line
+  expects the case. Each other stack fails the run.
+- A `[ Crash ]` stack line whose stack does not fire in a passing run is an unexpected pass, and the
+  stale lint counts it.
 
 ## Policy
 

@@ -1,0 +1,9 @@
+# daemon-ops sanitizer expectations (format: scripts/cmux-next/oracle/expectations.py, p15-oracle-187).
+# One line per known stack: `bug [ linux asan|tsan ] daemon-ops/<case or *>@<kind>-<hash12> [ Crash ]`, or
+# `[ Pass Crash ]` for a race that does not fire every run. The key is the `key` of the stack's MQ-races line
+# (linux_run.sh sanitize writes races.jsonl). A line without a stack takes only Skip or Slow.
+#
+# A sanitized daemon runs 2x (ASan) to 5-15x (TSan) slower; Chromium scales its test timeouts the same way
+# (base/test/test_timeouts.cc). Slow gives 5x settleMaxMs and case bound on these builds only.
+p15-oracle-187 [ linux asan ] daemon-ops/* [ Slow ]
+p15-oracle-187 [ linux tsan ] daemon-ops/* [ Slow ]

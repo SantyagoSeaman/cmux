@@ -6,7 +6,7 @@ The format and semantics copy Blink's TestExpectations (chromium/src
 `third_party/catapult/third_party/typ/typ/expectations_parser.py` and the linter in
 `third_party/blink/tools/blinkpy/web_tests/lint_test_expectations.py`):
 
-    [ bug ] [ [ tags ] ] suite/case[/step][#/json/pointer] [ results ] [# comment]
+    [ bug ] [ [ tags ] ] suite/case[/step][#/json/pointer][@stack] [ results ] [# comment]
 
 - `bug` is a WORK.tsv task id (`p15-oracle-015`) or a cmux issue (`#1234`). A `#1234` line is an
   expectation only when a `suite/case` target and its `[ results ]` bracket follow; any other line
@@ -29,6 +29,23 @@ The format and semantics copy Blink's TestExpectations (chromium/src
 Files: `tests/oracle/Expectations.d/<suite>.txt` and `tests/oracle/NeverFix.d/<suite>.txt`, one
 file per suite so parallel agents do not conflict. A combined file (all suites in one file) is
 read the same way. NeverFix lines are `[ Skip ]` only.
+
+Sanitizer lines (p15-oracle-187) live in `tests/oracle/SanitizerExpectations.d/<suite>.txt`: Chromium's
+ASANExpectations and LeakExpectations (`third_party/blink/web_tests/ASANExpectations`), narrowed the way a
+pointer narrows a Failure. A sanitizer report is a Crash of its case with a stack key `<kind>-<hash12>`
+(kind asan, lsan or tsan; hash12 from scripts/cmux-next/crash_signature.py, ClusterFuzz's crash state), and
+a line names the one stack it expects:
+
+    p15-oracle-187 [ linux tsan ] daemon-ops/terminal-create@tsan-0123456789ab [ Pass Crash ]
+    p15-oracle-187 [ linux tsan ] daemon-ops/*@tsan-0123456789ab [ Crash ]    # a stack in shared code
+    p15-oracle-187 [ linux tsan ] daemon-ops/* [ Slow ]                        # TSan's slowdown
+
+Every sanitizer line carries the build tag (asan or tsan) of its stack's kind, so it never applies to a plain
+run. A stack line takes Crash, or Pass and Crash for a race that does not fire every run; a line with no stack
+takes only Skip or Slow, so no line hides a new stack. A Crash with stacks is expected when a case-level Crash
+line covers the case, or when every stack has a matching stack line; every other stack is in
+`uncovered_stacks` and fails the run. A `[ Crash ]` stack line whose stack did not fire in a passing run is an
+unexpected pass, which the stale-by-results lint counts.
 
 Usage:
     expectations.py lint [--root DIR] [--corpus DIR] [--results FILE ...] [--min-runs N] [--json]
@@ -62,6 +79,12 @@ PASS, FAILURE, CRASH, TIMEOUT, SKIP, SLOW = "Pass", "Failure", "Crash", "Timeout
 RESULTS = (PASS, FAILURE, CRASH, TIMEOUT, SKIP, SLOW)
 ACTUAL_RESULTS = (PASS, FAILURE, CRASH, TIMEOUT)
 SLOW_MULTIPLIER = 5
+
+EXPECTATIONS_KIND, NEVERFIX_KIND, SANITIZER_KIND = "expectations", "neverfix", "sanitizer"
+# A stack key: the crash_signature.py kind of the report and its hash12.
+STACK_RE = re.compile(r"^(?P<kind>asan|lsan|tsan)-[0-9a-f]{12}$")
+# The report kinds of each sanitizer build: Linux ASan runs LeakSanitizer in the same process.
+STACK_KINDS_BY_BUILD: dict[str, tuple[str, ...]] = {"asan": ("asan", "lsan"), "tsan": ("tsan",)}
 
 # Suite classes of p15-oracle section 3D. Only golden suites carry reviewed baselines and the budget.
 GOLDEN_SUITES = frozenset(
@@ -115,7 +138,7 @@ class RunConfig:
 class Entry:
     file: str
     lineno: int
-    kind: str  # "expectations" or "neverfix"
+    kind: str  # "expectations", "neverfix" or "sanitizer"
     bug: str | None
     tags: frozenset[str]
     suite: str
@@ -123,6 +146,11 @@ class Entry:
     step: str | None
     pointer: str | None
     results: frozenset[str]
+    stack: str | None = None  # sanitizer lines only: the stack key the line expects
+
+    @property
+    def build(self) -> str | None:
+        return next((t for t in self.tags if GROUP_OF_TAG[t] == "build"), None)
 
     @property
     def scope(self) -> int:
@@ -139,6 +167,8 @@ class Entry:
             text += f"/{self.step}"
         if self.pointer is not None:
             text += f"#{self.pointer}"
+        if self.stack is not None:
+            text += f"@{self.stack}"
         return text
 
     @property
@@ -287,6 +317,15 @@ def _parse_line(raw: str, file: str, lineno: int, kind: str) -> tuple[Entry | No
 
     name, _, pointer_text = test.partition("#")
     pointer = pointer_text if "#" in test else None
+    name, at, stack_text = name.partition("@")
+    stack = stack_text if at else None
+    if stack is not None:
+        if kind != SANITIZER_KIND:
+            return error("stack-file", f"{test}: a stack key belongs in SanitizerExpectations.d/<suite>.txt")
+        if pointer is not None:
+            return error("bad-target", f"{test}: a stack line takes no #/pointer")
+        if not STACK_RE.match(stack):
+            return error("bad-stack", f"{test}: {stack!r} is not a stack key <asan|lsan|tsan>-<12 hex digits>")
     parts = name.split("/")
     if len(parts) not in (2, 3):
         return error("bad-target", f"{test}: want suite/case[/step][#/json/pointer]")
@@ -313,6 +352,7 @@ def _parse_line(raw: str, file: str, lineno: int, kind: str) -> tuple[Entry | No
         step=step,
         pointer=pointer,
         results=frozenset(results),
+        stack=stack,
     )
     if len(entry.results) != len(results):
         return error("duplicate-result", f"{test}: a result appears twice")
@@ -328,9 +368,38 @@ def _parse_line(raw: str, file: str, lineno: int, kind: str) -> tuple[Entry | No
         )
     if entry.step is not None and SKIP in entry.results:
         return error("step-skip", f"{test}: a step cannot be skipped alone; skip the case")
-    if kind == "neverfix" and entry.results != {SKIP}:
+    if kind == NEVERFIX_KIND and entry.results != {SKIP}:
         return error("neverfix-skip", f"{test}: NeverFix lines are [ Skip ] only")
+    if kind == SANITIZER_KIND:
+        return _check_sanitizer(entry, test, error)
     return entry, None
+
+
+def _check_sanitizer(entry: Entry, test: str, error) -> tuple[Entry | None, Diagnostic | None]:
+    """A sanitizer line names its build and either one stack (Crash) or none (Skip or Slow)."""
+    build = entry.build
+    if build not in STACK_KINDS_BY_BUILD:
+        return error("sanitizer-build", f"{test}: a sanitizer line carries the asan or tsan tag of its build")
+    if entry.step is not None or entry.pointer is not None:
+        return error("sanitizer-target", f"{test}: a sanitizer line names a case or suite/*, not a step or pointer")
+    if entry.stack is None:
+        if entry.results not in ({SKIP}, {SLOW}):
+            return error(
+                "sanitizer-stack",
+                f"{test}: a sanitizer Crash names its stack (suite/case@kind-hash12); "
+                "a line with no stack takes only Skip or Slow",
+            )
+        return entry, None
+    kind = entry.stack.split("-", 1)[0]
+    if kind not in STACK_KINDS_BY_BUILD[build]:
+        return error("stack-build", f"{test}: a {kind} stack comes from a {_build_of_kind(kind)} build, not {build}")
+    if CRASH not in entry.results or not entry.results <= {PASS, CRASH}:
+        return error("sanitizer-results", f"{test}: a stack line takes [ Crash ] or [ Pass Crash ]")
+    return entry, None
+
+
+def _build_of_kind(kind: str) -> str:
+    return next(build for build, kinds in STACK_KINDS_BY_BUILD.items() if kind in kinds)
 
 
 def _close(tokens: Sequence[str], start: int) -> int | None:
@@ -351,11 +420,13 @@ class Expectations:
     diagnostics: list[Diagnostic]
 
     @classmethod
-    def load(cls, expectations: Iterable[Path] = (), neverfix: Iterable[Path] = ()) -> "Expectations":
+    def load(
+        cls, expectations: Iterable[Path] = (), neverfix: Iterable[Path] = (), sanitizer: Iterable[Path] = ()
+    ) -> "Expectations":
         """Each path is a `.d` directory of `<suite>.txt` files or one combined file."""
         entries: list[Entry] = []
         diags: list[Diagnostic] = []
-        for kind, paths in (("expectations", expectations), ("neverfix", neverfix)):
+        for kind, paths in ((EXPECTATIONS_KIND, expectations), (NEVERFIX_KIND, neverfix), (SANITIZER_KIND, sanitizer)):
             for path in paths:
                 for file, split in _files(Path(path)):
                     found, found_diags = parse_text(file.read_text(encoding="utf-8"), _rel(file), kind)
@@ -375,7 +446,7 @@ class Expectations:
 
     @classmethod
     def load_root(cls, root: Path = DEFAULT_ROOT) -> "Expectations":
-        return cls.load([root / "Expectations.d"], [root / "NeverFix.d"])
+        return cls.load([root / "Expectations.d"], [root / "NeverFix.d"], [root / "SanitizerExpectations.d"])
 
     def keys(self) -> list[str]:
         return sorted(f"{e.kind} {e.key}" for e in self.entries)
@@ -390,16 +461,22 @@ class Expectations:
         ]
 
     def resolve(self, suite: str, case: str, config: RunConfig, step: str | None = None) -> "Resolution":
-        """Case-level (or step-level) expectation; pointer lines never apply here."""
+        """Case-level (or step-level) expectation; pointer and stack lines never apply here.
+
+        A sanitizer line with no stack (Skip or Slow on its build) is a case-level line."""
         candidates = [
             e
             for e in self._matching(suite, case, config)
-            if e.kind == "expectations" and e.pointer is None and (e.step is None or e.step == step)
+            if _case_level(e) and (e.step is None or e.step == step)
         ]
         return Resolution.of(candidates)
 
+    def stack_lines(self, suite: str, case: str, config: RunConfig) -> list[Entry]:
+        """The sanitizer stack lines that apply to a run of the case."""
+        return [e for e in self._matching(suite, case, config) if e.kind == SANITIZER_KIND and e.stack is not None]
+
     def neverfix(self, suite: str, case: str, config: RunConfig) -> Entry | None:
-        hits = [e for e in self._matching(suite, case, config) if e.kind == "neverfix"]
+        hits = [e for e in self._matching(suite, case, config) if e.kind == NEVERFIX_KIND]
         return max(hits, key=_rank) if hits else None
 
     def should_run(self, suite: str, case: str, config: RunConfig) -> bool:
@@ -415,17 +492,26 @@ class Expectations:
             return Verdict(SKIPPED, actual.result, frozenset({SKIP}), False, (), (), {})
         case_level = self.resolve(suite, case, config, actual.step)
         lines: dict[str, str] = {}
+        stack_lines = self.stack_lines(suite, case, config)
         if actual.result in (CRASH, TIMEOUT):
             expected = actual.result in case_level.outcomes
             for e in case_level.lines:
                 lines[e.key] = "hit" if expected else "missed"
+            # A sanitizer Crash that no case-level line expects: each stack needs its own line, as each
+            # divergence of a Failure needs a covering one.
+            uncovered_stacks: tuple[str, ...] = ()
+            if actual.stacks and not expected:
+                uncovered_stacks = tuple(s for s in actual.stacks if not any(e.stack == s for e in stack_lines))
+                expected = not uncovered_stacks
+            for e in stack_lines:
+                lines[e.key] = "hit" if e.stack in actual.stacks else "shadowed"
             outcome = EXPECTED if expected else UNEXPECTED_FAILURE
             return Verdict(
-                outcome, actual.result, case_level.outcomes, case_level.flaky, (), (), lines
+                outcome, actual.result, case_level.outcomes, case_level.flaky, (), (), lines, uncovered_stacks
             )
 
         candidates = [
-            e for e in self._matching(suite, case, config) if e.kind == "expectations" and e.has_result
+            e for e in self._matching(suite, case, config) if e.kind == EXPECTATIONS_KIND and e.has_result
         ]
         divergences = list(actual.divergences)
         if actual.result == FAILURE and not divergences:
@@ -460,6 +546,16 @@ class Expectations:
             else:
                 lines[e.key] = "unexpected-pass"
                 unexpected_pass.append(e.key)
+        # No report came. A stack line that always fires is an unexpected pass in a passing run (the
+        # stale-by-results lint counts it); a Failure may have ended the case before the stack could fire.
+        for e in stack_lines:
+            if actual.result != PASS:
+                lines[e.key] = "shadowed"
+            elif PASS in e.outcomes:
+                lines[e.key] = "pass-ok"
+            else:
+                lines[e.key] = "unexpected-pass"
+                unexpected_pass.append(e.key)
         if uncovered:
             outcome = UNEXPECTED_FAILURE
         elif unexpected_pass and actual.result == PASS:
@@ -475,6 +571,13 @@ class Expectations:
             tuple(sorted(unexpected_pass)),
             lines,
         )
+
+
+def _case_level(e: Entry) -> bool:
+    """A line that resolves a whole case or step: an Expectations line, or a sanitizer line with no stack."""
+    if e.pointer is not None:
+        return False
+    return e.kind == EXPECTATIONS_KIND or (e.kind == SANITIZER_KIND and e.stack is None)
 
 
 def _files(path: Path) -> list[tuple[Path, bool]]:
@@ -545,10 +648,18 @@ class Actual:
     result: str
     divergences: tuple[Divergence, ...] = ()
     step: str | None = None  # the step a Crash or Timeout happened at
+    stacks: tuple[str, ...] = ()  # a sanitizer Crash: the stack key of each report, once each
 
     def __post_init__(self) -> None:
         if self.result not in ACTUAL_RESULTS:
             raise ValueError(f"actual result {self.result!r} is not one of {' '.join(ACTUAL_RESULTS)}")
+        if self.stacks and self.result != CRASH:
+            raise ValueError("stack keys come with a Crash")
+        bad = [s for s in self.stacks if not STACK_RE.match(s)]
+        if bad:
+            raise ValueError(f"not stack keys: {' '.join(bad)}")
+        if len(set(self.stacks)) != len(self.stacks):
+            raise ValueError("stack keys are listed once each")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -560,6 +671,7 @@ class Verdict:
     uncovered: tuple[Divergence, ...]
     unexpected_pass_lines: tuple[str, ...]
     lines: dict[str, str]  # line key -> hit | missed | shadowed | pass-ok | unexpected-pass
+    uncovered_stacks: tuple[str, ...] = ()  # stack keys of a sanitizer Crash that no line expects
 
     @property
     def fails_run(self) -> bool:
@@ -575,6 +687,7 @@ class Verdict:
             "uncovered": [dataclasses.asdict(d) for d in self.uncovered],
             "unexpected_pass_lines": list(self.unexpected_pass_lines),
             "lines": dict(sorted(self.lines.items())),
+            "uncovered_stacks": list(self.uncovered_stacks),
         }
 
 
@@ -594,7 +707,7 @@ def lint(
             diags.append(Diagnostic(e.file, e.lineno, "bug-id", f"{e.target}: every line names a task id or #issue"))
         elif not (TASK_ID_RE.match(e.bug) or ISSUE_RE.match(e.bug)):
             diags.append(Diagnostic(e.file, e.lineno, "bug-id", f"{e.bug!r} is neither a task id nor #issue"))
-        if e.kind == "expectations" and e.scope in (SCOPE_CASE, SCOPE_STEP) and e.outcomes == {FAILURE}:
+        if e.kind == EXPECTATIONS_KIND and e.scope in (SCOPE_CASE, SCOPE_STEP) and e.outcomes == {FAILURE}:
             diags.append(
                 Diagnostic(
                     e.file,
@@ -615,8 +728,8 @@ def lint(
 
 def _lint_overlaps(entries: list[Entry]) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
-    expectations = [e for e in entries if e.kind == "expectations"]
-    neverfix = [e for e in entries if e.kind == "neverfix"]
+    expectations = [e for e in entries if e.kind != NEVERFIX_KIND]
+    neverfix = [e for e in entries if e.kind == NEVERFIX_KIND]
     for e in expectations:
         skip = next(
             (
@@ -637,9 +750,11 @@ def _lint_overlaps(entries: list[Entry]) -> list[Diagnostic]:
                 )
             )
 
+    # A sanitizer line with no stack resolves with the Expectations lines (resolve), so it shares their group.
     by_target: dict[tuple, list[Entry]] = {}
     for e in entries:
-        by_target.setdefault((e.kind, e.suite, e.case, e.step, e.pointer), []).append(e)
+        group = EXPECTATIONS_KIND if _case_level(e) else e.kind
+        by_target.setdefault((group, e.suite, e.case, e.step, e.pointer, e.stack), []).append(e)
     for group in by_target.values():
         for index, a in enumerate(group):
             for b in group[index + 1 :]:
@@ -648,7 +763,7 @@ def _lint_overlaps(entries: list[Entry]) -> list[Diagnostic]:
                         Diagnostic(b.file, b.lineno, "duplicate", f"{b.target} duplicates {a.where}")
                     )
                 elif (
-                    a.kind == "expectations"
+                    a.kind != NEVERFIX_KIND
                     and a.has_result
                     and b.has_result
                     and _tags_compatible(a.tags, b.tags)
@@ -715,7 +830,7 @@ def _lint_budget(entries: list[Entry], corpus: Path) -> list[Diagnostic]:
     counted = sum(
         suite_cases.get(e.suite, 0) if e.scope == SCOPE_GLOB else 1
         for e in entries
-        if e.suite in GOLDEN_SUITES and e.outcomes != {PASS}
+        if e.suite in GOLDEN_SUITES and e.outcomes != {PASS} and e.kind != SANITIZER_KIND
     )
     limit = int(cases * GOLDEN_BUDGET)
     if counted <= limit:
@@ -744,7 +859,7 @@ def _lint_stale_results(entries: list[Entry], records: Iterable[dict], min_runs:
                 passed[key] = passed.get(key, 0) + 1
     diags: list[Diagnostic] = []
     for e in entries:
-        if e.kind != "expectations" or PASS in e.outcomes:
+        if e.kind == NEVERFIX_KIND or PASS in e.outcomes or (e.kind == SANITIZER_KIND and e.stack is None):
             continue
         runs = passed.get(e.key, 0)
         if runs >= min_runs and e.key not in hit:
@@ -1006,6 +1121,113 @@ def _selftest() -> int:
     crashes = [timeout.evaluate("t", "a", mac_app, Actual(CRASH)).to_json() for _ in range(3)]
     check("missed is not stale", _lint_stale_results(timeout.entries, crashes, 3) == [])
 
+    # 22. Sanitizer lines: a build tag, one stack per Crash line, only Skip or Slow without a stack.
+    def san(text: str) -> tuple[list[Entry], list[Diagnostic]]:
+        return parse(text, SANITIZER_KIND)
+
+    def san_codes(text: str) -> list[str]:
+        return [d.code for d in san(text)[1]]
+
+    race, lsan = "tsan-0123456789ab", "lsan-aaaaaaaaaaaa"
+    entries, diags = san(f"p15-oracle-187 [ linux tsan ] daemon-ops/a@{race} [ Pass Crash ] # flaky race")
+    check(
+        "sanitizer line",
+        not diags
+        and entries[0].stack == race
+        and entries[0].target == f"daemon-ops/a@{race}"
+        and entries[0].key == f"p15-oracle-187 [ linux tsan ] daemon-ops/a@{race} [ Pass Crash ]",
+    )
+    check(
+        "sanitizer line rules",
+        san_codes(f"p15-oracle-187 [ linux ] d/a@{race} [ Crash ]") == ["sanitizer-build"]
+        and san_codes(f"p15-oracle-187 [ asan ] d/a@{race} [ Crash ]") == ["stack-build"]
+        and san_codes(f"p15-oracle-187 [ asan ] d/a@{lsan} [ Crash ]") == []
+        and san_codes("p15-oracle-187 [ tsan ] d/a [ Crash ]") == ["sanitizer-stack"]
+        and san_codes("p15-oracle-187 [ tsan ] d/* [ Slow ]") == []
+        and san_codes("p15-oracle-187 [ tsan ] d/a [ Skip ]") == []
+        and san_codes(f"p15-oracle-187 [ tsan ] d/a@{race} [ Pass ]") == ["sanitizer-results"]
+        and san_codes(f"p15-oracle-187 [ tsan ] d/a@{race} [ Crash Timeout ]") == ["sanitizer-results"]
+        and san_codes(f"p15-oracle-187 [ tsan ] d/a/s1@{race} [ Crash ]") == ["sanitizer-target"]
+        and san_codes(f"p15-oracle-187 [ tsan ] d/a@{race}#/x [ Crash ]") == ["bad-target"]
+        and san_codes("p15-oracle-187 [ tsan ] d/a@tsan-xyz [ Crash ]") == ["bad-stack"]
+        and codes(f"p15-oracle-187 [ tsan ] d/a@{race} [ Crash ]") == ["stack-file"],
+    )
+    tsan = RunConfig(platform="linux", product="daemon", build="tsan")
+    other = "tsan-bbbbbbbbbbbb"
+    stacked = Expectations(
+        san(
+            f"p15-oracle-187 [ linux tsan ] d/a@{race} [ Crash ]\n"
+            f"p15-oracle-187 [ linux tsan ] d/*@{other} [ Pass Crash ]\n"
+            "p15-oracle-187 [ linux tsan ] d/* [ Slow ]\n"
+            "p15-oracle-187 [ linux tsan ] d/slow [ Skip ]"
+        )[0],
+        [],
+    )
+    v_known = stacked.evaluate("d", "a", tsan, Actual(CRASH, stacks=(race, other)))
+    v_new = stacked.evaluate("d", "a", tsan, Actual(CRASH, stacks=(race, "tsan-cccccccccccc")))
+    v_plain = stacked.evaluate("d", "a", linux_daemon, Actual(CRASH, stacks=(race,)))
+    v_gone = stacked.evaluate("d", "a", tsan, Actual(PASS))
+    v_glob = stacked.evaluate("d", "b", tsan, Actual(CRASH, stacks=(other,)))
+    check(
+        "stack verdicts",
+        v_known.outcome == EXPECTED
+        and set(v_known.lines.values()) == {"hit"}
+        and v_new.fails_run
+        and v_new.uncovered_stacks == ("tsan-cccccccccccc",)
+        and v_plain.fails_run
+        and v_plain.uncovered_stacks == (race,)
+        and v_gone.outcome == UNEXPECTED_PASS
+        and not v_gone.fails_run
+        and v_gone.unexpected_pass_lines == (f"p15-oracle-187 [ linux tsan ] d/a@{race} [ Crash ]",)
+        and v_glob.outcome == EXPECTED
+        and v_glob.to_json()["uncovered_stacks"] == [],
+    )
+    check(
+        "stackless sanitizer lines resolve the case",
+        stacked.settle_multiplier("d", "a", tsan) == 5
+        and stacked.settle_multiplier("d", "a", linux_daemon) == 1
+        and not stacked.should_run("d", "slow", tsan)
+        and stacked.should_run("d", "slow", linux_daemon)
+        and stacked.resolve("d", "a", tsan).outcomes == {PASS},
+    )
+    # A case-level Crash line still covers every stack; a Failure leaves a stack line shadowed, not stale.
+    case_crash = Expectations(
+        parse("p15-oracle-187 [ linux tsan ] d/a [ Crash ]")[0] + san(f"p15-oracle-187 [ linux tsan ] d/a@{race} [ Crash ]")[0],
+        [],
+    )
+    v_case = case_crash.evaluate("d", "a", tsan, Actual(CRASH, stacks=("tsan-cccccccccccc",)))
+    v_fail = stacked.evaluate("d", "a", tsan, Actual(FAILURE, (Divergence(None, "/x"),)))
+    check(
+        "case Crash covers every stack",
+        v_case.outcome == EXPECTED
+        and not v_case.uncovered_stacks
+        and v_fail.lines[f"p15-oracle-187 [ linux tsan ] d/a@{race} [ Crash ]"] == "shadowed",
+    )
+    refused_stacks = []
+    for bad_actual in ((PASS, (race,)), (CRASH, ("asan-1",)), (CRASH, (race, race))):
+        try:
+            Actual(bad_actual[0], stacks=bad_actual[1])
+        except ValueError:
+            refused_stacks.append(bad_actual[0])
+    check("stack keys validated", refused_stacks == [PASS, CRASH, CRASH])
+    # Lint: two stack lines of one target overlap; a stackless Skip overlaps an Expectations line on the
+    # same run; a Crash stack line that never fired in 3 passing runs is stale.
+    lint_san = Expectations(
+        san(
+            f"p15-oracle-187 [ tsan ] d/a@{race} [ Crash ]\n"
+            f"p15-oracle-187 [ linux tsan ] d/a@{race} [ Pass Crash ]\n"
+            "p15-oracle-187 [ linux tsan ] d/b [ Skip ]"
+        )[0]
+        + parse("p15-oracle-187 [ linux ] d/b [ Timeout ]")[0],
+        [],
+    )
+    check("sanitizer overlaps", sorted(d.code for d in lint(lint_san)) == ["overlap", "overlap"])
+    gone_runs = [stacked.evaluate("d", "a", tsan, Actual(PASS)).to_json() for _ in range(3)]
+    check(
+        "stale stack line",
+        [d.message.split(":")[0] for d in _lint_stale_results(stacked.entries, gone_runs, 3)] == [f"d/a@{race}"],
+    )
+
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         corpus = root / "corpus"
@@ -1071,6 +1293,18 @@ def _selftest() -> int:
             "stale results",
             [d.message.split(":")[0] for d in stale_results] == ["terminal/vt-00#/c"],
         )
+        # 23. load_root reads SanitizerExpectations.d, one file per suite as the other dirs.
+        sanitizer_dir = root / "SanitizerExpectations.d"
+        sanitizer_dir.mkdir()
+        (sanitizer_dir / "terminal.txt").write_text(f"p15-oracle-187 [ linux tsan ] terminal/vt-01@{race} [ Crash ]\n")
+        (sanitizer_dir / "cli.txt").write_text(f"p15-oracle-187 [ linux tsan ] terminal/vt-02@{race} [ Crash ]\n")
+        rooted = Expectations.load_root(root)
+        check(
+            "load_root reads sanitizer lines",
+            [e.kind for e in rooted.entries if e.stack] == [SANITIZER_KIND, SANITIZER_KIND]
+            and [d.code for d in rooted.diagnostics] == ["wrong-file"]
+            and rooted.evaluate("terminal", "vt-01", tsan, Actual(CRASH, stacks=(race,))).outcome == EXPECTED,
+        )
 
     for name in failures:
         print(f"FAIL {name}", file=sys.stderr)
@@ -1133,6 +1367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for e in exp._matching(suite, case, config)
                     if e.pointer is not None and (e.step is None or e.step == step)
                 ],
+                "stack_lines": [e.where for e in exp.stack_lines(suite, case, config)],
             },
             indent=2,
         )

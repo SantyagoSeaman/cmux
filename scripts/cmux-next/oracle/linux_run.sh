@@ -2,13 +2,17 @@
 # linux_run.sh: daemon-side oracle builds and suite runs on the Linux VM, every one through the
 # runnerd.py queue (p15-oracle-007, p15-oracle-024; spec plans/cmux-next/chrome-parity/p15-oracle.md 3F, 3G).
 #
-#   linux_run.sh build REF [--profile P] [--features F] [--mutant PATCH] [--leaf-rebuild] [--receipt FILE] [--fresh]
+#   linux_run.sh build REF [--profile P] [--features F] [--mutant PATCH] [--sanitizer address|thread] [--leaf-rebuild]
+#                      [--receipt FILE] [--fresh]
 #       Builds cmux-tui at REF. The last stdout line is the binary path.
 #       The build receipt (cmux-oracle-build-v1: sha, every gitlink, rustc, cold or warm, times, binary
 #       sha256) is build.json next to the binary, copied to FILE. --leaf-rebuild also times a rebuild
 #       after touching crates/cmux-tui/src/main.rs (task 201's incremental number). --mutant applies a seeded
 #       fault (tests/oracle/mutants/daemon/<name>.patch, p15-oracle-026) to the job worktree before cargo runs;
 #       the receipt's `mutant` names it, and mutant builds share one target dir per SHA, apart from the clean one.
+#       --sanitizer builds with the nightly that REF pins in cmux-tui/sanitize/rust-toolchain.toml, -Zsanitizer and
+#       -Zbuild-std for the host target (std is instrumented too), in its own target dir (target tag +asan or
+#       +tsan); the workspace toolchain and Cargo.lock stay as they are (p15-oracle-187).
 #   linux_run.sh run REF [--suite S] [--arm A] [--side L] [--profile P] [--features F] [--mutant PATCH] [--fresh] [-- ORACLE_RUN_ARGS...]
 #       Builds REF, then `oracle.py run --binary BIN --ref SHA` in the queue. The last stdout line is the
 #       run directory; the exit code is oracle.py's. --arm is NAME=old|new, launch-config or - (default).
@@ -20,6 +24,17 @@
 #       (exact SHAs, every gitlink), both run dirs and the comparison. Exit code is oracle.py diff's.
 #       --mutant builds the head side with the patch: `diff SHA SHA --mutant PATCH` is one mutant's catch check
 #       (exit 1, divergences, means the oracle caught it).
+#   linux_run.sh sanitize REF --sanitizer address|thread [--suite S] [--walks N] [--walk-length L] [--profile P]
+#                         [--features F] [--out DIR] [--fresh] [-- ORACLE_RUN_ARGS...]
+#       The sanitizer lane (p15-oracle-187). Builds REF with --sanitizer, then runs the daemon suites (default
+#       all) and, with --walks N, the walks of seeds 0..N-1 (gen_walks.py, p15-oracle-098; --walk-length moves,
+#       default 30) on it with `oracle.py run --build asan|tsan`. A wrapper gives every daemon process the
+#       runtime options (ASan with LSan in the same process, as Chromium's Linux ASan bots run, or TSan) and a
+#       report folder per case (CMUX_ORACLE_CASE_ID, which driver_daemon.py sets). sanitizer_results.py makes
+#       each report a Crash of its case with a stack key, judged by tests/oracle/SanitizerExpectations.d, and
+#       writes DIR/sanitize.json (cmux-oracle-sanitize-v1) and DIR/races.jsonl (MQ-races: one line per unique
+#       stack). DIR defaults to /tmp/oracle/runs/sanitize-<time>-<pid>; the last stdout line is DIR. Exit 0
+#       when no report, oracle red or infra error is unexpected, else 1.
 #   linux_run.sh status [--json] | gc [--budget-gb N]
 #
 # Each job is keyed (sha, suite, arm, profile) plus the content of this script and the oracle sources,
@@ -40,6 +55,9 @@ DEFAULT_FEATURES=oracle
 CARGO_JOBS=240
 BUILD_TIMEOUT=7200
 RUN_TIMEOUT=14400
+# A sanitized daemon runs 2-15x slower; Chromium scales its test timeouts the same way (base/test/test_timeouts.cc).
+SANITIZE_RUN_TIMEOUT=43200
+DEFAULT_WALK_LENGTH=30
 
 die() {
   echo "linux_run.sh: $*" >&2
@@ -80,12 +98,13 @@ run_key_paths() {
 # --- build ------------------------------------------------------------------------------
 
 cmd_build() {
-  local ref="" profile="$DEFAULT_PROFILE" features="$DEFAULT_FEATURES" leaf=0 receipt="" fresh=() mutant=""
+  local ref="" profile="$DEFAULT_PROFILE" features="$DEFAULT_FEATURES" leaf=0 receipt="" fresh=() mutant="" sanitizer=""
   while (($#)); do
     case "$1" in
       --profile) profile="${2:?--profile needs a value}"; shift 2 ;;
       --features) features="${2?--features needs a value}"; shift 2 ;;
       --mutant) mutant="${2:?--mutant needs a patch}"; shift 2 ;;
+      --sanitizer) sanitizer="${2:?--sanitizer needs address or thread}"; check_sanitizer "$sanitizer"; shift 2 ;;
       --leaf-rebuild) leaf=1; shift ;;
       --receipt) receipt="${2:?--receipt needs a file}"; shift 2 ;;
       --fresh) fresh=(--fresh); shift ;;
@@ -106,16 +125,37 @@ cmd_build() {
     tag="$tag+mutant"
     mutant_args=(--key-path "$mutant" --extra "mutant=$(basename "$mutant" .patch)")
   fi
+  # A sanitized build has its own target dir: its std, every crate and the binary differ from the plain build's.
+  local sanitizer_args=()
+  if [[ -n "$sanitizer" ]]; then
+    tag="$tag+$(sanitizer_build "$sanitizer")"
+    sanitizer_args=(--extra "sanitizer=$sanitizer")
+  fi
   binary="$(runnerd submit --sha "$sha" --suite build --profile "$profile" --target-cache --target-tag "${tag//,/+}" \
     --timeout "$BUILD_TIMEOUT" --key-path "$SELF" --extra "features=$features" --extra "leaf=$leaf" \
-    "${mutant_args[@]}" "${fresh[@]}" \
-    -- bash "$SELF" _build "$sha" "$profile" "$features" "$leaf" "${mutant:--}" | tail -n 1)"
+    "${mutant_args[@]}" "${sanitizer_args[@]}" "${fresh[@]}" \
+    -- bash "$SELF" _build "$sha" "$profile" "$features" "$leaf" "${mutant:--}" "${sanitizer:--}" | tail -n 1)"
   [[ -x "$binary" ]] || die "build of $sha gave no binary"
   if [[ -n "$receipt" ]]; then
     mkdir -p "$(dirname "$receipt")"
     cp "$(dirname "$binary")/build.json" "$receipt"
   fi
   echo "$binary"
+}
+
+check_sanitizer() {
+  case "$1" in
+    address | thread) ;;
+    *) die "--sanitizer $1: address or thread" ;;
+  esac
+}
+
+# sanitizer_build NAME: the expectations build tag of a sanitizer (address -> asan, thread -> tsan).
+sanitizer_build() {
+  case "$1" in
+    address) echo asan ;;
+    thread) echo tsan ;;
+  esac
 }
 
 profile_dir() {
@@ -134,9 +174,35 @@ elapsed_ms() {
   python3 -I -c 'import sys; print(round((float(sys.argv[2]) - float(sys.argv[1])) * 1000))' "$1" "$2"
 }
 
+# sanitized_cargo DIR TARGET SANITIZER: sets SANITIZED_CARGO (the cargo command), SANITIZED_ENV, SANITIZED_HOST
+# and SANITIZED_CHANNEL for a -Zsanitizer build of the cmux-tui workspace at DIR, built the way
+# cmux-tui/scripts/sanitize.sh builds its test lane (p10-stability-014): the nightly DIR pins in
+# sanitize/rust-toolchain.toml; std built with the sanitizer (-Zbuild-std; build scripts and proc macros stay
+# plain because --target is set); frame pointers for the runtime's unwinder; std's sources remapped to
+# /rustc/<hash>, so crash_signature.py drops their frames. Chromium: one instrumented build per sanitizer
+# (build/config/sanitizers/BUILD.gn).
+sanitized_cargo() {
+  local dir="$1" target="$2" sanitizer="$3" pin sysroot rustc_hash flags sep=$'\x1f'
+  pin="$dir/sanitize/rust-toolchain.toml"
+  [[ -f "$pin" ]] || die "no $pin at this SHA: the sanitizer build needs the nightly pin of p10-stability-014"
+  SANITIZED_CHANNEL="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$pin")"
+  [[ -n "$SANITIZED_CHANNEL" ]] || die "no channel in $pin"
+  rustup run "$SANITIZED_CHANNEL" rustc -V >/dev/null 2>&1 \
+    || die "toolchain $SANITIZED_CHANNEL is not installed (scripts/cmux-next/linux/setup-tools.sh)"
+  SANITIZED_HOST="$(rustup run "$SANITIZED_CHANNEL" rustc -vV | sed -n 's/^host: //p')"
+  rustc_hash="$(rustup run "$SANITIZED_CHANNEL" rustc -vV | sed -n 's/^commit-hash: //p')"
+  sysroot="$(rustup run "$SANITIZED_CHANNEL" rustc --print sysroot)"
+  [[ -d "$sysroot/lib/rustlib/src/rust/library" ]] || die "$SANITIZED_CHANNEL has no rust-src (-Zbuild-std needs it)"
+  # The encoded form (0x1f between flags) keeps a sysroot path with spaces whole.
+  flags="-Zsanitizer=$sanitizer${sep}-Cforce-frame-pointers=yes"
+  flags+="${sep}--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$rustc_hash"
+  SANITIZED_CARGO=(rustup run "$SANITIZED_CHANNEL" cargo)
+  SANITIZED_ENV=(CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$flags")
+}
+
 job_build() {
   in_job _build
-  local sha="$1" profile="$2" features="$3" leaf="$4" mutant="${5:--}"
+  local sha="$1" profile="$2" features="$3" leaf="$4" mutant="${5:--}" sanitizer="${6:--}"
   local target="${RUNNERD_TARGET_DIR:?_build needs runnerd --target-cache}"
   # runnerd removes its scratch dir when the job ends, a timeout or a recovery included.
   local JOB_WT="${RUNNERD_SCRATCH:?_build needs the runnerd scratch dir}/wt"
@@ -178,19 +244,31 @@ job_build() {
   esac
   local feature_args=()
   [[ -z "$features" ]] || feature_args=(--features "$features")
+  # The cargo command, its environment and the binary's folder; a sanitized build replaces all three.
+  local cargo=(cargo) cargo_env=(CARGO_TARGET_DIR="$target") target_args=() out_dir="$target" toolchain=""
+  local rustc=(rustc)
+  if [[ "$sanitizer" != - ]]; then
+    sanitized_cargo "$JOB_WT/cmux-tui" "$target" "$sanitizer"
+    cargo=("${SANITIZED_CARGO[@]}")
+    cargo_env=("${SANITIZED_ENV[@]}")
+    target_args=(-Zbuild-std --target "$SANITIZED_HOST")
+    out_dir="$target/$SANITIZED_HOST"
+    toolchain="$SANITIZED_CHANNEL"
+    rustc=(rustup run "$SANITIZED_CHANNEL" rustc)
+  fi
   local built state=cold t0 build_ms leaf_ms=""
-  built="$target/$(profile_dir "$profile")/cmux-tui"
+  built="$out_dir/$(profile_dir "$profile")/cmux-tui"
   [[ -e "$built" ]] && state=warm
   t0="$(now)"
-  (cd "$JOB_WT/cmux-tui" && CARGO_TARGET_DIR="$target" cargo build --locked --profile "$profile" \
-    "${feature_args[@]}" -p cmux-tui -j "$CARGO_JOBS") >&2
+  (cd "$JOB_WT/cmux-tui" && env "${cargo_env[@]}" "${cargo[@]}" build --locked --profile "$profile" \
+    "${feature_args[@]}" "${target_args[@]}" -p cmux-tui -j "$CARGO_JOBS") >&2
   build_ms="$(elapsed_ms "$t0" "$(now)")"
   echo "linux_run.sh: $state build of $sha in ${build_ms} ms" >&2
   if ((leaf)); then
     touch "$JOB_WT/cmux-tui/crates/cmux-tui/src/main.rs"
     t0="$(now)"
-    (cd "$JOB_WT/cmux-tui" && CARGO_TARGET_DIR="$target" cargo build --locked --profile "$profile" \
-      "${feature_args[@]}" -p cmux-tui -j "$CARGO_JOBS") >&2
+    (cd "$JOB_WT/cmux-tui" && env "${cargo_env[@]}" "${cargo[@]}" build --locked --profile "$profile" \
+      "${feature_args[@]}" "${target_args[@]}" -p cmux-tui -j "$CARGO_JOBS") >&2
     leaf_ms="$(elapsed_ms "$t0" "$(now)")"
     echo "linux_run.sh: leaf rebuild of $sha in ${leaf_ms} ms" >&2
   fi
@@ -200,11 +278,11 @@ job_build() {
   cp "$built" "$binary"
   git -C "$JOB_WT" ls-tree -r HEAD | awk '$2 == "commit" { print $4 "\t" $3 }' > "$RUNNERD_OUT/gitlinks.tsv"
   python3 -I - "$RUNNERD_OUT/build.json" "$sha" "$gitlink" "$profile" "$features" "$target" "$state" \
-    "$build_ms" "$leaf_ms" "$binary" "$RUNNERD_OUT/gitlinks.tsv" "$(cd "$JOB_WT/cmux-tui" && rustc --version)" \
-    "$mutant_copy" "$mutant_json" <<'PY'
+    "$build_ms" "$leaf_ms" "$binary" "$RUNNERD_OUT/gitlinks.tsv" "$(cd "$JOB_WT/cmux-tui" && "${rustc[@]}" --version)" \
+    "$mutant_copy" "$mutant_json" "${sanitizer#-}" "$toolchain" <<'PY'
 import hashlib, json, os, platform, sys
 (out, sha, gitlink, profile, features, target_dir, state, build_ms, leaf_ms, binary, gitlinks,
- rustc, mutant, mutant_json) = sys.argv[1:]
+ rustc, mutant, mutant_json, sanitizer, toolchain) = sys.argv[1:]
 def sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -236,6 +314,8 @@ receipt = {
     "binary": binary,
     "binarySha256": sha256(binary),
     "mutant": mutant_record,
+    "sanitizer": sanitizer or None,
+    "toolchain": toolchain or None,
 }
 with open(out, "w", encoding="utf-8") as handle:
     json.dump(receipt, handle, indent=2, sort_keys=True)
@@ -407,6 +487,146 @@ PY
   return "$status"
 }
 
+# --- sanitize ---------------------------------------------------------------------------
+
+cmd_sanitize() {
+  local sanitizer="" walks=0 length="$DEFAULT_WALK_LENGTH" rest=()
+  while (($#)); do
+    case "$1" in
+      --sanitizer) sanitizer="${2:?--sanitizer needs address or thread}"; shift 2 ;;
+      --walks) walks="${2:?--walks needs a count}"; shift 2 ;;
+      --walk-length) length="${2:?--walk-length needs a count}"; shift 2 ;;
+      --) rest+=("$@"); break ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  [[ -n "$sanitizer" ]] || die "sanitize needs --sanitizer address|thread"
+  check_sanitizer "$sanitizer"
+  [[ "$walks" =~ ^[0-9]+$ && "$length" =~ ^[1-9][0-9]*$ ]] || die "--walks takes 0 or more, --walk-length 1 or more"
+  parse_run_options "${rest[@]}"
+  ((${#OPT_REFS[@]} == 1)) || die "sanitize needs one REF"
+  [[ -z "$OPT_SIDE$OPT_MUTANT" && "$OPT_ARM" == - ]] \
+    || die "sanitize takes no --side, --mutant or --arm (one build on the default arm)"
+  local arg
+  for arg in "${OPT_PASS[@]}"; do
+    case "$arg" in
+      --build | --build=* | --corpus | --corpus=* | --expectations-root | --expectations-root=*)
+        die "$arg: set by linux_run.sh sanitize" ;;
+    esac
+  done
+  if ((walks)) && [[ ! -f "$HERE/gen_walks.py" ]]; then
+    die "--walks needs scripts/cmux-next/oracle/gen_walks.py (p15-oracle-098)"
+  fi
+  local sha build out binary receipt_dir
+  sha="$(resolve_sha "${OPT_REFS[0]}")"
+  build="$(sanitizer_build "$sanitizer")"
+  out="${OPT_OUT:-/tmp/oracle/runs/sanitize-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+  case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+  case "$out/" in "$REPO"/*) die "--out $out: run output stays outside the checkout" ;; esac
+  mkdir -p "$out"
+  rm -f "$out"/{sanitize.json,races.jsonl,verdicts.jsonl,build.json}
+  binary="$(cmd_build "$sha" --profile "$OPT_PROFILE" --features "$OPT_FEATURES" --sanitizer "$sanitizer" \
+    --receipt "$out/build.json" | tail -n 1)"
+  [[ -x "$binary" ]] || die "sanitizer build of $sha gave no binary"
+
+  local key_args=() extra_args=() code=0
+  mapfile -t key_args < <(run_key_paths)
+  for arg in "${OPT_PASS[@]}"; do
+    extra_args+=(--extra "arg=$arg")
+  done
+  receipt_dir="$(runnerd submit --sha "$sha" --suite "$OPT_SUITE" --profile "$OPT_PROFILE" \
+    --timeout "$SANITIZE_RUN_TIMEOUT" --hold "$binary" "${key_args[@]}" --extra "binary=$binary" \
+    --extra "sanitizer=$sanitizer" --extra "walks=$walks" --extra "walk-length=$length" "${extra_args[@]}" \
+    "${OPT_FRESH[@]}" -- bash "$SELF" _sanitize "$sha" "$binary" "$OPT_SUITE" "$sanitizer" "$walks" "$length" \
+    -- "${OPT_PASS[@]}" | tail -n 1)" || code=$?
+  [[ -f "$receipt_dir/sanitize.json" ]] || die "sanitizer run of $sha wrote no receipt (exit $code)"
+  cp "$receipt_dir/sanitize.json" "$receipt_dir/races.jsonl" "$out/"
+  [[ ! -f "$receipt_dir/verdicts.jsonl" ]] || cp "$receipt_dir/verdicts.jsonl" "$out/"
+  echo "linux_run.sh: $build receipt $out/sanitize.json, $(wc -l <"$out/races.jsonl" | tr -d ' ') unique stacks" \
+    "in $out/races.jsonl (run $receipt_dir/run)" >&2
+  echo "$out"
+  return "$code"
+}
+
+# The daemon wrapper of a sanitizer run. The case environment is built from nothing (hermetic_env.py), so the
+# runtime options cannot come from the caller; the wrapper sets them and execs the binary (same pid, so the
+# driver's process proof holds). Each process writes report.<pid> under its case (CMUX_ORACLE_CASE_ID), and a
+# process outside a case under _unattributed. Options as cmux-tui/scripts/sanitize.sh and Chromium's
+# build/sanitizers/sanitizer_options.cc: every report through log_path; ASan with LSan in one process on Linux;
+# TSan reports every race and lets the case go on (halt_on_error=0), and its exit code stays the daemon's own,
+# so a race is judged by its stack, not as the driver's crash. The single quotes keep values whole; case ids and
+# runnerd paths hold none.
+write_sanitizer_wrapper() {
+  local wrapper="$1" binary="$2" reports="$3" sanitizer="$4" symbolizer="" opts candidate
+  # The case PATH has no LLVM folder, so the runtime gets the symbolizer's absolute path.
+  for candidate in llvm-symbolizer /usr/lib/llvm-*/bin/llvm-symbolizer; do
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+    if [[ -n "$candidate" && "$candidate" != *"'"* ]]; then
+      symbolizer="$candidate"
+      break
+    fi
+  done
+  opts="symbolize=1:stack_trace_format='    #%n %p %F %L'"
+  if [[ -n "$symbolizer" ]]; then
+    opts+=":external_symbolizer_path='$symbolizer'"
+  else
+    opts+=":allow_addr2line=1"
+  fi
+  local var
+  case "$sanitizer" in
+    address) var="ASAN_OPTIONS"; opts+=":detect_leaks=1" ;;
+    thread) var="TSAN_OPTIONS"; opts+=":halt_on_error=0:exitcode=0:report_thread_leaks=0:second_deadlock_stack=1:history_size=7" ;;
+  esac
+  mkdir -p "$(dirname "$wrapper")" "$reports/_unattributed"
+  cat >"$wrapper" <<EOF
+#!/bin/sh
+# linux_run.sh sanitize: $sanitizer runtime options and a report folder per case, then the sanitized daemon.
+dir='$reports'/"\${CMUX_ORACLE_CASE_ID:-_unattributed}"
+mkdir -p "\$dir"
+export $var="log_path='\$dir/report':$opts"
+export LSAN_OPTIONS="log_path='\$dir/report':$opts"
+exec '$binary' "\$@"
+EOF
+  chmod +x "$wrapper"
+}
+
+job_sanitize() {
+  in_job _sanitize
+  local sha="$1" binary="$2" suite="$3" sanitizer="$4" walks="$5" length="$6"
+  shift 6
+  [[ "${1:-}" == "--" ]] && shift
+  local build reports="$RUNNERD_OUT/reports" wrapper="$RUNNERD_OUT/bin/cmux-tui" root="$REPO/tests/oracle"
+  build="$(sanitizer_build "$sanitizer")"
+  write_sanitizer_wrapper "$wrapper" "$binary" "$reports" "$sanitizer"
+  local suite_args=(--suite "$suite") corpus_args=()
+  if ((walks)); then
+    # The walks are generated, not committed: a scratch copy of the corpus and the expectation dirs gets
+    # seeds 0..N-1, and gen_walks.py writes their known-failure block into the copy's walks.txt.
+    root="${RUNNERD_SCRATCH:?_sanitize needs the runnerd scratch dir}/oracle"
+    mkdir -p "$root"
+    local dir
+    for dir in corpus Expectations.d NeverFix.d SanitizerExpectations.d; do
+      [[ ! -d "$REPO/tests/oracle/$dir" ]] || cp -R "$REPO/tests/oracle/$dir" "$root/$dir"
+    done
+    mkdir -p "$root/Expectations.d"
+    python3 -I "$HERE/gen_walks.py" --out "$root/corpus/walks" --corpus "$root/corpus" --seeds "0:$walks" \
+      --length "$length" --expectations "$root/Expectations.d/walks.txt" >&2
+    [[ "$suite" == all ]] || suite_args+=(--suite walks)
+    corpus_args=(--corpus "$root/corpus" --expectations-root "$root")
+  fi
+  local code=0
+  python3 -I "$HERE/oracle.py" run "${suite_args[@]}" --build "$build" --binary "$wrapper" --ref "$sha" \
+    --out "$RUNNERD_OUT/run" "${corpus_args[@]}" "$@" >&2 || code=$?
+  [[ -f "$RUNNERD_OUT/run/receipt.json" ]] || exit "$((code == 0 ? 1 : code))"
+  local status=0
+  python3 -I "$HERE/sanitizer_results.py" daemon --run "$RUNNERD_OUT/run" --reports "$reports" --build "$build" \
+    --out "$RUNNERD_OUT/sanitize.json" --races "$RUNNERD_OUT/races.jsonl" --verdicts "$RUNNERD_OUT/verdicts.jsonl" \
+    --build-receipt "$(dirname "$binary")/build.json" --oracle-exit "$code" --root "$root" >&2 || status=$?
+  [[ -f "$RUNNERD_OUT/sanitize.json" ]] || exit "$((status == 0 ? 1 : status))"
+  echo "$RUNNERD_OUT"
+  exit "$status"
+}
+
 # --- main -------------------------------------------------------------------------------
 
 main() {
@@ -418,9 +638,11 @@ main() {
     build) cmd_build "$@" ;;
     run) cmd_run "$@" ;;
     diff) cmd_diff "$@" ;;
+    sanitize) cmd_sanitize "$@" ;;
     status | gc) runnerd "$command" "$@" ;;
     _build) job_build "$@" ;;
     _run) job_run "$@" ;;
+    _sanitize) job_sanitize "$@" ;;
     *) sed -n '2,/^#$/p' "$SELF" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 }

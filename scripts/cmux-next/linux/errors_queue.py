@@ -27,6 +27,12 @@ kind: phase setup missing build build-test package test incremental; status: pas
 `setup` steps (resolve, plan, dump-package, test-product link) have no target; a failed one is a red like a target.
 `detail` of a blocked step names the step that blocked it.
 
+Sanitizer runs (--sanitize, p15-oracle-187): the reports of a test target (meta `sanitizer_reports`/<case>/ and
+its log) are one Crash of the target with a stack key per report (sanitizer_results.py), judged by its
+Expectations and SanitizerExpectations.d lines. Under ASan the first report aborts the test process (Swift
+builds no -fsanitize-recover), so the target's failed tests are that Crash's, not judged one by one; TSan
+keeps the exit code, so its failed tests are still judged. The queue gets one MQ-races line per unique stack.
+
 Reds besides failed builds and tests: a target blocked by a dependency whose failure a line expects (or
 that a Skip line names) is a red unless it has its own line, so one line on a root cannot quietly take
 its dependents out of the tier; a test target that ran without one parsed test result; a failed or
@@ -52,6 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "cmux-next" / "oracle"))
 
 import expectations as oracle_exp  # noqa: E402  (path set above; -I drops the script dir)
+import sanitizer_results  # noqa: E402  (same dir as expectations.py)
 
 CLUSTER_MAX_LINES = 400
 LINUX_SHARE_BUDGET = 0.05
@@ -477,6 +484,22 @@ def sanitizer_reports(text: str, prefixes: Sequence[str]) -> list[str]:
     return list(found)
 
 
+def target_reports(case: str, log: str, reports_root: str) -> tuple[list[sanitizer_results.Report], list[str]]:
+    """A test target's keyed sanitizer reports (its report folder, then its log) and the SUMMARY lines of its log;
+    a report whose stack no parser reads has a SUMMARY line and no key."""
+    keyed: list[sanitizer_results.Report] = []
+    if reports_root:
+        keyed.extend(sanitizer_results.reports_in(Path(reports_root) / case))
+    text = ""
+    if log:
+        try:
+            text = Path(log).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+    keyed.extend(sanitizer_results.reports_from_text(text, log))
+    return keyed, [line for line in text.splitlines() if SANITIZER_RE.match(ANSI_RE.sub("", line).strip())]
+
+
 def linux_only(exp: oracle_exp.Expectations) -> oracle_exp.Expectations:
     return oracle_exp.Expectations([e for e in exp.entries if "linux" in e.tags], list(exp.diagnostics))
 
@@ -561,7 +584,9 @@ def build_receipt(
     phases: dict[str, float] = {}
     incremental: dict | None = None
     failed_logs: list[tuple[str, Path]] = []
-    sanitizer_logs: list[tuple[str, Path]] = []
+    sanitize = meta.get("sanitize") or ""
+    stacks: dict[str, sanitizer_results.Stack] = {}  # MQ-races: one entry per unique stack key
+    unkeyed: list[tuple[str, str]] = []  # (target, SUMMARY line) of reports without a parsed stack
 
     def state(name: str) -> CaseState:
         if name not in cases:
@@ -600,8 +625,6 @@ def build_receipt(
                 s.tests = parse_xunit(Path(r.xunit), r.case if suite == "swift-tier" else "")
         if r.status in ("fail", "timeout") and r.log and r.kind != "test":
             failed_logs.append((r.case, Path(r.log)))
-        if r.kind == "test" and r.log and meta.get("sanitize"):
-            sanitizer_logs.append((r.case, Path(r.log)))
 
     unexpected: list[dict] = []
     if meta.get("checkout_resolved_unchanged") is False:
@@ -650,11 +673,32 @@ def build_receipt(
                 seconds=round(s.seconds, 2),
             )
             bad: list[dict] = []
-            for t in failed:
+            reported = False
+            if sanitize and s.run != "skip":
+                keyed, summaries = target_reports(name, s.log, meta.get("sanitizer_reports", ""))
+                reported = bool(keyed or summaries)
+                if keyed:
+                    actual = sanitizer_results.crash_of(keyed)
+                    sanitizer_results.record(stacks, f"{suite}/{name}", keyed, sanitizer_results.covering_lines(
+                        exp, suite, name, config, actual.stacks))
+                    row["stacks"] = list(actual.stacks)
+                elif summaries:
+                    actual = oracle_exp.Actual(oracle_exp.CRASH)
+                    unkeyed.extend((name, line) for line in summaries)
+                if reported and not judge(name, actual, "sanitizer report", " ".join(actual.stacks) or summaries[0]):
+                    bad.append({"step": None, "message": f"sanitizer report: {' '.join(actual.stacks) or summaries[0]}"})
+            # ASan stops the test process at its first report: the target's failed tests are that Crash.
+            judge_tests = not (reported and sanitize == "address")
+            for t in failed if judge_tests else ():
                 actual = oracle_exp.Actual(oracle_exp.FAILURE, (oracle_exp.Divergence(t.step, None),))
                 if not judge(name, actual, "test", t.message):
                     bad.append({"step": t.step, "message": t.message})
-            if s.run == "timeout":
+            # The sanitizer Crash is the whole result of a target that passed (TSan keeps the exit code) or
+            # whose process ASan stopped; a TSan target that exited badly is judged as any other below.
+            sanitizer_only = reported and (s.run == "pass" or not judge_tests)
+            if sanitizer_only:
+                row["result"] = oracle_exp.CRASH
+            elif s.run == "timeout":
                 if not judge(name, oracle_exp.Actual(oracle_exp.TIMEOUT), "test run"):
                     bad.append({"step": None, "message": "test run timed out"})
             elif s.run == "fail" and not failed:
@@ -753,14 +797,12 @@ def build_receipt(
             {"id": f"{suite}:{case}:target", "kind": "target", "suite": suite, "target": case, "messages": loose_by_case[case]}
         )
     queue.extend(test_queue)
-    for case, log in sanitizer_logs:
-        try:
-            reports = sanitizer_reports(log.read_text(encoding="utf-8", errors="replace"), prefixes)
-        except OSError:
-            reports = []
-        for report in reports:
-            digest = hashlib.sha1(report.encode()).hexdigest()[:10]
-            queue.append({"id": f"{suite}:{case}:san:{digest}", "kind": "sanitizer", "suite": suite, "target": case, "report": report})
+    queue.extend(sanitizer_results.race_queue(stacks, suite=suite, build=config.build or "", sha=meta.get("sha", "")))
+    for case, report in dict.fromkeys(
+        (case, summary) for case, line in unkeyed for summary in sanitizer_reports(line, prefixes)
+    ):
+        digest = hashlib.sha1(report.encode()).hexdigest()[:10]
+        queue.append({"id": f"{suite}:{case}:san:{digest}", "kind": "sanitizer", "suite": suite, "target": case, "report": report})
 
     def names(kind: str, status: str) -> list[str]:
         return [n for n in order if cases[n].kind == kind and cases[n].build == status]
@@ -777,6 +819,10 @@ def build_receipt(
         "toolchain": meta.get("toolchain", ""),
         "platform": "linux",
         "sanitize": meta.get("sanitize") or None,
+        "sanitizer_stacks": {
+            "unique": len(stacks),
+            "unexpected": sorted(k for k, s in stacks.items() if not all(s.cases.values())),
+        },
         "resolved_file": meta.get("resolved_file", ""),
         "checkout_resolved_unchanged": meta.get("checkout_resolved_unchanged"),
         "started_at": meta.get("started_at", ""),
@@ -833,10 +879,14 @@ def build_receipt(
 
 
 def linux_share(exp: oracle_exp.Expectations, suite: str, case: str, config: oracle_exp.RunConfig, tests: int) -> float:
-    """Share of a test target's tests a `[ linux ]` line marks non-Pass; a whole-case line marks all."""
+    """Share of a test target's tests a `[ linux ]` line marks non-Pass; a whole-case line marks all.
+
+    SanitizerExpectations lines name a stack or a sanitizer's Skip and Slow, not the Linux port of a test."""
     steps: set[str] = set()
     for e in exp.entries:
         if e.suite != suite or e.case not in (case, "*") or not e.matches(config):
+            continue
+        if e.kind == oracle_exp.SANITIZER_KIND:
             continue
         if e.results <= {oracle_exp.PASS, oracle_exp.SLOW}:
             continue
@@ -1164,7 +1214,57 @@ def _selftest() -> int:
         check("a whole-target line counts as 100 % [ linux ]", e_receipt["linux_share_over_budget"][0]["linux_share"] == 1.0)
         n_receipt, _ = build_receipt(san, {"suite": "swift-tier"}, repo, [], oracle_exp.Expectations(tsan_exp, []))
         check("the tsan line does not excuse a plain run", not n_receipt["ok"])
-        w_receipt, _ = build_receipt(green, {"suite": "swift-shared", "checkout_resolved_unchanged": False}, repo, [], oracle_exp.Expectations([], []))
+
+        # Keyed reports (p15-oracle-187): a stack per report, one queue line per unique stack, judged by
+        # SanitizerExpectations lines; TSan keeps a passing target's exit code, ASan's report is its failed tests.
+        reports_root = tmp / "sanitizer-reports"
+        for target in ("T", "U"):
+            (reports_root / target).mkdir(parents=True)
+            (reports_root / target / "report.1").write_text(sanitizer_results.TSAN_REPORT)
+        race = sanitizer_results.reports_from_text(sanitizer_results.TSAN_REPORT)[0].key
+        clean_log = tmp / "clean.log"
+        clean_log.write_text("Test Suite 'All tests' passed\n")
+        xunit_pass = tmp / "pass.xml"
+        xunit_pass.write_text('<testsuites><testsuite><testcase classname="T.S" name="ok()"/></testsuite></testsuites>')
+        keyed = [
+            LedgerRecord("swift-tier", name, kind, "pass", 0, 1, log, xunit)
+            for name in ("T", "U")
+            for kind, log, xunit in (("build-test", "", ""), ("test", str(clean_log), str(xunit_pass)))
+        ]
+        meta = {"suite": "swift-tier", "sanitize": "thread", "sanitizer_reports": str(reports_root)}
+        k_receipt, k_queue = build_receipt(keyed, meta, repo, [str(repo)], oracle_exp.Expectations([], []))
+        races = [q for q in k_queue if q.get("queue") == "MQ-races"]
+        check("a keyed race is red on a passing target", not k_receipt["ok"]
+              and k_receipt["cases"]["T"]["stacks"] == [race] and k_receipt["cases"]["T"]["result"] == "Crash")
+        check("one MQ-races line per unique stack", len(races) == 1 and races[0]["key"] == race
+              and races[0]["cases"] == ["swift-tier/T", "swift-tier/U"] and not races[0]["expected"]
+              and k_receipt["sanitizer_stacks"] == {"unique": 1, "unexpected": [race]})
+        stack_exp, _ = oracle_exp.parse_text(f"p15-oracle-187 [ linux tsan ] swift-tier/*@{race} [ Pass Crash ]\n",
+                                             "swift-tier.txt", oracle_exp.SANITIZER_KIND)
+        x_receipt, x_queue = build_receipt(keyed, meta, repo, [str(repo)], oracle_exp.Expectations(stack_exp, []))
+        check("a stack line expects its race", x_receipt["ok"]
+              and [q["expected"] for q in x_queue if q.get("queue") == "MQ-races"] == [True])
+        p_receipt, _ = build_receipt(keyed, {**meta, "sanitize": ""}, repo, [str(repo)], oracle_exp.Expectations([], []))
+        check("a plain run reads no reports", p_receipt["ok"])
+        asan_root = tmp / "asan-reports"
+        (asan_root / "T").mkdir(parents=True)
+        (asan_root / "T" / "report.2").write_text(sanitizer_results.ASAN_REPORT)
+        uaf = sanitizer_results.reports_from_text(sanitizer_results.ASAN_REPORT)[0].key
+        xunit_fail = tmp / "fail.xml"
+        xunit_fail.write_text('<testsuites><testsuite><testcase classname="T.S" name="t()">'
+                              '<failure message="exited with signal 6"/></testcase></testsuite></testsuites>')
+        aborted = [LedgerRecord("swift-tier", "T", "build-test", "pass", 0, 1, "", ""),
+                   LedgerRecord("swift-tier", "T", "test", "fail", 1, 1, str(clean_log), str(xunit_fail))]
+        asan_meta = {"suite": "swift-tier", "sanitize": "address", "sanitizer_reports": str(asan_root)}
+        uaf_exp, _ = oracle_exp.parse_text(f"p15-oracle-187 [ linux asan ] swift-tier/T@{uaf} [ Crash ]\n",
+                                           "swift-tier.txt", oracle_exp.SANITIZER_KIND)
+        a_receipt, _ = build_receipt(aborted, asan_meta, repo, [], oracle_exp.Expectations(uaf_exp, []))
+        check("an ASan report is the aborted target's result", a_receipt["ok"] and a_receipt["cases"]["T"]["result"] == "Crash")
+        t_receipt, _ = build_receipt(aborted, {**asan_meta, "sanitizer_reports": str(tmp / "no-reports")}, repo, [],
+                                     oracle_exp.Expectations(uaf_exp, []))
+        check("without a report a failed test stays a failure", not t_receipt["ok"]
+              and [u["what"] for u in t_receipt["unexpected"]] == ["test"])
+        w_receipt, _ =build_receipt(green, {"suite": "swift-shared", "checkout_resolved_unchanged": False}, repo, [], oracle_exp.Expectations([], []))
         check("a written checkout Package.resolved fails the run", not w_receipt["ok"])
 
         dep_log = tmp / "dep.log"

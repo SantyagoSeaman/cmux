@@ -63,7 +63,14 @@
 #                               time `swift build --target T`; a failed build,
 #                               a T that is not a planned target, or more than
 #                               30 s fails the run
-#   --sanitize thread|address   build and test with the sanitizer
+#   --sanitize thread|address   build and test with the sanitizer, in its own
+#                               scratch (build-<sanitizer>). Each test target's
+#                               reports go to <out>/sanitizer-reports/<target>/;
+#                               a report is a Crash of its target with a stack
+#                               key (crash_signature.py), judged by
+#                               tests/oracle/SanitizerExpectations.d, and the
+#                               queue has one MQ-races line per unique stack
+#                               (p15-oracle-187)
 #   --jobs N                    swift build -j (default 240)
 #   --workers N                 swift test --num-workers (default 200)
 #   --packages-at-once N        shared packages built at once (default 6)
@@ -411,13 +418,35 @@ swift_flags=(-j "$jobs")
 [[ -n "$sanitize" ]] && swift_flags+=(--sanitize "$sanitize")
 phase sync "$t_sync"
 
+# Sanitizer runtime options of a test step (p15-oracle-187), as cmux-tui/scripts/sanitize.sh and Chromium's
+# build/sanitizers/sanitizer_options.cc set them: every report to a file under the target's folder, because
+# `swift test --parallel` shows the output of failed tests only; ASan with LSan in one process; TSan reports every
+# race and keeps the test's exit code, so a race is judged by its stack (errors_queue.py), not as a test failure.
+reports_root="$out/sanitizer-reports"
+symbolizer="$(dirname "$(command -v "$swift_bin")")/llvm-symbolizer"
+[[ -x "$symbolizer" ]] || symbolizer="$(command -v llvm-symbolizer 2>/dev/null || true)"
+sanitizer_env=()
+# set_sanitizer_env CASE: sanitizer_env gets the runtime options for CASE's test step (none without --sanitize).
+set_sanitizer_env() {
+  sanitizer_env=()
+  [[ -n "$sanitize" ]] || return 0
+  local dir="$reports_root/$1" opts="symbolize=1"
+  mkdir -p "$dir"
+  [[ -z "$symbolizer" || "$symbolizer" == *"'"* ]] || opts+=":external_symbolizer_path='$symbolizer'"
+  case "$sanitize" in
+    address) sanitizer_env=("ASAN_OPTIONS=log_path='$dir/report':$opts:detect_leaks=1" "LSAN_OPTIONS=log_path='$dir/report':$opts") ;;
+    thread) sanitizer_env=("TSAN_OPTIONS=log_path='$dir/report':$opts:halt_on_error=0:exitcode=0:report_thread_leaks=0:second_deadlock_stack=1:history_size=7") ;;
+  esac
+}
+
 finish() {
   local unchanged=1 rc=0
   checkout_unchanged || unchanged=0
   "${queue_py[@]}" receipt --ledger "$ledger" --receipt "$receipt" --errors-queue "$errors_queue" \
     --repo "$repo_root" --strip "$src" --strip "$scratch_root" \
     --meta "suite=$suite" --meta "runner=$suite.sh" --meta "sha=$sha" --meta "dirty=$dirty" \
-    --meta "toolchain=$toolchain" --meta "sanitize=$sanitize" --meta "started_at=$started" \
+    --meta "toolchain=$toolchain" --meta "sanitize=$sanitize" --meta "sanitizer_reports=$reports_root" \
+    --meta "started_at=$started" \
     --meta "jobs=$jobs" --meta "workers=$workers" --meta "resolved_file=$resolved_file" \
     --meta "checkout_resolved_unchanged=$unchanged" || rc=$?
   echo "logs: $out"
@@ -470,7 +499,8 @@ run_package() {
   t="$EPOCHREALTIME"
   rc=0
   log="$out/logs/$name.test.log"
-  logged "$log" "$test_timeout" "$swift_bin" test --package-path "$src/$pkg_rel" --scratch-path "$pkg_build" \
+  set_sanitizer_env "$name"
+  logged "$log" "$test_timeout" env ${sanitizer_env[@]+"${sanitizer_env[@]}"} "$swift_bin" test --package-path "$src/$pkg_rel" --scratch-path "$pkg_build" \
     --skip-build "${swift_flags[@]}" --parallel --num-workers "$workers" --xunit-output "$out/xunit/$name.xml" || rc=$?
   record "$name" test "$(status_of "$rc")" "$rc" "$(since "$t")" "$log" "$out/xunit/$name.xml"
 }
@@ -677,7 +707,8 @@ for name in "${test_targets[@]}"; do
   [[ "${state[$name]:-}" == pass ]] || continue
   t="$EPOCHREALTIME"
   rc=0
-  logged "$out/logs/$name.test.log" "$test_timeout" "$swift_bin" test "${pkg_flags[@]}" --skip-build "${swift_flags[@]}" \
+  set_sanitizer_env "$name"
+  logged "$out/logs/$name.test.log" "$test_timeout" env ${sanitizer_env[@]+"${sanitizer_env[@]}"} "$swift_bin" test "${pkg_flags[@]}" --skip-build "${swift_flags[@]}" \
     --parallel --num-workers "$workers" --filter "^$name\\." --xunit-output "$out/xunit/$name.xml" || rc=$?
   record "$name" test "$(status_of "$rc")" "$rc" "$(since "$t")" "$out/logs/$name.test.log" "$out/xunit/$name.xml"
   echo "  test $(status_of "$rc") $name"
