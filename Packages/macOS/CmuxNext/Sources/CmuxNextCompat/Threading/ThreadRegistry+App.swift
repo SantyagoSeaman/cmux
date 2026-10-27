@@ -78,6 +78,7 @@ extension ThreadRegistry {
         // Agents.
         ThreadDeclaration("com.cmuxterm.app.next.agent-pane.prompt-journal", qos: .utility),
         ThreadDeclaration("com.cmuxterm.app.next.agent-pane.inbound", qos: .userInitiated),
+        ThreadDeclaration("com.cmuxterm.app.next.agent-pane.outbound", qos: .utility),
         ThreadDeclaration("cmux.next.agent-pane.acpmux-exit.", match: .prefix, qos: .userInitiated),
         ThreadDeclaration("cmux.next.agent-pane.acpmux-log-progress", qos: .utility),
         ThreadDeclaration("cmux.next.agent-pane.acpmux-launch-reap.", match: .prefix, qos: .userInitiated),
