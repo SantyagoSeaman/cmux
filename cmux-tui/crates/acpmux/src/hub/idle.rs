@@ -3,7 +3,7 @@
 //! Every new session used to keep its adapter alive until the daemon
 //! stopped: after about 25 sessions, 36 adapters, 187 processes and 9.4 GB,
 //! with switches slowing as they piled up. A session is idle when no turn
-//! runs or waits (Claude Code's own turns included), nothing is queued, no
+//! runs or waits, nothing is queued, no
 //! permission or question is pending, no start holds its spawn lock, no
 //! background command or subagent runs, and nothing was logged for
 //! `idle_child` (2 min, `IDLE_CHILD`; `ACPMUX_IDLE_CHILD_SECS`). A client
@@ -52,9 +52,6 @@ impl Hub {
         !self.stopping.load(Ordering::SeqCst)
             && matches!(session.status(), SessionStatus::Ready | SessionStatus::Idle)
             && session.turn().is_none()
-            // Nor a turn Claude Code started itself (a task notification's), which `turn` does
-            // not show.
-            && !session.harness_turn.load(Ordering::SeqCst)
             && session.queued() == 0
             && session.pending_permissions().is_empty()
             // A Claude chat with turns but none stored would wake as a fresh conversation with
