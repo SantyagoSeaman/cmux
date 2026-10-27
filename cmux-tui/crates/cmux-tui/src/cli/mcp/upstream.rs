@@ -14,6 +14,12 @@
 //! which proves the session, so the tools run with no process of their own.
 //! Its command (the acpmux relay) is for a `cmux mcp serve` that reads no
 //! `socket`, and for Windows.
+//!
+//! No entry starts at a list: acpmux's own tool sets come with their tools
+//! (`tools`), and any other server (computer use) with a `manifest` file
+//! that holds the tools it listed at its last start, which this server reads
+//! and writes again after each start. Only a server with neither, or a
+//! manifest not written yet (a new build's first chat), starts at a list.
 
 use cmux_process::{Child, Command, Stdio};
 use std::collections::BTreeSet;
@@ -54,6 +60,9 @@ pub(super) struct Spec {
     /// (acpmux `agent_tools::TOOLS_FIELD`, a tool set the daemon serves):
     /// listed without a start, which waits for the first call.
     pub fixed: Option<(Vec<Value>, Option<String>)>,
+    /// The file of the tools and `instructions` it listed at its last start
+    /// (acpmux `agent_tools::MANIFEST_FIELD`): listed from without a start.
+    pub manifest: Option<PathBuf>,
 }
 
 /// The servers in `value` (the env's JSON). A bad entry is left out and
@@ -90,7 +99,18 @@ pub(super) fn specs(value: Option<std::ffi::OsString>) -> Vec<Spec> {
             let fixed = item["tools"]
                 .as_array()
                 .map(|tools| (tools.clone(), item["instructions"].as_str().map(str::to_owned)));
-            Some(Spec { name, command, args, env, call_timeout, socket, initialize_meta, fixed })
+            let manifest = item["manifest"].as_str().map(PathBuf::from);
+            Some(Spec {
+                name,
+                command,
+                args,
+                env,
+                call_timeout,
+                socket,
+                initialize_meta,
+                fixed,
+                manifest,
+            })
         })
         .collect()
 }
@@ -166,9 +186,11 @@ impl Drop for Conn {
 impl Upstream {
     pub(super) fn new(spec: Spec) -> Self {
         let prefix = prefix(&spec.name);
-        // Fixed tools: listed now, the server starts at the first call.
-        let (tools, instructions) = match &spec.fixed {
-            Some((tools, instructions)) => (Some(tools.clone()), instructions.clone()),
+        // Fixed tools, or the ones its last start listed: listed now, the
+        // server starts at the first call.
+        let known = spec.fixed.clone().or_else(|| spec.manifest.as_deref().and_then(read_manifest));
+        let (tools, instructions) = match known {
+            Some((tools, instructions)) => (Some(tools), instructions),
             None => (None, None),
         };
         Self { spec, prefix, conn: None, tools, instructions, failed: None }
@@ -261,9 +283,22 @@ impl Upstream {
 
     /// Starts the server: a connection only when it initialized and listed.
     fn start(&mut self) -> Result<(), String> {
+        let listed = (self.tools.take(), self.instructions.take());
         let started = self.try_start();
-        if started.is_err() {
-            self.conn = None;
+        match &started {
+            // A new list goes to the manifest, for the next chat's list.
+            Ok(()) => {
+                if let (Some(path), Some(tools)) = (&self.spec.manifest, &self.tools)
+                    && (listed.0.as_ref() != Some(tools) || listed.1 != self.instructions)
+                {
+                    write_manifest(path, tools, self.instructions.as_deref());
+                }
+            }
+            // The tools it listed before stay listed; the next call tries again.
+            Err(_) => {
+                self.conn = None;
+                (self.tools, self.instructions) = listed;
+            }
         }
         started
     }
@@ -412,6 +447,34 @@ impl Upstream {
             }
             return Ok(reply["result"].clone());
         }
+    }
+}
+
+/// The tools and instructions in a manifest file, when it holds a list.
+fn read_manifest(path: &std::path::Path) -> Option<(Vec<Value>, Option<String>)> {
+    let manifest: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let tools = manifest["tools"].as_array()?.clone();
+    Some((tools, manifest["instructions"].as_str().map(str::to_owned)))
+}
+
+/// Writes a manifest whole (a temporary file renamed over it), so a chat
+/// starting meanwhile reads the old list or the new one. A failure only
+/// means the next chat starts the server at its list.
+fn write_manifest(path: &std::path::Path, tools: &[Value], instructions: Option<&str>) {
+    let Some(dir) = path.parent() else { return };
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let text = json!({"tools": tools, "instructions": instructions}).to_string();
+    let written = builder
+        .create(dir)
+        .and_then(|()| std::fs::write(&tmp, text))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("cmux mcp: the tool manifest {} was not written: {error}", path.display());
     }
 }
 

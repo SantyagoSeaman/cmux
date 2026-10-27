@@ -112,6 +112,40 @@ fn cmux_cua_falls_back_to_the_nested_helper_app() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// p01-process-240: the computer use server's tools are not acpmux's, so its
+/// upstream entry names a manifest file instead of fixed tools: one file per
+/// server build, the same for every chat (the session's scope stays out of
+/// the key), a new one when the binary changes.
+#[test]
+fn the_computer_use_upstream_lists_from_the_manifest_of_its_build() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("acpmux-manifest-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["cmux", "cmux-cua"] {
+        let path = root.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let manifest = |scope: &str| -> serde_json::Value {
+        let env =
+            std::collections::BTreeMap::from([(super::CUA_SCOPE_ENV.to_owned(), scope.to_owned())]);
+        let tools = super::resolve(&memory_inputs(&root, None)).scoped(&env).folded();
+        let cmux = tools.servers.iter().find(|s| s.name == "cmux").expect("the cmux server");
+        let upstreams = &cmux.env.iter().find(|(k, _)| k == super::UPSTREAMS_ENV).unwrap().1;
+        let upstreams: Vec<serde_json::Value> = serde_json::from_str(upstreams).unwrap();
+        let cua = upstreams.into_iter().find(|s| s["name"] == "cmux-cua").expect("computer use");
+        assert!(cua.get(super::TOOLS_FIELD).is_none(), "{cua}");
+        cua[super::MANIFEST_FIELD].clone()
+    };
+    let first = manifest("com.example.a");
+    let path = std::path::PathBuf::from(first.as_str().expect("a manifest path"));
+    assert_eq!(path.parent(), Some(root.join("state").join(super::MANIFEST_DIR).as_path()));
+    assert_eq!(manifest("com.example.b"), first, "another chat's scope shares the file");
+    std::fs::write(root.join("cmux-cua"), "#!/bin/sh\n# a new build\nexit 0\n").unwrap();
+    assert_ne!(manifest("com.example.a"), first, "a new build lists again");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// On a Linux machine `acpmux` is a symlink to `cmux-tui`, and `current_exe`
 /// resolves it: the daemon runs as `cmux-tui acp daemon run` with the prefix
 /// `acp`. cmux-tui starts acpmux only under `acp` (or as argv0 `acpmux`), so

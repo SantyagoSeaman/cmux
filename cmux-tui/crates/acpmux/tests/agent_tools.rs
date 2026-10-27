@@ -416,7 +416,11 @@ async fn daemon_serves_the_subsession_and_secret_tools(
         let fixed = acpmux::subsession_mcp::DaemonTools::from_server_name(name).unwrap();
         assert_eq!(named(&before, name)["tools"], fixed.tools(), "{name}");
     }
-    assert!(named(&before, "cmux-cua").get("tools").is_none(), "computer use lists its own");
+    // Computer use lists its own tools, from the manifest its last start
+    // wrote, so it too starts at its first call and not at a list.
+    let cua = named(&before, "cmux-cua");
+    assert!(cua.get("tools").is_none(), "{cua}");
+    assert!(cua["manifest"].as_str().is_some_and(|p| p.contains("mcp-manifests")), "{cua}");
     // SAFETY: as in the caller; no session is starting concurrently.
     unsafe { std::env::set_var("CMUX_ENABLE_FEATURES", "agentToolsInDaemon") };
 

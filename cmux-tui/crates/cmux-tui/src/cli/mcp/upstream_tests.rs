@@ -342,3 +342,55 @@ fn fixed_tools_list_with_no_start_and_every_call_shares_one_connection() {
     let _ = daemon.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// p01-process-240: a server whose tools acpmux does not know (computer use)
+/// lists from the manifest its last start wrote: the first chat starts it at
+/// its list and writes the file, a later chat lists from the file with no
+/// start and starts the server only at its first call.
+#[test]
+fn a_manifest_lists_a_server_without_starting_it() {
+    let dir = std::env::temp_dir().join(format!("cmux-mcp-manifest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("server.py");
+    std::fs::write(&script, UPSTREAM_SERVER).unwrap();
+    let manifest = dir.join("manifests").join("cua.json");
+    let specs = upstream::specs(Some(
+        json!([{"name": "cmux-cua", "command": "python3", "args": [script], "env": {},
+                "manifest": manifest}])
+        .to_string()
+        .into(),
+    ));
+    let chat = || {
+        let upstream = upstream::Proxied::new(upstream::Upstream::new(specs[0].clone()));
+        let inner = upstream.inner.clone();
+        let mut server = code_mode_server(Fake::with_actions());
+        server.code_mode = false;
+        server.upstreams = vec![upstream];
+        (server, inner)
+    };
+    let listed = |server: &mut Server<Fake>| {
+        let all = server.list();
+        let look = all.iter().find(|t| t["name"] == "cua_look").cloned().expect("cua_look");
+        assert!(look["description"].as_str().unwrap().contains("Ask before you click."), "{look}");
+    };
+
+    // The first chat: no manifest yet, so its list starts the server once.
+    let (mut first, inner) = chat();
+    listed(&mut first);
+    assert!(inner.lock().unwrap().started(), "no manifest: the list starts the server");
+    let written: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(written["tools"].as_array().map(Vec::len), Some(3), "{written}");
+    assert_eq!(written["instructions"], "Ask before you click.", "{written}");
+
+    // The next chat: listed from the manifest, started at its first call.
+    let (mut next, inner) = chat();
+    for _ in 0..3 {
+        listed(&mut next);
+    }
+    assert!(!inner.lock().unwrap().started(), "a list started the server");
+    let ran = call(&mut next, "cua_look", json!({"x": 2}));
+    assert_eq!(ran["content"][0]["text"], "saw {\"x\": 2}", "{ran}");
+    assert!(inner.lock().unwrap().started());
+    let _ = std::fs::remove_dir_all(&dir);
+}

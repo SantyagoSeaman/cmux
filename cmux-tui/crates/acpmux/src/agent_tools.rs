@@ -104,6 +104,14 @@ pub const INITIALIZE_META_FIELD: &str = "initializeMeta";
 pub const TOOLS_FIELD: &str = "tools";
 /// That entry's MCP `instructions`, given with its fixed tools.
 pub const INSTRUCTIONS_FIELD: &str = "instructions";
+/// An [`UPSTREAMS_ENV`] entry's tool manifest file, for a server whose tools
+/// acpmux does not know (computer use, the memory server): `cmux mcp serve`
+/// lists the tools that server last listed from it without starting the
+/// server, starts it at the first call, and writes the file after each start.
+/// One file per server build ([`AgentTools::manifest_path`]).
+pub const MANIFEST_FIELD: &str = "manifest";
+/// The folder of those files, in [`Inputs::state_dir`].
+const MANIFEST_DIR: &str = "mcp-manifests";
 
 /// A spawn env key (`hub/spawn.rs`) with the comma-separated agent tool
 /// servers this chat turned off (`hub/tools.rs`): a folded server has no
@@ -206,6 +214,8 @@ pub struct AgentTools {
     /// (`agent_displays.rs`): [`AgentTools::scoped`] then gives the
     /// computer use server its workspace's display, or leaves it out.
     pub displays: Option<PathBuf>,
+    /// The folder of the [`MANIFEST_FIELD`] files.
+    pub manifests: Option<PathBuf>,
 }
 
 /// Where the tools come from; `current()` reads them from this process.
@@ -583,7 +593,12 @@ pub fn resolve(inputs: &Inputs) -> AgentTools {
             None
         }
     };
-    AgentTools { servers, plugin_dir, displays: inputs.displays.clone() }
+    AgentTools {
+        servers,
+        plugin_dir,
+        displays: inputs.displays.clone(),
+        manifests: Some(inputs.state_dir.join(MANIFEST_DIR)),
+    }
 }
 
 const RELAY_SERVER: &str = crate::mcp_relay::SERVER_ENV;
@@ -793,11 +808,14 @@ impl AgentTools {
                 // they go in the spec ([`TOOLS_FIELD`]): `cmux mcp serve` lists
                 // them without starting the server and starts it (or dials the
                 // daemon) at the first call, not at the harness's first list.
+                // Any other server lists from the manifest of its build.
                 if let Some(own) = DaemonTools::from_server_name(&s.name) {
                     spec[TOOLS_FIELD] = own.tools();
                     if let Some(text) = own.instructions() {
                         spec[INSTRUCTIONS_FIELD] = json!(text);
                     }
+                } else if let Some(path) = self.manifest_path(s) {
+                    spec[MANIFEST_FIELD] = json!(path);
                 }
                 // A tool set the daemon serves: `cmux mcp serve` dials the daemon itself, with
                 // the relay's handshake (no process); one that reads no `socket` runs the relay.
@@ -818,6 +836,26 @@ impl AgentTools {
         cmux.env.push((UPSTREAMS_ENV.to_owned(), Value::Array(upstreams).to_string()));
         self.servers = vec![cmux];
         self
+    }
+
+    /// The [`MANIFEST_FIELD`] file of `server`: one per server name, command
+    /// build (the file's size and modification time) and arguments, so a new
+    /// build lists again. Never its env: that holds the session's scope,
+    /// display and helper token, which do not change the tools and must not
+    /// split the file per chat. `None` when the command cannot be read.
+    pub fn manifest_path(&self, server: &McpServer) -> Option<PathBuf> {
+        let dir = self.manifests.as_ref()?;
+        let meta = std::fs::metadata(&server.command).ok()?;
+        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let mut parts = vec![
+            server.name.clone(),
+            server.command.to_string_lossy().into_owned(),
+            meta.len().to_string(),
+            modified.as_nanos().to_string(),
+        ];
+        parts.extend(server.args.iter().cloned());
+        let hash = crate::sha256::sha256_hex(parts.join("\0").as_bytes());
+        Some(dir.join(format!("{}.json", &hash[..32])))
     }
 
     /// The servers as one Claude Code MCP config, or `None` without servers.
