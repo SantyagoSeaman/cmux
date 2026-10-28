@@ -15,11 +15,15 @@
 //! `base/memory/platform_shared_memory_region_posix.cc`, which opens the
 //! read-only descriptor `O_RDONLY` before it unlinks the file. On macOS the
 //! read-only descriptor is the same `shm_open` name opened `O_RDONLY` before
-//! the unlink. On Linux the memfd is sealed `F_SEAL_FUTURE_WRITE` after the
-//! writer mapped it (no new writable mapping or `write` through any
-//! descriptor, a reopened one too), and the readers get it reopened through
-//! `/proc/self/fd` `O_RDONLY`; either one alone is enough, and a kernel or
-//! sandbox that allows neither gets an error, never a writable reader.
+//! the unlink. On Linux the protection is the `F_SEAL_FUTURE_WRITE` seal,
+//! added after the writer mapped the memfd: no new writable mapping or
+//! `write` through any descriptor, a reopened one too. A kernel without the
+//! seal (before Linux 5.1) gets [`io::ErrorKind::Unsupported`], never a
+//! writable reader: a memfd inode is mode 0777, so a descriptor reopened
+//! `O_RDONLY` alone does not stop a reader from reopening it `O_RDWR`. The
+//! readers get the memfd reopened through `/proc/self/fd` `O_RDONLY` as
+//! defence in depth, or a duplicate of the sealed descriptor where there is
+//! no `/proc`.
 
 use std::ffi::CString;
 use std::io;
@@ -227,18 +231,23 @@ fn read_only_segment(kind: SegmentKind, len: usize) -> io::Result<ReadOnlySegmen
         // SAFETY: F_ADD_SEALS on a memfd this function owns.
         unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) == 0 }
     };
-    // F_SEAL_FUTURE_WRITE needs Linux 5.1; an older kernel refuses it
-    // (EINVAL) and the read-only reopen alone protects the segment.
-    let sealed = seal(libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_FUTURE_WRITE);
-    if !sealed && !seal(libc::F_SEAL_SHRINK | libc::F_SEAL_GROW) {
-        return Err(io::Error::last_os_error());
+    // F_SEAL_FUTURE_WRITE needs Linux 5.1. Without it a reader could reopen
+    // the memfd O_RDWR, so an older kernel gets no read-only segment.
+    if !seal(libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_FUTURE_WRITE) {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINVAL) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "F_SEAL_FUTURE_WRITE needs Linux 5.1 or later",
+            ));
+        }
+        return Err(error);
     }
     let reader = match reopen_read_only(fd) {
         Ok(reader) => reader,
-        // No /proc (a sandbox): the sealed descriptor itself is read-only.
+        // No /proc (a sandbox): the sealed descriptor is read-only too.
         // SAFETY: F_DUPFD_CLOEXEC of a live descriptor returns a new one.
-        Err(_) if sealed => owned(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?,
-        Err(error) => return Err(error),
+        Err(_) => owned(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?,
     };
     if !seal(libc::F_SEAL_SEAL) {
         return Err(io::Error::last_os_error());
