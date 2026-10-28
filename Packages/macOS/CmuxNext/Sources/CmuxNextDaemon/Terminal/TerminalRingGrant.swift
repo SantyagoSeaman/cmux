@@ -31,6 +31,9 @@ enum TerminalRingRefusal: Error, Sendable, Equatable {
     case mapping(String)
     /// A RING_ADVANCE before any RING, or one with a payload.
     case strayAdvance
+    /// A RING_ADVANCE past the ring's published end: the daemon publishes the bytes before it advances, so
+    /// reading them would read the bytes of an earlier lap.
+    case unpublishedAdvance
 
     /// The `bad_message` reason the connection closes with.
     var reason: String {
@@ -42,6 +45,7 @@ enum TerminalRingRefusal: Error, Sendable, Equatable {
         case .unsupported: "ring_not_negotiated"
         case .mapping(let reason): "ring_mapping_\(reason)"
         case .strayAdvance: "ring_advance_without_ring"
+        case .unpublishedAdvance: "ring_advance_unpublished"
         }
     }
 }
