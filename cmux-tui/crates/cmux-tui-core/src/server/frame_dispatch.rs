@@ -346,6 +346,11 @@ impl FrameLane for RequestFrames {
         connection: &mut FrameConnection<'_>,
     ) -> Result<bool, ConnectionBadMessage> {
         let header = *frame.header();
+        // Only an ATTACHED SHARED_BUFFER frame takes a descriptor; that
+        // route checks its own.
+        if header.kind() != FrameKind::SharedBuffer {
+            connection.takes_no_fd()?;
+        }
         match (header.kind(), header.call()) {
             (FrameKind::Request, Some(call)) => {
                 self.request(header.stream(), call, frame.payload(), connection)
@@ -437,7 +442,12 @@ impl RequestFrames {
         };
         let descriptor = SharedBufferDescriptor::decode(frame.payload())
             .map_err(ConnectionBadMessage::SharedBuffer)?;
-        let fd = if descriptor.attached { connection.take_fd() } else { None };
+        let fd = if descriptor.attached {
+            connection.take_fd()
+        } else {
+            connection.takes_no_fd()?;
+            None
+        };
         let body = self
             .shared_buffers
             .receive(region_bytes, &descriptor, fd)

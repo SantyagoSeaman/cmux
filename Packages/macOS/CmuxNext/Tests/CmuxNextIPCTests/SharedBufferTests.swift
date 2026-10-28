@@ -6,7 +6,8 @@ import Testing
 
 /// The app's SHARED_BUFFER pool (p05-ipc-115): the frame bytes cmux-ipc shared_buffer.rs reads, one frame and one
 /// read-only shm descriptor for a 10 MB paste, a reused region with no second descriptor, the keep budget both
-/// ends apply, the daemon's copy unchanged by a later write, and no descriptor left open.
+/// ends apply, the daemon's copy unchanged by a later write, a region that cannot be passed leaving the pool as the
+/// daemon sees it, and no region descriptor left open.
 @Suite nonisolated struct SharedBufferTests {
     private func body(_ count: Int, seed: UInt8) -> Data {
         Data((0 ..< count).map { UInt8(truncatingIfNeeded: $0 &* 31) &+ seed })
@@ -22,10 +23,6 @@ import Testing
               unsafe mapping != UnsafeMutableRawPointer(bitPattern: -1) else { return nil }
         defer { unsafe munmap(mapping, count) }
         return unsafe Data(bytes: mapping, count: count)
-    }
-
-    private func openDescriptors() -> Int {
-        (Int32(0) ..< 4096).count(where: { fcntl($0, F_GETFD) >= 0 })
     }
 
     @Test func theFrameIsTheLayoutTheDaemonReads() {
@@ -115,19 +112,74 @@ import Testing
         if let fd = again.fd { Darwin.close(fd) }
     }
 
-    @Test func noDescriptorStaysOpen() throws {
-        let before = openDescriptors()
+    @Test func aRegionWhoseDescriptorCannotBePassedLeavesThePoolAsTheDaemonSeesIt() throws {
+        // A duplicate fails (EMFILE) for every region above the smallest size.
+        var pool = SharedBufferPool(passDescriptor: { region in
+            region.byteCount > SharedBufferPool.minRegionBytes ? nil : region.passableDescriptor()
+        })
+        let small = body(SharedBufferPool.inlineMax + 1, seed: 1)
+        // All busy at once, so each takes its own region and announces it.
+        let requests = 0 ..< UInt32(SharedBufferPool.maxRegions)
+        for request in requests {
+            let staged = try #require(stage(&pool, small, request: request))
+            let fd = try #require(staged.fd)
+            Darwin.close(fd)
+        }
+        for request in requests {
+            #expect(pool.release(requestID: request))
+        }
+        // Every region is free and too small: this body would replace one, whose descriptor cannot be made.
+        #expect(stage(&pool, body(1 << 20, seed: 2), request: 9) == nil)
+        #expect(pool.regionCount == SharedBufferPool.maxRegions)
+        // Each region is still the one the daemon mapped: a body reuses it with no descriptor.
+        var regions: Set<UInt16> = []
+        for request in 10 ..< 10 + UInt32(SharedBufferPool.maxRegions) {
+            let staged = try #require(stage(&pool, small, request: request))
+            #expect(staged.fd == nil, "region \(staged.region) was replaced by one the daemon never saw")
+            regions.insert(staged.region)
+        }
+        #expect(regions.count == SharedBufferPool.maxRegions)
+    }
+
+    /// The POSIX shm name of descriptor `fd` (proc_pidfdinfo PROC_PIDFDPSHMINFO); nil when it is not a shm object.
+    private static func shmName(_ fd: Int32) -> String? {
+        var info = pshm_fdinfo()
+        let size = Int32(MemoryLayout<pshm_fdinfo>.size)
+        // SAFETY: proc_pidfdinfo writes at most `size` bytes, one pshm_fdinfo, into `info`, a local.
+        guard unsafe proc_pidfdinfo(getpid(), fd, PROC_PIDFDPSHMINFO, &info, size) == size else { return nil }
+        return unsafe withUnsafeBytes(of: info.pshminfo.pshm_name) { name in
+            unsafe String(decoding: name.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+    }
+
+    /// The pool's own descriptors, found by the unique shm name of each region it announced: other tests open and
+    /// close descriptors meanwhile, so a count of the process's descriptors proves nothing.
+    @Test func noRegionDescriptorStaysOpen() throws {
+        let announced = AnnouncedRegions()
+        let stillOpen = { Set((Int32(0) ..< 4096).compactMap(Self.shmName).filter { announced.names.contains($0) }) }
         do {
-            var pool = SharedBufferPool()
+            var pool = SharedBufferPool(passDescriptor: { region in
+                let fd = region.passableDescriptor()
+                if let fd, let name = Self.shmName(fd) { announced.names.append(name) }
+                return fd
+            })
             for (request, count) in [(1, 300_000), (2, 9_000_000), (3, 300_000), (4, 20_000_000)] {
                 let staged = try #require(stage(&pool, body(count, seed: UInt8(request)), request: UInt32(request)))
                 if let fd = staged.fd { Darwin.close(fd) }
                 pool.release(requestID: UInt32(request))
             }
-            // 512 KiB stays; the 16 MiB and 32 MiB regions passed the keep budget and were dropped.
+            // 512 KiB stays; the 16 MiB and 32 MiB regions passed the keep budget and were dropped at their reply.
+            #expect(Set(announced.names).count == 3, "three regions, each its own shm object: \(announced.names)")
+            #expect(stillOpen() == Set(announced.names.prefix(1)), "only the kept region's descriptor is open")
+            // The pool's last use: it lives through the check above.
             #expect(pool.regionCount == 1)
         }
-        #expect(openDescriptors() == before, "a region's descriptor stayed open")
+        #expect(stillOpen().isEmpty, "a region's descriptor stayed open after its pool")
     }
+}
+
+/// The shm names of the regions a pool announced (`SharedBufferPool(passDescriptor:)`).
+private nonisolated final class AnnouncedRegions {
+    var names: [String] = []
 }
 

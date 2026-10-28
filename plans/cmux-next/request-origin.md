@@ -229,6 +229,87 @@ Tests: `cargo test -p cmux-tui-core --lib -- page_stream page_access origin_gate
 client_hello` (server/page_stream_tests.rs, page_access_tests.rs
 `every_page_stream_is_denied_the_hard_classes`, request_origin_tests.rs page stream unit tests).
 
+## Shared buffers (`shared-buffers-v1`, p05-ipc-115, risk:high)
+
+Why: a request body above 64 KiB (a large paste) costs one copy per hop and base64 or JSON
+escaping when it goes inline. Chrome's `mojo_base::BigBuffer` moves a payload above
+`kMaxInlineBytes` into shared memory, and a receiver that does not trust the sender copies it out
+before it reads it (`mojo/public/cpp/base/big_buffer.h`). A SHARED_BUFFER frame does the same with a
+pool of at most 4 regions per connection (cmux-ipc `shared_buffer.rs`, spec/transports.md). This
+is the first channel that passes descriptors from a client into the daemon, so it is a new trust
+boundary.
+
+Who gets it:
+- `shared-buffers-v1` requires `ipc-frames-v2` (capabilities.rs `IpcCapability::requires`), so only
+  the connections that get frames can get it: a direct peer on the local Unix socket whose euid is
+  the daemon's (`PeerProcess::SameUser`, from the kernel's peer credentials at accept) and whose
+  `set-client-info` declared the daemon's own `api_revision`. A bridge, a WebSocket, the remote
+  entry, an unverified Unix peer and a peer at another revision never get it.
+- The grant is asked again for every frame and every descriptor, so a later `set-client-info` that
+  ends it also ends the channel at once. It is not in `IpcTransports::BOUND` until a fleet bench
+  row confirms the win; until then no connection gets it.
+
+Descriptors:
+- Without the grant, a read that brings any descriptor closes the connection
+  (`bad_message unexpected_fds`), as before this task.
+- With the grant, at most `MAX_REGIONS` (4) received descriptors may wait for their frames; one
+  more closes the connection. One `recvmsg` takes at most 253 (`MAX_RECV_FDS`); a read whose
+  control data the kernel truncated fails the stream (`MSG_CTRUNC`). Every received descriptor is
+  close-on-exec before anything else sees it (`MSG_CMSG_CLOEXEC`, or `F_SETFD` on macOS).
+- Each descriptor is bound to its frame: it is tagged with the stream bytes of the read that
+  brought it (line_connection.rs `ArrivedFds`), and only an ATTACHED SHARED_BUFFER frame whose
+  first byte is in that read takes it. A descriptor that comes with a REQUEST, a CANCEL, a JSON line
+  or a SHARED_BUFFER frame that reuses its region closes the connection before that message runs,
+  so no later frame can map a stale descriptor. Mojo's `ChannelPosix` gives each message only the
+  handles its header counts (`mojo/core/channel_posix.cc`).
+- The descriptor of an attached region closes as soon as it is mapped; the mapping keeps the
+  object.
+
+What the daemon maps:
+- Only a read-only descriptor (`F_GETFL` is `O_RDONLY`; otherwise `shared_buffer_writable`).
+- Only an object whose size cannot change: on Linux a memfd sealed with `F_SEAL_SHRINK`; on macOS
+  a POSIX shm object, which xnu sizes once and whose `fstat` reports no file type (every vnode,
+  the only kind that can shrink under a mapping, reports one). Anything else is
+  `shared_buffer_not_sealed`. Chrome checks a received region's mode the same way
+  (`base/memory/platform_shared_memory_region_posix.cc`).
+- A region of 1 byte to 32 MiB (`MAX_REGION_BYTES`), at most the object's `fstat` size, mapped
+  `PROT_READ` for exactly the declared size. Because the object cannot shrink, no read of the
+  mapping can fault (SIGBUS); the size check covers an object smaller than declared.
+- A body no longer than its region, and a frame whose region size equals the mapped region's.
+
+Copy before parse: the daemon copies the body out of the mapping before anything parses it; the
+copy then takes the REQUEST path (method table, priority, `max_bytes`, origin and admission
+checks unchanged). A client that writes the region meanwhile changes only its own copy-to-be,
+never bytes the daemon checked and then reads again (no TOCTOU).
+
+Memory: the kept regions of one connection hold at most 16 MiB (`KEEP_BYTES`); a larger region is
+mapped for its one body and unmapped after the copy. Both ends apply the same rule to the same
+frames, so they agree on which regions stay. All mappings go with the connection.
+
+Refusal: every refusal (an unknown or out-of-range region, a missing descriptor, a size mismatch,
+a body longer than its region, a writable or resizable descriptor, a descriptor with the wrong
+message, a bad layout or flag) is a bad message: the connection closes with `bad_message` and the
+`unexpected_fds` or `shared_buffer_*` reason, as Chrome's `ReportBadMessage` ends the sender, and
+nothing after the bad byte is read.
+
+Analysis (remote-relay rules applied to a local trust boundary):
+- Local command and content execution: a shared buffer carries only a request body. It runs
+  exactly as the same body in a REQUEST frame would, with the same origin; it adds no method and
+  widens no allowlist.
+- Access to unowned objects: a region id names only this connection's regions; one connection
+  cannot name another's. The daemon never passes a descriptor back on this channel.
+- Local-state exposure: the daemon maps read-only and writes nothing to the region, so nothing of
+  the daemon's state reaches it.
+- Fail-safe defaults: no grant, no descriptor; a descriptor the daemon cannot bind to its frame
+  closes the connection rather than wait for one.
+
+Tests: `cargo test -p cmux-ipc shared_buffer` (cmux-ipc `cmux_ipc_tests/shared_buffer_tests.rs`,
+`tests/shared_buffer_leak.rs`) and `cargo test -p cmux-tui-core --lib -- shared_buffer_frames
+ipc_grant` (server/shared_buffer_frames_tests.rs, among them
+`shared_buffer_frames_a_descriptor_with_a_message_that_takes_none_closes` and
+`shared_buffer_frames_a_stray_descriptor_never_reaches_a_later_frame`); the app side is
+CmuxNextIPCTests `SharedBufferTests`.
+
 ## Red tests (first commit)
 
 - page_relay call claiming user with no token -> origin.forbidden.

@@ -161,38 +161,45 @@ public struct SharedBufferPool {
         public let region: UInt16
     }
 
+    /// A region a frame announced to the daemon: every slot the pool holds is one, so both ends count the same
+    /// regions.
     private struct Slot {
         let region: SharedBufferRegion
-        /// A frame attached this region's descriptor.
-        var announced = false
         /// The daemon keeps it mapped after the announcing body.
-        var kept = false
+        let kept: Bool
         /// The request whose body it holds until its reply.
         var busy: UInt32?
     }
 
     private var slots = [Slot?](repeating: nil, count: SharedBufferPool.maxRegions)
+    /// The descriptor a frame that attaches `region` passes (``SharedBufferRegion/passableDescriptor()``);
+    /// injected so a test can fail it or see each region the pool announces.
+    private let passDescriptor: (SharedBufferRegion) -> Int32?
 
-    public init() {}
+    public init(passDescriptor: @escaping (SharedBufferRegion) -> Int32? = { $0.passableDescriptor() }) {
+        self.passDescriptor = passDescriptor
+    }
 
     /// Writes `body` into a free region and returns its frame for request `requestID`; nil sends it inline: a
     /// body of at most ``inlineMax`` or above ``maxRegionBytes``, every region busy, or no region to be had.
+    /// A new region replaces the one at its id only once its frame can be sent: a failure leaves the pool as the
+    /// daemon sees it.
     public mutating func stage(_ body: Data, requestID: UInt32, methodID: UInt16, priority: UInt8) -> Staged? {
         guard body.count > Self.inlineMax, let need = Self.regionBytes(for: body.count),
               let index = choose(body.count) else { return nil }
-        if (slots[index]?.region.byteCount ?? 0) < body.count {
-            guard let region = SharedBufferRegion(byteCount: need) else { return nil }
-            slots[index] = Slot(region: region)
-        }
-        guard var slot = slots[index], slot.region.write(body) else { return nil }
-        let attached = !slot.announced
-        var fd: Int32?
-        if attached {
-            guard let passed = slot.region.passableDescriptor() else { return nil }
+        var slot: Slot
+        let fd: Int32?
+        if let current = slots[index], current.region.byteCount >= body.count {
+            guard current.region.write(body) else { return nil }
+            slot = current
+            fd = nil
+        } else {
+            guard let region = SharedBufferRegion(byteCount: need), region.write(body),
+                  let passed = passDescriptor(region) else { return nil }
+            slot = Slot(region: region, kept: Self.keeps(keptBytes(except: index), region.byteCount))
             fd = passed
-            slot.announced = true
-            slot.kept = Self.keeps(keptBytes(except: index), slot.region.byteCount)
         }
+        let attached = fd != nil
         slot.busy = requestID
         slots[index] = slot
         let region = UInt16(index)
@@ -235,7 +242,7 @@ public struct SharedBufferPool {
 
     private func keptBytes(except index: Int) -> Int {
         slots.indices.reduce(0) { total, at in
-            guard at != index, let slot = slots[at], slot.announced, slot.kept else { return total }
+            guard at != index, let slot = slots[at], slot.kept else { return total }
             return total + slot.region.byteCount
         }
     }

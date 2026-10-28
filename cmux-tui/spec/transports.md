@@ -224,7 +224,10 @@ treats it as that REQUEST: the reply is its REPLY or ERROR frame, after
 which the client may write the region again. A region stays mapped on both
 ends while the kept regions of the connection hold at most 16 MiB; past
 that it is mapped for its one body, and the client attaches a new region
-next time. Any other descriptor, a frame for a region that is not mapped, a
+next time. The daemon binds a descriptor to the read that brought it: only
+an ATTACHED frame whose first byte that read carried takes it, and one that
+came with a REQUEST, a CANCEL, a line or a reuse frame closes the connection
+before that message runs. Any other descriptor, a frame for a region that is not mapped, a
 size that differs from the region's, a body longer than its region, or a
 writable or resizable descriptor is a bad message (`unexpected_fds`,
 `shared_buffer_*`). It needs the `shared-buffers-v1` grant.

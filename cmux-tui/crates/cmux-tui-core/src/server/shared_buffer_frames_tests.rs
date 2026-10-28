@@ -2,7 +2,8 @@
 //! in a pooled region gets the reply its REQUEST frame gets, a 10 MB body is
 //! one frame and one descriptor, a write to the region after the send does
 //! not change what the request ran with, and a descriptor or frame without
-//! the grant closes the connection with `bad_message`.
+//! the grant, or a descriptor sent with a message that takes none, closes
+//! the connection with `bad_message`.
 
 use std::os::fd::AsRawFd;
 
@@ -12,7 +13,7 @@ use cmux_ipc::shared_buffer::{
 use cmux_ipc::{CallAux, CallFlags, FrameKind};
 use serde_json::{Value, json};
 
-use super::tests::{Client, Got, method};
+use super::tests::{Client, Got, cancel, method, request};
 use crate::server::line_connection::{ConnectionBadMessage, ConnectionEnd};
 
 const SHARED_BUFFERS: &str = "shared-buffers-v1";
@@ -157,4 +158,65 @@ fn shared_buffer_frames_a_bad_region_closes_with_bad_message() {
             SharedBufferRefusal::NotSealed { region: 2 }
         ))
     );
+}
+
+/// Sends `bytes` with `/dev/null`'s descriptor on a granted connection.
+fn send_with_stray_fd(client: &mut Client, bytes: &[u8]) {
+    let file = std::fs::File::open("/dev/null").unwrap();
+    cmux_ipc::fds::send_all(client.socket.as_raw_fd(), bytes, &[file.as_raw_fd()]).unwrap();
+}
+
+/// The connection closes with `unexpected_fds` and never answers `request_id`.
+fn closes_unanswered(mut client: Client, request_id: u32) {
+    while let Some(got) = client.next() {
+        let answered = match &got {
+            Got::Frame(header, _) => {
+                header.call().is_some_and(|call| call.request_id == request_id)
+            }
+            Got::Line(reply) => reply["id"] == json!(request_id),
+        };
+        assert!(!answered, "the message that carried a descriptor ran: {got:?}");
+    }
+    assert_eq!(client.finish(), ConnectionEnd::BadMessage(ConnectionBadMessage::UnexpectedFds));
+}
+
+#[test]
+fn shared_buffer_frames_a_descriptor_with_a_message_that_takes_none_closes() {
+    let mut client = Client::granted_with("stray-request", &[SHARED_BUFFERS]);
+    send_with_stray_fd(&mut client, &request(3, &json!({"cmd": "ping"})));
+    closes_unanswered(client, 3);
+
+    let mut client = Client::granted_with("stray-cancel", &[SHARED_BUFFERS]);
+    send_with_stray_fd(&mut client, &cancel(3, "ping"));
+    closes_unanswered(client, 3);
+
+    let mut client = Client::granted_with("stray-line", &[SHARED_BUFFERS]);
+    send_with_stray_fd(&mut client, b"{\"id\":3,\"cmd\":\"ping\"}\n");
+    closes_unanswered(client, 3);
+
+    // A frame that reuses its region passes no descriptor.
+    let mut client = Client::granted_with("stray-reuse", &[SHARED_BUFFERS]);
+    let mut pool = SharedBufferPool::default();
+    let body = padded_ping(INLINE_MAX * 2);
+    client.shared(&mut pool, 2, &body);
+    client.shared_reply(2);
+    pool.release(2);
+    let staged = pool.stage(0, call(3, "ping"), &body).unwrap().unwrap();
+    assert!(staged.fd.is_none());
+    send_with_stray_fd(&mut client, &staged.frame);
+    closes_unanswered(client, 3);
+}
+
+/// Before p05-ipc-115's fix the REQUEST's descriptor waited in the queue and
+/// the next ATTACHED frame mapped it instead of its own (`not_sealed` here).
+#[test]
+fn shared_buffer_frames_a_stray_descriptor_never_reaches_a_later_frame() {
+    let mut client = Client::granted_with("stray-then-attached", &[SHARED_BUFFERS]);
+    let mut pool = SharedBufferPool::default();
+    let staged = pool.stage(0, call(4, "ping"), &padded_ping(INLINE_MAX * 2)).unwrap().unwrap();
+    let passed: Vec<_> = staged.fd.iter().map(AsRawFd::as_raw_fd).collect();
+    send_with_stray_fd(&mut client, &request(3, &json!({"cmd": "ping"})));
+    // The daemon may close before it reads this frame; its end is the proof.
+    let _ = cmux_ipc::fds::send_all(client.socket.as_raw_fd(), &staged.frame, &passed);
+    assert_eq!(client.finish(), ConnectionEnd::BadMessage(ConnectionBadMessage::UnexpectedFds));
 }

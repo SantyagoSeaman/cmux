@@ -12,13 +12,16 @@
 //! together, straight into the reader's buffer, as Mojo's
 //! `ChannelPosix::OnFileCanReadWithoutBlocking` reads into the buffer
 //! `Channel::GetReadBuffer` lends it (chromium mojo/core/channel_posix.cc).
-//! Descriptors queue in arrival order ([`cmux_ipc::fds::FdReceiver`]) and
-//! only a SHARED_BUFFER frame takes one (p05-ipc-115), as Mojo's
+//! Descriptors queue in arrival order, each with the stream bytes of the
+//! read that brought it ([`ArrivedFds`]), and only an ATTACHED SHARED_BUFFER
+//! frame whose first byte is in that read takes one (p05-ipc-115), as Mojo's
 //! `ChannelPosix` hands each message the handles its header counts. They may
 //! arrive only while the client holds the shared-buffer grant, and at most
-//! [`FrameLane::descriptors_allowed`] may wait for their frame; any other
-//! descriptor is a bad message, refused where the kernel would otherwise drop
-//! it unseen.
+//! [`FrameLane::descriptors_allowed`] may wait for their frame. A descriptor
+//! no message took once every message that starts in its read was routed
+//! (one sent with a REQUEST, a CANCEL, a line or a reuse frame) is a bad
+//! message, as is any descriptor without the grant: each is refused where the
+//! kernel would otherwise drop it unseen or a later frame would map it.
 //!
 //! A bad message closes the connection, as Chrome's `ReportBadMessage`
 //! (mojo/public/cpp/bindings/message.h) ends the sender: nothing after the
@@ -160,17 +163,81 @@ pub(super) struct FrameConnection<'a> {
     pub(super) scheduler: &'a Arc<ConnectionSurfaceScheduler>,
     /// When the reader cut the frame, for its request span.
     pub(super) arrived: Instant,
+    /// The stream offsets of the frame's first byte and of the byte after it.
+    #[cfg(unix)]
+    pub(super) bytes: std::ops::Range<u64>,
     /// The descriptors that arrived and no frame took yet.
     #[cfg(unix)]
-    pub(super) fds: &'a mut cmux_ipc::fds::FdReceiver,
+    pub(super) fds: &'a mut ArrivedFds,
 }
 
 impl FrameConnection<'_> {
-    /// The oldest descriptor no frame took yet: the one a frame that
-    /// carries a descriptor sent with its first byte.
+    /// The descriptor sent with the frame's first byte: the oldest queued
+    /// one, if the read that brought it also brought that byte. `None`
+    /// leaves the queue as it is; a descriptor a later byte brought waits for
+    /// its own frame.
     #[cfg(unix)]
     pub(super) fn take_fd(&mut self) -> Option<std::os::fd::OwnedFd> {
-        self.fds.take(1).ok().and_then(|mut taken| taken.pop())
+        self.fds.take_for(self.bytes.start)
+    }
+
+    /// Refuses, before it runs, a frame that takes no descriptor when one
+    /// came with it: a descriptor whose read ended inside the frame belongs
+    /// to no later message.
+    pub(super) fn takes_no_fd(&self) -> Result<(), ConnectionBadMessage> {
+        #[cfg(unix)]
+        if self.fds.stray_before(self.bytes.end) {
+            return Err(ConnectionBadMessage::UnexpectedFds);
+        }
+        Ok(())
+    }
+}
+
+/// A received descriptor and the stream bytes of the read that brought it:
+/// the sender passed it with the first byte of a message in that range.
+#[cfg(unix)]
+struct ArrivedFd {
+    fd: std::os::fd::OwnedFd,
+    read: std::ops::Range<u64>,
+}
+
+/// The descriptors that arrived and no message took yet, oldest first.
+#[cfg(unix)]
+#[derive(Default)]
+pub(super) struct ArrivedFds {
+    queue: VecDeque<ArrivedFd>,
+}
+
+#[cfg(unix)]
+impl ArrivedFds {
+    /// Moves the descriptors one read queued in `receiver` here, tagged with
+    /// that read's bytes.
+    fn arrived(&mut self, receiver: &mut cmux_ipc::fds::FdReceiver, read: std::ops::Range<u64>) {
+        while let Ok(taken) = receiver.take(cmux_ipc::fds::MAX_FDS_PER_FRAME) {
+            if taken.is_empty() {
+                break;
+            }
+            self.queue.extend(taken.into_iter().map(|fd| ArrivedFd { fd, read: read.clone() }));
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// The oldest descriptor, if its read brought the byte at `start`.
+    fn take_for(&mut self, start: u64) -> Option<std::os::fd::OwnedFd> {
+        if !self.queue.front()?.read.contains(&start) {
+            return None;
+        }
+        self.queue.pop_front().map(|arrived| arrived.fd)
+    }
+
+    /// Whether a descriptor's read ended at or before `end`, the end of the
+    /// message just routed: every message that could take it was routed, so
+    /// it came with one that takes none.
+    fn stray_before(&self, end: u64) -> bool {
+        self.queue.front().is_some_and(|arrived| arrived.read.end <= end)
     }
 }
 
@@ -339,6 +406,8 @@ pub(super) fn serve_connection(
                 input.messages.negotiate_frames();
             }
             let buffered = input.messages.buffered_len();
+            // The stream offset of the next message's first byte.
+            let start = input.received.saturating_sub(buffered as u64);
             let mut line = match input.messages.next_message() {
                 Ok(Some(Message::Json(line))) => {
                     // Dispatch sees the line with its `\n`, as `read_line` gave
@@ -354,6 +423,7 @@ pub(super) fn serve_connection(
                 }
                 Ok(Some(Message::Frame(frame))) => {
                     ipc.frame_received(frame.header().kind(), frame.header().frame_len());
+                    let end = start.saturating_add(frame.header().frame_len() as u64);
                     let mut connection = FrameConnection {
                         mux: &mux,
                         client,
@@ -362,9 +432,15 @@ pub(super) fn serve_connection(
                         scheduler: &surface_scheduler,
                         arrived: Instant::now(),
                         #[cfg(unix)]
-                        fds: &mut input.fds,
+                        bytes: start..end,
+                        #[cfg(unix)]
+                        fds: &mut input.arrived,
                     };
+                    // Whatever the lane, no descriptor outlives its frame.
                     match frames.route(frame, &mut connection) {
+                        Ok(true) if input.stray_descriptor(end) => {
+                            break ConnectionEnd::BadMessage(ConnectionBadMessage::UnexpectedFds);
+                        }
                         Ok(true) => continue,
                         Ok(false) => break ConnectionEnd::Dropped,
                         Err(bad) => break ConnectionEnd::BadMessage(bad),
@@ -379,6 +455,11 @@ pub(super) fn serve_connection(
                 },
                 Err(bad) => break ConnectionEnd::BadMessage(ConnectionBadMessage::Wire(bad)),
             };
+            // A line takes no descriptor.
+            if input.stray_descriptor(start.saturating_add(line.len() as u64)) {
+                zeroize_string(&mut line);
+                break ConnectionEnd::BadMessage(ConnectionBadMessage::UnexpectedFds);
+            }
             // The line's arrival, for its request span (server/request_spans.rs).
             let arrived = Instant::now();
             if line.trim().is_empty() {
@@ -476,6 +557,11 @@ struct ConnectionInput {
     messages: FrameReader,
     #[cfg(unix)]
     fds: cmux_ipc::fds::FdReceiver,
+    /// The descriptors `fds` received, tagged with the bytes of their read.
+    #[cfg(unix)]
+    arrived: ArrivedFds,
+    /// Bytes read from the stream so far: the offset of the next read.
+    received: u64,
     /// The peer closed its side.
     ended: bool,
 }
@@ -487,6 +573,9 @@ impl ConnectionInput {
             messages: FrameReader::new(line_limits()),
             #[cfg(unix)]
             fds: cmux_ipc::fds::FdReceiver::default(),
+            #[cfg(unix)]
+            arrived: ArrivedFds::default(),
+            received: 0,
             ended: false,
         }
     }
@@ -516,24 +605,43 @@ impl ConnectionInput {
         }
     }
 
-    /// One read straight into the reader's buffer.
+    /// One read straight into the reader's buffer; the descriptors it
+    /// brings are tagged with its bytes.
     #[cfg(unix)]
     fn read(&mut self) -> std::io::Result<usize> {
-        let ConnectionInput { stream, messages, fds, .. } = self;
-        match stream.socket_fd() {
+        let ConnectionInput { stream, messages, fds, arrived, received, .. } = self;
+        let read = match stream.socket_fd() {
             Some(fd) => messages.read_with(|room| fds.recv_into(fd, room, |_| {})),
             None => messages.read_from(stream),
-        }
+        }?;
+        let start = *received;
+        *received = start.saturating_add(read as u64);
+        arrived.arrived(fds, start..*received);
+        Ok(read)
     }
 
     #[cfg(not(unix))]
     fn read(&mut self) -> std::io::Result<usize> {
-        self.messages.read_from(&mut self.stream)
+        let read = self.messages.read_from(&mut self.stream)?;
+        self.received = self.received.saturating_add(read as u64);
+        Ok(read)
     }
 
     #[cfg(unix)]
     fn descriptors_queued(&self) -> usize {
-        self.fds.queued()
+        self.arrived.len()
+    }
+
+    /// Whether a descriptor came with the bytes up to `end`, the end of the
+    /// message just routed, and no message took it.
+    #[cfg(unix)]
+    fn stray_descriptor(&self, end: u64) -> bool {
+        self.arrived.stray_before(end)
+    }
+
+    #[cfg(not(unix))]
+    fn stray_descriptor(&self, _end: u64) -> bool {
+        false
     }
 
     #[cfg(not(unix))]
