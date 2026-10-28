@@ -527,6 +527,9 @@ pub async fn run(opts: DaemonOptions) -> Result<()> {
     }
     tokio::spawn(notify::notify_loop(hub.clone()));
 
+    #[cfg(feature = "tailnet")]
+    let tailnet = crate::tailnet::embedded_service::Service::spawn(hub.clone());
+
     let shutdown = async {
         #[cfg(unix)]
         {
@@ -547,6 +550,8 @@ pub async fn run(opts: DaemonOptions) -> Result<()> {
         _ = shutdown => {}
     }
     tracing::info!("shutting down");
+    #[cfg(feature = "tailnet")]
+    tailnet.shutdown().await;
     hub.stop_idle_reaper();
     // New clients get "connection refused" instead of a dying daemon.
     let _ = std::fs::remove_file(socket_path());

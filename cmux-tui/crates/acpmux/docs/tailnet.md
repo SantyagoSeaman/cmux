@@ -17,8 +17,15 @@ The controls are accepted only on a local, person-proven connection:
 The state stream is event-driven from the node's IPN bus. It has no polling
 timer. A failed watch clears the node so a later explicit start can retry; a
 generation fence prevents an old watch from changing a replacement node's
-state. Daemon shutdown closes the node but leaves its saved login for the next
-explicit start.
+state. Explicit start saves an opt-in alongside the node's private state. Daemon
+startup resumes only that opt-in; an untouched installation creates no state or
+node. Logout removes the opt-in before remote cleanup, so a failed sign-out
+cannot silently reconnect on the next launch. Daemon shutdown preserves it.
+
+The daemon supervises one WSS listener on the live node's port 443. It drains
+connections before replacing a node or DNS name. A failed listener reports an
+error and waits for explicit Start to retry. Shutdown bounds listener drainage
+and node closure; no polling timer runs in the background.
 
 Tailnet ingress receives the controller's live `Node` and the daemon's same
 `Arc<Hub>`. Pairing tickets are minted and redeemed by that Hub's one pairing
