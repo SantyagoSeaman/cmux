@@ -271,6 +271,46 @@ test("a click on the chip puts its text back in the prompt to edit, exactly as p
   expect(sent.map((prompt) => prompt.text)).toEqual([SPACED]);
 });
 
+// Leo, 2026-10-28: "double paste of long block text should reveal it instead of duplicating the
+// paste i think in the composer", then: "if you paste that and then paste again, then you don't
+// have to click it. It just does it." The same block pasted again does what a click on its chip
+// does: the chip's text goes into the prompt and the chip goes.
+const OTHER = Array.from({ length: 25 }, (_, index) => `row ${index + 1} of the other table`).join("\n");
+
+test("the same long block pasted again puts its chip's text in the prompt, as a click does, and no chip stays", async () => {
+  const composer = await openComposer();
+  await paste(LOG);
+  expect(chips(composer).map((chip) => chip.kind)).toEqual(["pasted"]);
+  await paste(LOG);
+  expect(chips(composer)).toEqual([]);
+  expect(host.querySelector(".acpmux-attachment-pasted")).toBeNull();
+  expect(host.querySelector(".acpmux-md-inline-chip")).toBeNull();
+  // Once, exactly as pasted: the text a click gives, not the block twice.
+  expect(markdownField().agentText(markdownField().value())).toBe(LOG);
+});
+
+test("a different long block pasted after one keeps both as chips", async () => {
+  const composer = await openComposer();
+  await paste(LOG);
+  await paste(OTHER);
+  const held = chips(composer);
+  expect(held.map((chip) => chip.kind)).toEqual(["pasted", "pasted"]);
+  expect(held.map((chip) => chip.text)).toEqual([LOG, OTHER]);
+});
+
+test("one undo after the second paste brings the chip back", async () => {
+  const composer = await openComposer();
+  await paste(LOG);
+  await paste(LOG);
+  expect(chips(composer)).toEqual([]);
+  await act(async () => markdownField().undo());
+  await settle();
+  const held = chips(composer);
+  expect(held.map((chip) => chip.kind)).toEqual(["pasted"]);
+  expect(held[0]!.text).toBe(LOG);
+  expect(markdownField().agentText(markdownField().value())).not.toContain("line 1 of the build log");
+});
+
 test("Paste as Plain Text by the key's position (a non-Latin layout) keeps the paste raw too", async () => {
   const composer = await openComposer();
   await plainPasteKey({ key: "м", code: "KeyV" });
