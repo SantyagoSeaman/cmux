@@ -95,10 +95,9 @@ export function papercutEvents({
   return { events, session };
 }
 
-/// Starts the stand-in daemon and the dev server; returns `open`, `close`, `drop` and `methods`. `open` waits
+/// Starts the stand-in daemon and the dev server; returns `open`, `close` and `methods`. `open` waits
 /// for the last answer, or for `ready` (a selector) when the chat's end shows something else;
-/// `methods` lists every method the pages sent the daemon, in order (a stop is `session/cancel`);
-/// `drop` closes every page's socket, as an acpmux restart does, and the pages connect again.
+/// `methods` lists every method the pages sent the daemon, in order (a stop is `session/cancel`).
 export async function papercutPane(
   browser: () => Browser,
   options: {
@@ -115,7 +114,6 @@ export async function papercutPane(
   const webviews = path.resolve(import.meta.dir, "../..");
   const { events, session } = papercutEvents(options);
   const methods: string[] = [];
-  const sockets = new Set<{ close(code?: number, reason?: string): void }>();
   const answer = (method: string): unknown => {
     switch (method) {
       case "initialize":
@@ -130,6 +128,24 @@ export async function papercutPane(
         return null;
     }
   };
+  /// Every `session/prompt` the page sent, with its params (`_meta.acpmux.promptId`).
+  const prompts: Record<string, any>[] = [];
+  let socket: { send(data: string): void; close(): void } | undefined;
+  /// An acpmux record, appended to the log (a later attach replays it) and sent to the attached page.
+  const record = (kind: string, msg: Record<string, unknown>, dir = "mux") => {
+    const event = { sessionId: PAPERCUT_CHAT, seq: events.length + 1, at: Date.now(), dir, kind, msg };
+    events.push(event);
+    (session as { lastSeq: number }).lastSeq = event.seq;
+    socket?.send(JSON.stringify({ jsonrpc: "2.0", method: "_acpmux/event", params: event }));
+  };
+  /// The connection drops (acpmux restarted): the page connects again and reads the log again.
+  const drop = () => socket?.close();
+  /// Waiters for a method's next send: `sent(method, after)` settles once the pages have sent `method`
+  /// more than `after` times (an event, not a poll).
+  const waiters: { method: string; after: number; done: () => void }[] = [];
+  const count = (method: string) => methods.filter((sent) => sent === method).length;
+  const sent = (method: string, after: number) =>
+    count(method) > after ? Promise.resolve() : new Promise<void>((done) => void waiters.push({ method, after, done }));
   const daemon = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -137,15 +153,15 @@ export async function papercutPane(
       return server.upgrade(request, { data: undefined }) ? undefined : new Response("acpmux", { status: 426 });
     },
     websocket: {
-      open(ws) {
-        sockets.add(ws);
-      },
-      close(ws) {
-        sockets.delete(ws);
-      },
       message(ws, raw) {
-        const message = JSON.parse(String(raw)) as { id?: number; method: string };
+        const message = JSON.parse(String(raw)) as { id?: number; method: string; params?: Record<string, any> };
         methods.push(message.method);
+        for (const waiter of waiters.filter((one) => one.method === message.method && count(one.method) > one.after)) {
+          waiters.splice(waiters.indexOf(waiter), 1);
+          waiter.done();
+        }
+        socket = ws;
+        if (message.method === "session/prompt") prompts.push(message.params ?? {});
         if (message.id !== undefined)
           ws.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: answer(message.method) }));
       },
@@ -159,14 +175,9 @@ export async function papercutPane(
   });
   await vite.listen();
   await warmViteServer(vite, "/");
-  /// `prepare` runs before the page loads (a test's stand-in for the App's actions, say).
-  const open = async (
-    viewport = { width: 900, height: 700 },
-    prepare?: (page: Page) => Promise<void>,
-  ): Promise<Page> => {
+  const open = async (viewport = { width: 900, height: 700 }): Promise<Page> => {
     const page = await browser().newPage({ viewport });
     await installPaintedFrames(page);
-    await prepare?.(page);
     const { port } = vite.httpServer!.address() as { port: number };
     const endpoint = `ws://127.0.0.1:${daemon.port}/`;
     await page.goto(
@@ -204,10 +215,7 @@ export async function papercutPane(
     await vite.close();
     await daemon.stop(true);
   };
-  const drop = () => {
-    for (const socket of sockets) socket.close(1012, "restart");
-  };
-  return { open, close, drop, methods };
+  return { open, close, methods, prompts, record, drop, sent };
 }
 
 /// Settings > Agent Chat > Inspector: Push always (or back to the default), as the host's `display`
