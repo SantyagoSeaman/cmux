@@ -61,9 +61,11 @@ export function usePastedChips(
     plainPaste() {
       plainUntil.current = performance.now() + PLAIN_PASTE_MS;
     },
-    /// Makes pasted `text` a chip when it is huge; true when it did. A composer already holding the
-    /// most chips takes the text as it is.
-    take(text: string): boolean {
+    /// Makes pasted `text` a chip when it is huge; true when it did. The same block pasted again
+    /// while its chip is in the draft does what a click on that chip does (`open`, the composer's
+    /// click): its text goes into the prompt and the chip goes (Leo, 2026-10-28: "if you paste that
+    /// and then paste again, then you don't have to click it. It just does it.").
+    take(text: string, open?: (id: string) => void): boolean {
       // Past what a prompt carries it is a file, Paste as Plain Text or not.
       if (attachFile && text.length > PASTE_FILE_CHARS) {
         // Its tile shows now; its bytes are made a slice per task after (copying 100 MB of text in
@@ -72,6 +74,11 @@ export function usePastedChips(
         return true;
       }
       if (raw() || !isLargePaste(text)) return false;
+      const same = open && attachments.current.find((held) => held.kind === "pasted" && held.text === text);
+      if (same) {
+        open(same.id);
+        return true;
+      }
       const chip = pastedTextAttachment(text);
       // Ahead of the render, so a second paste at once counts this one.
       attachments.current = [...attachments.current, chip];

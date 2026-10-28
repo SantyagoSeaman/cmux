@@ -61,6 +61,12 @@ function holds(content: Fragment, test: (node: ProseNode) => boolean): boolean {
 /// it. A U+FFFC in other copied text (a page's bold run) is only text, and pastes as text.
 export const sliceHoldsInline = (slice: Slice) => holds(slice.content, (node) => node.type.name === INLINE_NODE);
 
+/// Where attachment `id` is placed in `doc` (its nodes' positions, in order).
+export const inlinePositions = (doc: ProseNode, id: string) =>
+  inlineNodes(doc)
+    .filter((node) => node.id === id)
+    .map((node) => node.pos);
+
 /// Each placed attachment's node in `doc`, in order.
 function inlineNodes(doc: ProseNode): { id: string; pos: number }[] {
   const found: { id: string; pos: number }[] = [];

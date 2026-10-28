@@ -10,6 +10,7 @@ import { followScrollEdges } from "./summary/scrollEdges";
 import {
   inlineAttachmentNode,
   inlinePlugin,
+  inlinePositions,
   insertInline,
   orderInline,
   placeTokensIn,
@@ -33,7 +34,7 @@ import { gfm } from "@milkdown/kit/preset/gfm";
 import { history } from "@milkdown/kit/plugin/history";
 import { clipboard } from "@milkdown/kit/plugin/clipboard";
 import { baseKeymap, chainCommands, lift, selectAll } from "@milkdown/kit/prose/commands";
-import { redo, redoDepth, undo, undoDepth } from "@milkdown/kit/prose/history";
+import { closeHistory, redo, redoDepth, undo, undoDepth } from "@milkdown/kit/prose/history";
 import { keymap } from "@milkdown/kit/prose/keymap";
 import { splitListItem } from "@milkdown/kit/prose/schema-list";
 import { type EditorState, Plugin, Selection, TextSelection } from "@milkdown/kit/prose/state";
@@ -95,6 +96,9 @@ export type MarkdownFieldHandle = {
   insertInline(ids: readonly string[]): boolean;
   /// Takes attachment `id` out of the text.
   removeInline(id: string): void;
+  /// Puts `text` at the caret as a paste of it and takes placed attachment `id` out of the text, as
+  /// one edit (one undo brings the attachment back); false when `id` is not placed in the text.
+  openInline(id: string, text: string): boolean;
   /// Puts the attachments placed in the text in `ids`' order, each place in the text kept.
   orderInline(ids: readonly string[]): void;
 };
@@ -263,6 +267,28 @@ function plainFragment(view: EditorView, text: string): Fragment {
 }
 
 /** Inserts `text` at the selection as the field's lines (`plainFragment`), the caret after it. */
+/** `text` at the selection as `insertPlain` puts it, and placed attachment `id` out of the text,
+ * in one transaction. False when `id` is not placed. */
+function openInline(view: EditorView, id: string, text: string): boolean {
+  const positions = inlinePositions(view.state.doc, id);
+  if (!positions.length) return false;
+  const { from, to, $from } = view.state.selection;
+  // Its own undo step, also right after the paste that placed the attachment (history groups
+  // edits within 500 ms): one undo brings the attachment back, not the field as it was before both.
+  const tr = closeHistory(view.state.tr);
+  if ($from.parent.type.spec.code) tr.insertText(text, from, to);
+  else {
+    tr.replaceWith(from, to, plainFragment(view, text));
+    tr.setSelection(TextSelection.near(tr.doc.resolve(tr.mapping.map(to))));
+  }
+  for (const pos of positions.reverse()) {
+    const mapped = tr.mapping.mapResult(pos);
+    if (!mapped.deleted) tr.delete(mapped.pos, mapped.pos + 1);
+  }
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
 function insertPlain(view: EditorView, text: string) {
   const { from, to, $from } = view.state.selection;
   // In a code block a newline is a newline.
@@ -1045,6 +1071,7 @@ const MarkdownFieldImpl = React.forwardRef<MarkdownFieldHandle, MarkdownFieldPro
         removeInline: (id) => {
           if (view.current) removeInline(view.current, id);
         },
+        openInline: (id, text) => (view.current ? openInline(view.current, id, text) : false),
         orderInline: (ids) => {
           if (view.current) orderInline(view.current, ids);
         },

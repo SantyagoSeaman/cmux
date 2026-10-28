@@ -143,6 +143,18 @@ export function ComposerBox({
   const pastedChips = usePastedChips(attachmentsRef ?? ownAttachments, setAttachments, prompt, onPasteFile);
   const plainPaste = useRef(pastedChips.plainPaste);
   plainPaste.current = pastedChips.plainPaste;
+  /// A click on a pasted chip, and the same block pasted again: its text goes into the prompt at
+  /// the caret and the chip goes. A chip placed in the text is one edit (one undo brings it back:
+  /// inlineAttachments.tsx keeps what an edit took out); a strip chip is the paste of its text.
+  const openPasted = (id: string) => {
+    const chip = (attachmentsRef ?? ownAttachments).current.find((held) => held.id === id);
+    if (chip?.kind === "pasted" && chip.text !== undefined && prompt.current?.openInline(id, chip.text)) {
+      prompt.current.focus();
+      return;
+    }
+    pastedChips.expand(id);
+    prompt.current?.removeInline(id);
+  };
   const inline = useInlineAttachments({
     field: prompt,
     scope: field.selectionKey,
@@ -153,10 +165,7 @@ export function ComposerBox({
     pending: pending ?? [],
     cancel: (id) => onCancelAttachment?.(id),
     retry: (id) => onRetryAttachment?.(id),
-    expand: (id) => {
-      pastedChips.expand(id);
-      prompt.current?.removeInline(id);
-    },
+    expand: openPasted,
     placing: () => !fieldOverlay,
   });
   useImperativeHandle(
@@ -217,10 +226,7 @@ export function ComposerBox({
           {...(onCancelAttachment ? { onCancel: inline.cancel } : {})}
           {...(onRetryAttachment ? { onRetry: onRetryAttachment } : {})}
           onReorder={onReorderAttachment ?? inline.reorder}
-          onExpand={(id) => {
-            pastedChips.expand(id);
-            prompt.current?.removeInline(id);
-          }}
+          onExpand={openPasted}
         />
         {/* The prompt's own right-click menu (POLISH.md right-click contract); WebKit's never shows. */}
         <ContextMenu className="acpmux-composer-field-menu" items={fieldMenu} selection="menu" onOpen={onFieldMenuOpen}>
@@ -241,7 +247,7 @@ export function ComposerBox({
             onBeforeInput={(data, state) => {
               // A huge paste is a chip, the prompt as it was (pastedText.ts); a chip's own text going
               // back in is the person's to edit, never the host's (shell mode).
-              if (state.paste && !state.composing && pastedChips.take(data)) return true;
+              if (state.paste && !state.composing && pastedChips.take(data, openPasted)) return true;
               if (pastedChips.expanding.current) return false;
               return onBeforeInput?.(data, state) ?? false;
             }}
