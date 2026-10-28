@@ -196,15 +196,17 @@ impl IpcCapability {
     /// come from one build (mojo/public/tools/bindings/README.md,
     /// "Versioning"). A direct same-user peer gets them, and so does a bridge
     /// that declared it reads frames by header (`bridge-frames-v1`). The ring
-    /// passes descriptors over SCM_RIGHTS, so only a peer that can receive
-    /// them gets it: Mojo passes platform handles only on a channel endpoint
+    /// and shared buffers pass descriptors over SCM_RIGHTS, so only a peer
+    /// that can pass them gets them: Mojo passes platform handles only on a channel endpoint
     /// that can carry them (mojo/core/channel_posix.cc). WebSocket, the remote
     /// entry and page relays get none.
     pub(super) const fn allowed(self, peer: IpcPeer, current_revision: bool) -> bool {
         match (self, peer) {
             (_, IpcPeer::WebSocket | IpcPeer::RemoteEntry | IpcPeer::PageRelay) => false,
             (Self::AttachStreams, _) => true,
-            (Self::OutputRing, _) => peer.passes_descriptors() && current_revision,
+            (Self::OutputRing | Self::SharedBuffers, _) => {
+                peer.passes_descriptors() && current_revision
+            }
             (Self::Frames | Self::AttachFrames, IpcPeer::Local | IpcPeer::FramedBridge) => {
                 current_revision
             }

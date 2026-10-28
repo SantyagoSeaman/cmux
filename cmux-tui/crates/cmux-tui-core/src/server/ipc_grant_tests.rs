@@ -388,6 +388,7 @@ fn ipc_grant_rule_table() {
     );
     assert_eq!(IpcCapability::offered(IpcPeer::FramedBridge, false, &bound), [AttachStreams]);
     assert!(!OutputRing.allowed(IpcPeer::FramedBridge, true));
+    assert!(!SharedBuffers.allowed(IpcPeer::FramedBridge, true), "a bridge passes no descriptor");
     assert!(IpcPeer::Local.passes_descriptors());
     assert!(!IpcPeer::FramedBridge.passes_descriptors());
     assert_eq!(
@@ -400,6 +401,7 @@ fn ipc_grant_rule_table() {
     assert!(!OutputRing.allowed(IpcPeer::Unverified, true));
     assert!(!SharedBuffers.allowed(IpcPeer::Local, false));
     assert!(!SharedBuffers.allowed(IpcPeer::Bridged, true));
+    assert!(!SharedBuffers.allowed(IpcPeer::Unverified, true));
     for capability in IpcCapability::ALL {
         assert_eq!(IpcCapability::named(capability.name()), Some(capability));
     }
