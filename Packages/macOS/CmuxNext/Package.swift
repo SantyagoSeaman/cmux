@@ -291,6 +291,7 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 "CmuxNextSettingsWindow",
                 "CmuxNextSignposts",
                 "CmuxNextCloud",
+                "CmuxNextCloudUI",
                 "CmuxNextRemote",
                 "CmuxNextMobile",
                 "CmuxNextMobileHost",
@@ -1207,6 +1208,17 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
             ],
             swiftSettings: daemonSwiftSettings
         ),
+        .target(
+            name: "CmuxNextCloudUI",
+            dependencies: ["CmuxNextCloud", "CmuxNextDesign"],
+            resources: [.process("Resources")],
+            swiftSettings: uiSwiftSettings
+        ),
+        .testTarget(
+            name: "CmuxNextCloudUITests",
+            dependencies: ["CmuxNextCloud", "CmuxNextCloudUI", "CmuxNextDesign"],
+            swiftSettings: uiSwiftSettings
+        ),
         // Machines reached over the user's own OpenSSH: destinations, the
         // `cmux-tui remote connect ssh://` link, probe, reconnect gate, the
         // pinned cmux-tui install and the remote-to-local deny policy. No UI.
@@ -1660,6 +1672,7 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 "CmuxNextChiefPetWiring",
                 "CmuxNextChromiumRuntime",
                 "CmuxNextCloudCredentials",
+                "CmuxNextCloudUI",
                 "CmuxNextCompat",
                 "CmuxNextComputerUse",
                 "CmuxNextCookieImport",
@@ -1699,6 +1712,8 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 "CmuxNextRemoteViewSessions",
                 "CmuxNextScreenshots",
                 "CmuxNextSessionTransfer",
+                "CmuxNextSettings",
+                "CmuxNextSidebar",
                 "CmuxNextSignposts",
                 "CmuxNextStash",
                 "CmuxNextTabs",
@@ -1706,6 +1721,7 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 "CmuxNextTerminalGeometry",
                 "CmuxNextTestExitTrace",
                 "CmuxNextTestSupport",
+                "CmuxNextUpdater",
                 "CmuxNextVSCodeServer",
                 "CmuxNextWakeups",
                 "CmuxNextWakeupsTestSupport",
@@ -1717,6 +1733,7 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 .product(name: "CmuxHomeRender", package: "CmuxHomeRender"),
                 // MacInstallTeamAuthTests signs team challenges with the install key.
                 .product(name: "CmuxInstallAuthCore", package: "CmuxInstallAuthCore"),
+                .product(name: "CmuxTheme", package: "CmuxTheme"),
                 // UpdateLoadingIndicatorTests feeds Sparkle's update states.
                 .product(name: "CmuxUpdater", package: "CmuxUpdater"),
                 .product(name: "CmuxVNC", package: "CmuxVNC"),

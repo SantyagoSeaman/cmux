@@ -33,7 +33,7 @@ extension UpdatesSettings {
     public nonisolated static let keepPreviousVersionsRange: ClosedRange<Double> = 0...5
     /// `updates.showWhatsNew`: The bottom-left "cmux Updated!" card after an update (WHATS-NEW-AFTER-UPDATE W1; never a top-of-sidebar item); managed config can force it off.
     public nonisolated static let showWhatsNewPath = ["updates", "showWhatsNew"]
-    public nonisolated static let showWhatsNewDefault = true
+    public nonisolated static let showWhatsNewDefault = false
     /// `updates.idleInstallMaxWaitSeconds`: Nightly idle install (#20295): the longest it waits for agent turns, foreground commands and input before installing anyway; the relaunch keeps every terminal and agent.
     public nonisolated static let idleInstallMaxWaitPath = ["updates", "idleInstallMaxWaitSeconds"]
     public nonisolated static let idleInstallMaxWaitDefault: Double = 600
@@ -96,8 +96,8 @@ nonisolated enum UpdateSettingsSchema {
                 UpdatesSettings.downloadAutomaticallyPath,
                 section: .general,
                 group: group,
-                title: SettingsText.keyed("settings.updates.downloadAutomatically", "Download and Install Updates Automatically"),
-                help: SettingsText.keyed("settings.updates.downloadAutomatically.help", "Off: cmux still checks for updates and shows Update Available; one click downloads and installs it. On by default in NIGHTLY and DEV builds."),
+                title: SettingsText.keyed("settings.updates.downloadAutomatically", "Download Updates Automatically"),
+                help: SettingsText.keyed("settings.updates.downloadAutomatically.help", "Off: cmux checks for updates and asks before it downloads one. On: updates download by themselves. Either way, cmux asks before it restarts into an update."),
                 kind: .toggle,
                 default: .bool(UpdatesSettings.downloadAutomaticallyDefault),
                 keywords: ["update", "download", "background", "metered"]
