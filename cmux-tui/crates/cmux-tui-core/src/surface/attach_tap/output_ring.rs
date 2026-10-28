@@ -59,12 +59,76 @@ impl RingAdvance {
 }
 
 #[cfg(unix)]
-pub(crate) use ring::{OutputRingGrant, TerminalOutputRing};
+pub(crate) use ring::{OutputRingGrant, TerminalRingSlot};
+
+/// No shared-memory ring off Unix: nothing is published, no ring is granted.
+#[cfg(not(unix))]
+#[derive(Default)]
+pub(crate) struct TerminalRingSlot;
+
+#[cfg(not(unix))]
+impl TerminalRingSlot {
+    pub(crate) fn publish(&mut self, _bytes: &[u8]) -> Option<u64> {
+        None
+    }
+
+    pub(crate) fn end(&mut self) {}
+}
 
 #[cfg(unix)]
 mod ring {
+    use crate::surface::snapshot_attach::RingUnavailable;
     use cmux_ipc::output_ring::{DEFAULT_CAPACITY, LAYOUT, OutputRingWriter, RingError};
     use std::os::fd::OwnedFd;
+
+    /// A terminal's ring through its life, under the `pty.taps` lock: none
+    /// until the first ring attach, then live until the terminal ends.
+    #[derive(Default)]
+    pub(crate) enum TerminalRingSlot {
+        #[default]
+        None,
+        Live(TerminalOutputRing),
+        /// The terminal ended: the writer and its writable mapping are gone,
+        /// and no ring is made again. Each reader keeps its own mapping.
+        Ended,
+    }
+
+    impl TerminalRingSlot {
+        /// Writes `bytes` into the ring, if there is one: its new end. The
+        /// caller counted them in the snapshot offset under the same
+        /// terminal lock, so the ring's end stays that offset.
+        pub(crate) fn publish(&mut self, bytes: &[u8]) -> Option<u64> {
+            match self {
+                Self::Live(ring) => Some(ring.publish(bytes)),
+                Self::None | Self::Ended => None,
+            }
+        }
+
+        /// The ring a ring viewer attached at snapshot `offset` reads, made
+        /// now when there is none. The caller holds the terminal lock, so no
+        /// output moves the offset meanwhile. An ended terminal gets none.
+        pub(crate) fn grant(&mut self, offset: u64) -> Result<OutputRingGrant, RingUnavailable> {
+            if matches!(self, Self::None) {
+                *self =
+                    Self::Live(TerminalOutputRing::create(offset).map_err(RingUnavailable::Ring)?);
+            }
+            let Self::Live(ring) = self else { return Err(RingUnavailable::Exited) };
+            debug_assert_eq!(ring.end(), offset, "the ring's end is the snapshot offset");
+            ring.grant().map_err(RingUnavailable::Ring)
+        }
+
+        /// The terminal ended: unmap the daemon's writable view
+        /// (app-daemon-connection-DESIGN.md 4).
+        pub(crate) fn end(&mut self) {
+            *self = Self::Ended;
+        }
+
+        /// The writer and its writable mapping are alive.
+        #[cfg(test)]
+        pub(crate) fn is_live(&self) -> bool {
+            matches!(self, Self::Live(_))
+        }
+    }
 
     /// One terminal's ring and its only writer.
     pub(crate) struct TerminalOutputRing {

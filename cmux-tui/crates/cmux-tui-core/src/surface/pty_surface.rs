@@ -329,11 +329,13 @@ impl PtySurface {
     /// The exited child's modes off, so its retained tab selects and
     /// pastes like plain text instead of capturing the mouse. Published as
     /// output: byte taps get the same reset and the returned generation
-    /// renders it.
+    /// renders it. Its ring takes that reset last, then the daemon unmaps
+    /// it: both exit paths (local and hosted) end here.
     fn drop_exited_modes(&self, term: &mut Terminal) -> u64 {
         let exit_reset = crate::prompt_mode_reset::exit_reset(term);
         let reset = term.vt_write_with_normalized(&exit_reset);
         self.broadcast_attach_output(&reset);
+        self.taps.lock().unwrap().ring.end();
         self.mouse_encoders.lock().unwrap().sync_from_terminal(term);
         let generation = self.render_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.stream_progress.notify();
