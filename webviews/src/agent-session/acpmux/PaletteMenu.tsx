@@ -10,6 +10,7 @@ import { registerPicker } from "./pickerOpeners";
 import { Icon as CmuxIcon } from "./icons/Icon";
 import type { ComposerPlusExtension } from "./composerPlusRegistry";
 import { useT, type Translate } from "./i18n";
+import { scrollActiveMenuRow } from "./scrollActiveMenuRow";
 
 export type PaletteChoice = {
   id: string;
@@ -165,8 +166,7 @@ export function PaletteMenu({
   }, [rows.length]);
   useEffect(() => {
     if (!open || !rows.length) return;
-    const row = menu.current?.querySelector<HTMLElement>(`#${menuId}-${selected}`);
-    row?.scrollIntoView?.({ block: "nearest" });
+    scrollActiveMenuRow(menu.current, `${menuId}-${selected}`);
   }, [open, rows.length, menuId, selected]);
   useEffect(() => registerPicker(label, openMenu), [label, onOpen]);
   const pick = (index: number) => {
