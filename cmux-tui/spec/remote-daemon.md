@@ -74,6 +74,25 @@ Iroh supplies the same binary-link contract through authenticated QUIC, NAT trav
 
 `mux-control` carries the existing JSON-lines attach protocol as a compatibility byte stream.
 
+A daemon whose `mux-control` open marker lists `bridge-frames-v1` also carries
+cmux-ipc frames ([`transports.md`](transports.md#binary-frames-cmux-ipc-not-yet-negotiated)).
+At a message boundary, byte `0xFF` starts a frame: each end cuts it from its
+16-byte header alone and passes the payload through unparsed, with the same
+directional budget as a line. Every frame of a data stream rides one lane in
+each direction (to the daemon the interactive lane, to the client the bulk
+lane), so a stream keeps its order. A JSON event line with a nonzero `stream`
+(`stream-end`, `input-failed`, a view's items) rides the bulk lane with that
+stream's frames, so it never passes them. A stream-0 call (REQUEST, CANCEL,
+REPLY, ERROR) rides the interactive lane with stream input, as a JSON mutation
+does, so a `close-surface` never passes input sent before it; only a method
+the schema marks read-only and `ordering: independent` takes the lane of its
+priority hint (input interactive, control control, bulk and background bulk),
+and a stream-0 TYPED_EVENT also goes by its hint. RING, RING_ADVANCE, RING_ACK,
+SHARED_BUFFER and calls with the fds flag never cross. Each receiving end
+checks every frame before it writes a byte of it: such a frame, a frame on a
+lane its sender never uses, or (on a client end whose daemon does not list the
+feature) any frame closes the stream (`frames_not_negotiated` for the last).
+
 `workspace-rpc` opens independent interactive, control, cancellation, and bulk streams. Requests execute concurrently under per-lane admission control, and responses return on the request's lane. Cancellation uses its own persistent control-lane stream and remains admissible when normal request slots are full. Non-cancelable mutations preserve receive order within one traffic class. Concurrent requests across traffic classes have no implicit ordering, so a client awaits a response before issuing a dependent operation. The exact service names, envelopes, request fields, response shapes, and examples are defined in [`remote-rpc.md`](remote-rpc.md). It exposes:
 
 - open/list workspace roots and capabilities;
