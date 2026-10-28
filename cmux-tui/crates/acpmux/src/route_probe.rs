@@ -40,9 +40,59 @@ pub fn classify(status: u16) -> ProbeStatus {
     }
 }
 
+/// Each route's last probe answer and when it came (ms since the epoch), whoever asked:
+/// `_acpmux/route/test`, a failed turn's background probe, `_acpmux/session/auth {refresh}`.
+/// Only answers at most [`KEPT_MS`] old stay, and at most [`KEPT_ROUTES`] of them: every read
+/// and every probe drops the older ones ([`keep_recent`]).
+static LAST: Mutex<BTreeMap<String, (u64, Value)>> = Mutex::new(BTreeMap::new());
+
+/// How long a probe answer is kept for [`recent`].
+pub const KEPT_MS: u64 = 5 * 60 * 1000;
+
+/// The most routes whose answers are kept at once; past it the oldest answers go.
+const KEPT_ROUTES: usize = 64;
+
+/// The route's last probe answer, when it is at most `max_age_ms` (and [`KEPT_MS`]) old.
+pub fn recent(route: &str, max_age_ms: u64) -> Option<(u64, Value)> {
+    let now = crate::store::now_ms();
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    keep_recent(&mut last, now);
+    let (at, answer) = last.get(route)?;
+    (now.saturating_sub(*at) <= max_age_ms).then(|| (*at, answer.clone()))
+}
+
+/// Drops answers older than [`KEPT_MS`], then the oldest past [`KEPT_ROUTES`].
+fn keep_recent(last: &mut BTreeMap<String, (u64, Value)>, now: u64) {
+    last.retain(|_, (at, _)| now.saturating_sub(*at) <= KEPT_MS);
+    while last.len() > KEPT_ROUTES {
+        let Some(oldest) = last.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        last.remove(&oldest);
+    }
+}
+
+/// Whether probing the route reads the login keychain: its secret or a header is a
+/// `keychain:` reference. `_acpmux/session/auth` never probes such a route itself.
+pub fn reads_keychain(route: &Route) -> bool {
+    let keychain = |v: &str| v.starts_with("keychain:");
+    route.file.secret.as_deref().is_some_and(keychain)
+        || route.file.headers.values().any(|v| keychain(v))
+}
+
 /// One cheap request to the route: its health URL, else the provider's model
-/// list. Never logs or returns a secret.
+/// list. Never logs or returns a secret. The answer is kept for [`recent`].
 pub async fn probe(route: &Route, home: &Path) -> Value {
+    let answer = probe_once(route, home).await;
+    let now = crate::store::now_ms();
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    last.insert(route.id.clone(), (now, answer.clone()));
+    keep_recent(&mut last, now);
+    answer
+}
+
+async fn probe_once(route: &Route, home: &Path) -> Value {
     let started = Instant::now();
     let answer = |status: ProbeStatus, message: String| {
         json!({
@@ -141,5 +191,24 @@ pub fn auto_probe_allowed(route: &str) -> bool {
             last.insert(route.to_owned(), now);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kept answers stay young and few, however many routes were probed.
+    #[test]
+    fn kept_answers_are_recent_and_bounded() {
+        let mut last = BTreeMap::new();
+        last.insert("stale".to_owned(), (0, json!({})));
+        for i in 0..100u64 {
+            last.insert(format!("r{i}"), (KEPT_MS + i, json!({})));
+        }
+        keep_recent(&mut last, KEPT_MS + 100);
+        assert_eq!(last.len(), KEPT_ROUTES);
+        assert!(!last.contains_key("stale") && !last.contains_key("r0"), "{last:?}");
+        assert!(last.contains_key("r99"), "{last:?}");
     }
 }
