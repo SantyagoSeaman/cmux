@@ -839,7 +839,7 @@ fieldset.acpmux-question[hidden]{display:none}
 .acpmux-trust-ask[data-asking]{flex-wrap:wrap;row-gap:6px;padding-top:7px;padding-bottom:7px}.acpmux-trust-ask-body{flex:1 1 240px;min-width:0;display:flex;flex-direction:column;gap:2px}.acpmux-trust-ask-body .acpmux-trust-ask-text{white-space:normal;overflow-wrap:anywhere;font-weight:500}.acpmux-trust-ask-detail{color:var(--acpmux-composer-dim);font-size:var(--text-detail);line-height:1.35;overflow-wrap:anywhere;letter-spacing:var(--text-detail--letter-spacing)}.acpmux-trust-ask-actions{display:flex;flex-wrap:wrap;gap:4px;margin-left:auto}
 
 /* The composer's + palette is a command surface: searchable, compact and immediately interactive. */
-.acpmux-palette-menu{width:min(360px,calc(100vw - 16px));max-height:min(480px,70vh);padding:0;overflow-y:auto}
+.acpmux-palette-menu{width:min(360px,calc(100vw - 16px));max-height:min(480px,70vh);padding:0;overflow-y:auto;scroll-padding-block-start:48px}
 .acpmux-palette-menu{animation:none!important;transition:none!important}
 .acpmux-palette-menu .acpmux-menu-item>svg{flex:none;color:var(--agent-muted)}
 .acpmux-palette-search{position:sticky;top:0;z-index:var(--layer-dropdown);padding:var(--ui-popup-padding);border-bottom:.5px solid var(--agent-border);background:var(--surface-popup)}
