@@ -11,6 +11,9 @@ public struct DaemonEndpoint: Hashable, Sendable {
     /// (``DaemonBridge``: a paired server's owner session through `cmux link
     /// dial`). `socketPath` then only names what to watch for changes.
     public var bridge: DaemonBridge?
+    /// What carries `socketPath`'s bytes to the daemon: its own socket (``WireCarrier/direct``), or a link's
+    /// forwarded socket, which passes frames only when the link said so. A ``bridge`` child never does.
+    public var carrier: WireCarrier
     /// Where the connections opened to this endpoint count their traffic (``DaemonWireStats``):
     /// the app's composition root puts its recorder on its daemon's endpoints, and every opener
     /// passes it to its ``LineTransport``. Nil counts nothing (a release build). Not part of the
@@ -18,16 +21,18 @@ public struct DaemonEndpoint: Hashable, Sendable {
     public var wireStats: DaemonWireStats?
 
     public init(socketPath: String, pid: Int32? = nil, generation: DaemonGeneration? = nil, bridge: DaemonBridge? = nil,
-                wireStats: DaemonWireStats? = nil) {
+                carrier: WireCarrier = .direct, wireStats: DaemonWireStats? = nil) {
         self.socketPath = socketPath
         self.pid = pid
         self.generation = generation
         self.bridge = bridge
+        self.carrier = carrier
         self.wireStats = wireStats
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.socketPath == rhs.socketPath && lhs.pid == rhs.pid && lhs.generation == rhs.generation && lhs.bridge == rhs.bridge
+            && lhs.carrier == rhs.carrier
     }
 
     public func hash(into hasher: inout Hasher) {
@@ -35,6 +40,18 @@ public struct DaemonEndpoint: Hashable, Sendable {
         hasher.combine(pid)
         hasher.combine(generation)
         hasher.combine(bridge)
+        hasher.combine(carrier)
+    }
+}
+
+/// A remote machine's socket for one connection, and what carries its bytes (``DaemonEndpoint/carrier``).
+public struct DaemonSocket: Sendable, Equatable {
+    public var path: String
+    public var carrier: WireCarrier
+
+    public init(path: String, carrier: WireCarrier) {
+        self.path = path
+        self.carrier = carrier
     }
 }
 

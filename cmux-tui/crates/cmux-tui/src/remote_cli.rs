@@ -591,16 +591,19 @@ fn connect_with_flags(
                     && owner.is_none_or(parent_process_is)
                 {
                     let snapshot = connected.runtime.connection_snapshot().await;
+                    let features = connected.runtime.local_socket_features();
                     let mut topology = snapshot.clone();
                     if let Some(path) = topology.transport.selected_path.as_mut() {
                         path.rtt_micros = None;
                     }
+                    let topology = (topology, features.clone());
                     if previous.as_ref() != Some(&topology) {
                         println!(
                             "{}",
                             serde_json::json!({
                                 "event": "connection-snapshot",
                                 "local_socket": connected.runtime.info().local_socket.display().to_string(),
+                                "local_socket_features": features,
                                 "connection": snapshot,
                             })
                         );

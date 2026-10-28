@@ -3268,6 +3268,110 @@ mod tests {
         assert_eq!(received, [READY_EVENT, &output, LATE_LINE].concat());
     }
 
+    /// Accepts the next `mux-control` open on `daemon_mux` and answers it with
+    /// an open marker that lists `features` on every mux lane.
+    #[cfg(unix)]
+    async fn answer_mux_open(
+        daemon_mux: &Arc<ServiceMultiplexer>,
+        features: &[&str],
+    ) -> ServiceStream {
+        let incoming =
+            tokio::time::timeout(std::time::Duration::from_secs(10), daemon_mux.accept())
+                .await
+                .expect("no mux-control open")
+                .unwrap()
+                .unwrap();
+        assert_eq!(incoming.stream.service(), Service::MuxControl);
+        let marker = serde_json::to_vec(&serde_json::json!({
+            "type": "opened",
+            "service": incoming.stream.service(),
+            "features": features,
+        }))
+        .unwrap();
+        for lane in [Lane::Interactive, Lane::Control, Lane::Bulk] {
+            incoming.stream.send_on(lane, Bytes::from(marker.clone())).await.unwrap();
+        }
+        incoming.stream
+    }
+
+    /// The link opens its first `mux-control` stream before a client dials,
+    /// so it knows whether its socket carries frames: the first client gets
+    /// that stream, and each later client's own open says it again (a
+    /// replaced daemon may list other features).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_preopened_mux_says_whether_the_link_socket_carries_frames() {
+        use tokio::io::AsyncReadExt;
+
+        let directory = tempdir().unwrap();
+        let bridge_path = directory.path().join("bridge.sock");
+        let bridge_listener = tokio::net::UnixListener::bind(&bridge_path).unwrap();
+        let (client_endpoint, daemon_endpoint) = endpoint_pair();
+        let client_mux = ServiceMultiplexer::new(client_endpoint, EndpointRole::Client);
+        let daemon_mux = ServiceMultiplexer::new(daemon_endpoint, EndpointRole::Daemon);
+
+        let (first, first_daemon) = tokio::join!(
+            crate::bridge::PreopenedMux::open(&client_mux),
+            answer_mux_open(&daemon_mux, &[MUX_INPUT_V1_FEATURE, BRIDGE_FRAMES_V1_FEATURE]),
+        );
+        let first = first.unwrap();
+        assert!(first.carries_frames());
+        let (carries_frames_tx, mut carries_frames) = watch::channel(first.carries_frames());
+        let (bridge_shutdown, bridge_shutdown_rx) = oneshot::channel();
+        let bridge = tokio::spawn({
+            let client_mux = client_mux.clone();
+            async move {
+                let start = crate::bridge::MuxBridgeStart {
+                    first: Some(first),
+                    carries_frames: Some(Arc::new(carries_frames_tx)),
+                };
+                crate::bridge::serve_mux_bridge_from(
+                    client_mux,
+                    &bridge_listener,
+                    start,
+                    bridge_shutdown_rx,
+                )
+                .await;
+            }
+        });
+
+        // The first client rides the preopened stream: no second open.
+        let mut app = tokio::net::UnixStream::connect(&bridge_path).await.unwrap();
+        let maximum = crate::mux_codec::MAX_MUX_UPLOAD_LINE_BYTES;
+        for packet in crate::mux_codec::encode_line_with_limit(1, READY_EVENT, maximum).unwrap() {
+            first_daemon.send_on(Lane::Bulk, packet).await.unwrap();
+        }
+        let mut received = vec![0; READY_EVENT.len()];
+        tokio::time::timeout(std::time::Duration::from_secs(10), app.read_exact(&mut received))
+            .await
+            .expect("the preopened stream did not reach the first client")
+            .unwrap();
+        assert_eq!(received, READY_EVENT);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), daemon_mux.accept())
+                .await
+                .is_err(),
+            "the first client opened another stream"
+        );
+
+        // A later client opens its own; its marker lists no frames.
+        let _second = tokio::net::UnixStream::connect(&bridge_path).await.unwrap();
+        let _second_daemon = answer_mux_open(&daemon_mux, &[MUX_INPUT_V1_FEATURE]).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            carries_frames.wait_for(|carries| !carries),
+        )
+        .await
+        .expect("the second open did not say the socket carries no frames")
+        .unwrap();
+
+        drop(app);
+        bridge_shutdown.send(()).unwrap();
+        bridge.await.unwrap();
+        client_mux.shutdown().await;
+        daemon_mux.shutdown().await;
+    }
+
     /// What the daemon socket gets, and how the daemon end stops, when the
     /// bridge end sends `frame` on `lane` between two lines.
     #[cfg(unix)]

@@ -1,4 +1,4 @@
-import CmuxNextCloud
+public import CmuxNextCloud
 import CryptoKit
 public import Foundation
 import os
@@ -85,7 +85,8 @@ public actor SSHMachineLink {
     private var child: ChildProcess?
     /// The stderr tail of the last link that exited.
     private var exitedOutput: String?
-    private var socket: String?
+    /// The running link's socket, and whether it passes frames as its latest snapshot said.
+    private var socket: LinkLocalSocket?
     private var starting: Task<String, any Error>?
     private var localProtocol: Int?
     /// The last probe's findings (platform for the installer).
@@ -123,8 +124,15 @@ public actor SSHMachineLink {
         if machine.status != before { onStatus(machine.status) }
     }
 
+    /// ``socketPath()`` with whether the socket passes cmux-ipc frames: the daemon's `mux-control` open marker
+    /// listed `bridge-frames-v1` (``LinkLocalSocket``). Without it the connection stays on JSON lines.
+    public func localSocket() async throws -> LinkLocalSocket {
+        let path = try await socketPath()
+        return LinkLocalSocket(path: path, carriesFrames: socket?.path == path && socket?.carriesFrames == true)
+    }
+
     public func socketPath() async throws -> String {
-        if let socket, child?.isRunning == true, FileManager.default.fileExists(atPath: socket) { return socket }
+        if let socket, child?.isRunning == true, FileManager.default.fileExists(atPath: socket.path) { return socket.path }
         if let starting { return try await starting.value }
         let task = Task { try await self.start() }
         starting = task
@@ -228,7 +236,7 @@ public actor SSHMachineLink {
         self.child = child
         do {
             let socket = try await child.firstLine(within: .seconds(60), label: "cmux-tui remote connect \(host.destination)") { line in
-                if case .connected(let socket) = CloudLinkEvent.parse(line) { return socket }
+                if case .connected(let local) = CloudLinkEvent.parse(line) { return local }
                 return nil
             }
             guard machine.mayAttempt, self.child === child else {
@@ -242,8 +250,8 @@ public actor SSHMachineLink {
             handle(.linkUp)
             watchExit(child)
             watchSnapshots(child)
-            logger.info("ssh link up for \(self.host.destination.description, privacy: .public) pid \(child.pid ?? 0)")
-            return socket
+            logger.info("ssh link up for \(self.host.destination.description, privacy: .public) pid \(child.pid ?? 0) frames \(socket.carriesFrames, privacy: .public)")
+            return socket.path
         } catch let error as SSHLinkError {
             throw error
         } catch {
@@ -282,13 +290,15 @@ public actor SSHMachineLink {
         Task { [weak self] in
             for await line in lines {
                 guard let connected = CloudLinkEvent.linkConnected(line) else { continue }
-                await self?.linkReported(child, connected: connected)
+                await self?.linkReported(child, connected: connected,
+                                         carriesFrames: CloudLinkEvent.localSocketCarriesFrames(line) == true)
             }
         }
     }
 
-    private func linkReported(_ reporting: ChildProcess, connected: Bool) {
+    private func linkReported(_ reporting: ChildProcess, connected: Bool, carriesFrames: Bool) {
         guard child === reporting else { return }
+        if let current = socket { socket = LinkLocalSocket(path: current.path, carriesFrames: carriesFrames) }
         if connected {
             if machine.status == .reconnecting { handle(.linkUp) }
         } else {

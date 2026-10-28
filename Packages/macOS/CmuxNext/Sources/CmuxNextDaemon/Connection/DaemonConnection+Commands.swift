@@ -363,7 +363,7 @@ extension DaemonConnection {
             throw DaemonError.missingCapabilities([DaemonCapability.terminalReap.rawValue])
         }
         guard let endpoint else { throw DaemonError.notConnected }
-        let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .shutdown,
+        let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, carrier: endpoint.carrier, role: .shutdown,
                                                      stats: endpoint.wireStats, hangs: configuration.hangWatch)
         transport.start(onEvent: { _, _, _ in }, onClose: { _ in })
         defer { transport.close() }

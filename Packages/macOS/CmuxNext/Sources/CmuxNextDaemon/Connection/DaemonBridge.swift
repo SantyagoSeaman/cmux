@@ -36,16 +36,11 @@ public struct DaemonBridge: Hashable, Sendable {
 
     static let replyTimeoutMs: Int32 = 10_000
     static let maxReplyBytes = 1024
-    /// The dial line's `features` entry of a bridge that passes cmux-ipc frames through by header next to JSON
-    /// lines (cmux-tui/spec/remote-daemon.md, `bridge-frames-v1`).
-    static let framesFeature = "bridge-frames-v1"
 
-    /// An opened bridge: the descriptor of the connected stream, the child that carries it, and what its dial
-    /// line said it passes (frames only with ``framesFeature``; never a descriptor or shared memory).
+    /// An opened bridge: the descriptor of the connected stream and the child that carries it.
     struct Opened: Sendable {
         let fd: Int32
         let child: BridgeChild
-        var carrier = WireCarrier.bridge(carriesFrames: false)
     }
 
     /// A spawned bridge whose dial line is not read yet.
@@ -65,9 +60,8 @@ public struct DaemonBridge: Hashable, Sendable {
         return try await withOnceContinuation(failingWith: { _ in dropped }) { (continuation: OnceContinuation<Opened, DaemonError>) in
             dial.async {
                 do throws(DaemonError) {
-                    var opened = spawned.opened
-                    opened.carrier = try DaemonBridge.check(try Self.readLine(spawned.stderr))
-                    continuation.resume(returning: opened)
+                    try DaemonBridge.check(try Self.readLine(spawned.stderr))
+                    continuation.resume(returning: spawned.opened)
                 } catch {
                     spawned.opened.child.terminate()
                     Darwin.close(spawned.opened.fd)
@@ -151,16 +145,12 @@ public struct DaemonBridge: Hashable, Sendable {
         throw .endpointBlocked("the link dial's answer is too long")
     }
 
-    /// The dial line: `"ok": true` passes, and its `features` say what the bridge carries; a refusal names its
-    /// `error_code`.
-    static func check(_ reply: Data) throws(DaemonError) -> WireCarrier {
+    /// The dial line: `"ok": true` passes; a refusal names its `error_code`.
+    static func check(_ reply: Data) throws(DaemonError) {
         let object = (try? JSONSerialization.jsonObject(with: reply)) as? [String: Any]
         guard let object else { throw .endpointBlocked("the link dial's answer is not JSON") }
-        guard object["ok"] as? Bool == true else {
-            throw .endpointBlocked("the link refused the dial: \(object["error_code"] as? String ?? "refused")")
-        }
-        let features = object["features"] as? [String] ?? []
-        return .bridge(carriesFrames: features.contains(framesFeature))
+        if object["ok"] as? Bool == true { return }
+        throw .endpointBlocked("the link refused the dial: \(object["error_code"] as? String ?? "refused")")
     }
 }
 
@@ -168,15 +158,17 @@ extension LineTransport {
     /// A connection to `path`, or through `bridge`'s child when there is one: ``DaemonBridge/open()``
     /// spawns the child and reads its dial line off the caller's thread.
     ///
+    /// - Parameter carrier: What carries `path`'s bytes (``DaemonEndpoint/carrier``); a bridge child is always
+    ///   ``WireCarrier/bridge(carriesFrames:)`` without frames.
     /// - Parameter stats: Where the connection counts (``DaemonEndpoint/wireStats``); nil for none.
     /// - Parameter hangs: Watches each line's handling on the reader thread and each drain step of the
     ///   socket writer; nil watches nothing.
     /// - Parameter writerTarget: The serial queue the socket writer drains on (``SocketWriter``), nil for its own.
-    static func open(path: String, bridge: DaemonBridge?, role: DaemonWireStats.Role, stats: DaemonWireStats?,
-                     hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil,
+    static func open(path: String, bridge: DaemonBridge?, carrier: WireCarrier = .direct, role: DaemonWireStats.Role,
+                     stats: DaemonWireStats?, hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil,
                      trace: TraceRuntime = .shared) async throws(DaemonError) -> LineTransport {
         let opened = try await bridge?.open()
-        return try LineTransport(path: path, opened: opened, role: role, stats: stats, hangs: hangs,
+        return try LineTransport(path: path, opened: opened, carrier: carrier, role: role, stats: stats, hangs: hangs,
                                  writerTarget: writerTarget, trace: trace)
     }
 }

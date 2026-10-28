@@ -118,7 +118,7 @@ public actor TerminalAttachment: TerminalByteChannel {
     ) async throws -> TerminalAttachment {
         DaemonLaunchTimings.shared.mark("terminal.attach_start")
         NewTerminalTrace.shared.attachEvent(.attachStart, surface: target.surface.rawValue, intent: createIntent)
-        let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .terminalAttach,
+        let transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, carrier: endpoint.carrier, role: .terminalAttach,
                                                      stats: endpoint.wireStats, hangs: hangs, writerTarget: inputQueue)
         let attachment = TerminalAttachment(transport: transport, surface: target.surface, delivery: .ownConnection)
         do {

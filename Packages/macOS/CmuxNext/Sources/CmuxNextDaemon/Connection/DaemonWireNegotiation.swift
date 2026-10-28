@@ -92,14 +92,15 @@ struct WireNegotiation {
 
 /// What carries one connection's bytes to the daemon, as the dialing client knows it (cmux-tui/spec/transports.md,
 /// "Framed IPC grants").
-enum WireCarrier: Sendable, Equatable {
-    /// The app's own Unix socket to the daemon.
+public enum WireCarrier: Sendable, Hashable {
+    /// The daemon's own Unix socket.
     case direct
-    /// A bridge child (``DaemonBridge``). Frames cross it only when its dial line named
-    /// ``DaemonBridge/framesFeature``; an older bridge cuts JSON lines only, so it keeps the connection on lines.
-    /// No descriptor (SCM_RIGHTS) or shared memory crosses any bridge, so the output ring and shared buffers
-    /// never do, as a Mojo channel passes platform handles only where its endpoint can carry them
-    /// (mojo/core/channel_posix.cc).
+    /// A bridge between the app and the daemon: a link's forwarded socket (`cmux-tui remote connect`, whose
+    /// `connection-snapshot` lists `bridge-frames-v1` in `local_socket_features` when the daemon's `mux-control`
+    /// open marker did), or a bridge child (``DaemonBridge``, which cuts JSON lines only). Frames cross it only
+    /// with `carriesFrames`. No descriptor (SCM_RIGHTS) or shared memory crosses any bridge, so the output ring
+    /// and shared buffers never do, as a Mojo channel passes platform handles only where its endpoint can carry
+    /// them (mojo/core/channel_posix.cc).
     case bridge(carriesFrames: Bool)
 
     /// Whether cmux-ipc frames reach the daemon unchanged.

@@ -17,7 +17,7 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use base64::Engine;
 use cmux_remote::admin::{MuxBinding, serve_admin_with_mux_binding};
-use cmux_remote::bridge::serve_mux_bridge;
+use cmux_remote::bridge::{MuxBridgeStart, PreopenedMux, serve_mux_bridge_from};
 use cmux_remote::connection::{
     ClientConnection, ClientConnectionConfig, ConnectionError, ReconnectGroupSource,
     ReconnectPolicy,
@@ -594,6 +594,7 @@ pub struct ClientRuntimeHandle {
     info: ClientRuntimeInfo,
     connection: Arc<ClientConnection>,
     multiplexer: Arc<ServiceMultiplexer>,
+    carries_frames: watch::Receiver<bool>,
     shutdown: watch::Sender<bool>,
     finished: watch::Receiver<bool>,
     thread: Option<thread::JoinHandle<anyhow::Result<()>>>,
@@ -610,6 +611,17 @@ impl ClientRuntimeHandle {
 
     pub async fn connection_snapshot(&self) -> ClientConnectionSnapshot {
         self.connection.snapshot().await
+    }
+
+    /// What the local socket carries besides JSON lines, as the daemon's last
+    /// `mux-control` open marker listed it: `bridge-frames-v1` when the bridge
+    /// passes cmux-ipc frames (spec/remote-daemon.md, "Services").
+    pub fn local_socket_features(&self) -> Vec<&'static str> {
+        if *self.carries_frames.borrow() {
+            vec![cmux_remote_protocol::BRIDGE_FRAMES_V1_FEATURE]
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn is_finished(&self) -> bool {
@@ -679,6 +691,7 @@ pub fn start_client_runtime(options: ClientRuntimeOptions) -> anyhow::Result<Cli
         info: ready.info,
         connection: ready.connection,
         multiplexer: ready.multiplexer,
+        carries_frames: ready.carries_frames,
         shutdown: shutdown_tx,
         finished: finished_rx,
         thread: Some(thread),
@@ -689,6 +702,7 @@ struct ClientReady {
     info: ClientRuntimeInfo,
     connection: Arc<ClientConnection>,
     multiplexer: Arc<ServiceMultiplexer>,
+    carries_frames: watch::Receiver<bool>,
 }
 
 /// An exclusive `flock` on an owner-only lock file, released on drop.
@@ -818,6 +832,20 @@ async fn run_client(
         }
         let daemon_public_key = connection.daemon_public_key();
         let multiplexer = ServiceMultiplexer::new(connection.clone(), EndpointRole::Client);
+        // The first client's stream, opened now so the ready snapshot can say
+        // whether the socket carries frames. A daemon that refuses the open
+        // refuses each client's open as before.
+        let first_mux = tokio::select! {
+            opened = PreopenedMux::open(&multiplexer) => opened.ok(),
+            () = wait_for_shutdown(&mut shutdown) => {
+                let _ = connection.close().await;
+                return Err(anyhow!("remote client startup was cancelled"));
+            }
+        };
+        let (carries_frames_tx, carries_frames) =
+            watch::channel(first_mux.as_ref().is_some_and(PreopenedMux::carries_frames));
+        let bridge_start =
+            MuxBridgeStart { first: first_mux, carries_frames: Some(Arc::new(carries_frames_tx)) };
         let socket = socket_preparation.bind()?;
         // The SSH route behind this socket, so a CLI at a version-skew dead
         // end can name the exact upgrade command (cli/skew.rs, cx-ytw1).
@@ -826,7 +854,13 @@ async fn run_client(
         let bridge_multiplexer = multiplexer.clone();
         let mut bridge = tokio::spawn(async move {
             let mut socket = socket;
-            serve_mux_bridge(bridge_multiplexer, socket.listener(), bridge_shutdown_rx).await;
+            serve_mux_bridge_from(
+                bridge_multiplexer,
+                socket.listener(),
+                bridge_start,
+                bridge_shutdown_rx,
+            )
+            .await;
             let _ = socket.unlink();
             if let Some(record) = route_record {
                 let _ = fs::remove_file(record);
@@ -842,6 +876,7 @@ async fn run_client(
                 },
                 connection: connection.clone(),
                 multiplexer,
+                carries_frames,
             }))
             .map_err(|_| anyhow!("remote client owner stopped during startup"))?;
 

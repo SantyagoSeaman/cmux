@@ -141,12 +141,12 @@ final class CloudMachineSession {
         guard !disconnected, machine.status.isLive else { return }
         // A link start that a pause overtook changes nothing (`noteLink`).
         let suspendsBefore = suspends
-        daemon.start(remote: { [weak self] in
+        daemon.start(remoteSocket: { [weak self] in
             await self?.noteLinkStarting(since: suspendsBefore)
             do {
-                let path = try await link.socketPath()
+                let socket = try await link.localSocket()
                 await self?.noteLink(.up, since: suspendsBefore)
-                return path
+                return DaemonSocket(path: socket.path, carrier: .bridge(carriesFrames: socket.carriesFrames))
             } catch {
                 if !(error is CancellationError) { await self?.noteLink(.failed(String(describing: error)), since: suspendsBefore) }
                 throw error
@@ -219,9 +219,9 @@ final class CloudMachineSession {
         appTicket = ticket.id
         linkPhase = .up
         let localIdentity = localIdentity
-        daemon.start(remote: { [weak self] in
+        daemon.start(remoteSocket: { [weak self] in
             do {
-                return try await appLink.endpoint(ticket)
+                return DaemonSocket(path: try await appLink.endpoint(ticket), carrier: .bridge(carriesFrames: false))
             } catch {
                 // The connection asked again: it dropped. v1 waits for a click.
                 let message = await self?.endAppLink(error, ticket: ticket.id) ?? String(describing: error)

@@ -62,7 +62,7 @@ final class LineTransport: Sendable {
     /// The bridge child of this connection (``DaemonBridge``), killed and
     /// reaped when the connection closes.
     private let child: BridgeChild?
-    /// What carries the connection's bytes: the socket, or the bridge child (``DaemonBridge/Opened/carrier``).
+    /// What carries the connection's bytes: the daemon's own socket, a link's forwarded socket, or a bridge child.
     let carrier: WireCarrier
     /// Why this connection exists, for ``recorder``.
     let role: DaemonWireStats.Role
@@ -84,13 +84,14 @@ final class LineTransport: Sendable {
     /// async id (``traceConnectionBits(scope:)``) and its flow's seed (``requestFlowSeed(pid:)``).
     let trace: TraceRuntime, traceConnection: UInt64, traceFlowSeed: UInt64
 
-    /// - Parameter opened: An opened bridge (``open(path:bridge:role:stats:hangs:writerTarget:trace:)``); nil connects to `path`.
+    /// - Parameter opened: An opened bridge (``open(path:bridge:carrier:role:stats:hangs:writerTarget:trace:)``); nil connects to `path`.
+    /// - Parameter carrier: What carries `path`'s bytes (``DaemonEndpoint/carrier``); an `opened` child carries no frames.
     /// - Parameter stats: Where the connection counts (``DaemonEndpoint/wireStats``); nil for none.
     /// - Parameter hangs: Watches each line the reader handles and each writer drain step; nil: none. `writerTarget`: see `open`.
     /// - Parameter clock: What reply deadlines are measured and slept on; tests pass a `ManualClock`.
-    init(path: String, opened: DaemonBridge.Opened? = nil, role: DaemonWireStats.Role, stats: DaemonWireStats?,
-         hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil, trace: TraceRuntime = .shared,
-         clock: any Clock<Duration> = ContinuousClock()) throws(DaemonError) {
+    init(path: String, opened: DaemonBridge.Opened? = nil, carrier: WireCarrier = .direct, role: DaemonWireStats.Role,
+         stats: DaemonWireStats?, hangs: (any HangWatchScoping)? = nil, writerTarget: DispatchQueue? = nil,
+         trace: TraceRuntime = .shared, clock: any Clock<Duration> = ContinuousClock()) throws(DaemonError) {
         self.path = path
         self.role = role
         self.trace = trace
@@ -106,11 +107,11 @@ final class LineTransport: Sendable {
         if let opened {
             fd = opened.fd
             child = opened.child
-            carrier = opened.carrier
+            self.carrier = .bridge(carriesFrames: false)
         } else {
             fd = try Self.connect(path)
             child = nil
-            carrier = .direct
+            self.carrier = carrier
         }
         Self.sizeBuffers(fd)
         socket = Mutex(Socket(fd: fd), rank: .daemonLineTransportSocket)

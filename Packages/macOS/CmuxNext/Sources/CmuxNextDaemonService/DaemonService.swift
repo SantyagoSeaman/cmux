@@ -330,8 +330,16 @@ public final class DaemonService {
         rememberSocket(identity, connection: connection)
     }
 
-    /// Connects to a remote daemon through `endpoint` (a Cloud machine's link
-    /// socket). The first connect is retried with capped backoff
+    /// Connects to a remote daemon at a socket it serves itself (``WireCarrier/direct``), or through `bridge`.
+    /// See ``start(remoteSocket:bridge:admit:onEnd:)``.
+    public func start(remote endpoint: @escaping @Sendable () async throws -> String, bridge: DaemonBridge? = nil,
+               admit: (@MainActor (DaemonIdentity) throws -> Void)? = nil, onEnd: (@MainActor () -> Void)? = nil) {
+        start(remoteSocket: { DaemonSocket(path: try await endpoint(), carrier: .direct) }, bridge: bridge, admit: admit,
+              onEnd: onEnd)
+    }
+
+    /// Connects to a remote daemon through `endpoint` (a machine's link
+    /// socket, with what carries its bytes). The first connect is retried with capped backoff
     /// (`DaemonStartup`); afterwards the connection reconnects by itself,
     /// re-asking `endpoint` (which restarts a dead link). A connection that
     /// ends for good is replaced the same way, spaced by one backoff across
@@ -344,11 +352,14 @@ public final class DaemonService {
     /// the connection closes, the service stops and the store shows why.
     /// `bridge`: each connection runs this child instead of connecting to the
     /// socket (``DaemonEndpoint/bridge``). `onEnd` runs on each drop (EOF, heartbeat).
-    public func start(remote endpoint: @escaping @Sendable () async throws -> String, bridge: DaemonBridge? = nil,
+    public func start(remoteSocket endpoint: @escaping @Sendable () async throws -> DaemonSocket, bridge: DaemonBridge? = nil,
                admit: (@MainActor (DaemonIdentity) throws -> Void)? = nil, onEnd: (@MainActor () -> Void)? = nil) {
         guard runTask == nil, !policyBlock.isBlocked else { return }
         let wireStats = wireStats
-        remoteEndpoint = { DaemonEndpoint(socketPath: try await endpoint(), wireStats: wireStats) }
+        remoteEndpoint = {
+            let socket = try await endpoint()
+            return DaemonEndpoint(socketPath: socket.path, carrier: socket.carrier, wireStats: wireStats)
+        }
         let store = store
         if let onEnd { store.onDisconnected = onEnd }
         let machineID = machineID
@@ -375,7 +386,8 @@ public final class DaemonService {
             while !Task.isCancelled {
                 let connected = await DaemonStartup.shared.connect(wake: wake, clock: clock) {
                     DaemonConnection(configuration: configuration) {
-                        DaemonEndpoint(socketPath: try await endpoint(), bridge: bridge, wireStats: wireStats)
+                        let socket = try await endpoint()
+                        return DaemonEndpoint(socketPath: socket.path, bridge: bridge, carrier: socket.carrier, wireStats: wireStats)
                     }
                 } onFailure: { error in
                     logger.error("\(machineID, privacy: .public): daemon unavailable: \(error.description, privacy: .public)")

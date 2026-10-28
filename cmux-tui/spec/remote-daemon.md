@@ -93,6 +93,16 @@ checks every frame before it writes a byte of it: such a frame, a frame on a
 lane its sender never uses, or (on a client end whose daemon does not list the
 feature) any frame closes the stream (`frames_not_negotiated` for the last).
 
+A client runtime opens its first `mux-control` stream before any local
+client dials its socket, as Chromium preconnects
+(`net/http/http_stream_factory.cc`, `PreconnectStreams`), and gives that
+stream to the first client. So its first `remote connect --json`
+`connection-snapshot` already says what the socket carries:
+`local_socket_features` lists `bridge-frames-v1` when the open marker did.
+Each later open sets it again, so a daemon replaced behind the same link
+changes it in the next snapshot. A local client asks the daemon for frames
+through the socket only while the list names the feature.
+
 `workspace-rpc` opens independent interactive, control, cancellation, and bulk streams. Requests execute concurrently under per-lane admission control, and responses return on the request's lane. Cancellation uses its own persistent control-lane stream and remains admissible when normal request slots are full. Non-cancelable mutations preserve receive order within one traffic class. Concurrent requests across traffic classes have no implicit ordering, so a client awaits a response before issuing a dependent operation. The exact service names, envelopes, request fields, response shapes, and examples are defined in [`remote-rpc.md`](remote-rpc.md). It exposes:
 
 - open/list workspace roots and capabilities;

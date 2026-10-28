@@ -1,3 +1,4 @@
+import CmuxNextCloud
 import CmuxNextRemote
 import CmuxNextSidebar
 import Foundation
@@ -12,7 +13,8 @@ import Testing
 struct SSHLinkReconnectingTests {
     /// A short temp root with a stand-in `ssh` (runs the probe script here) and a stand-in
     /// `cmux-tui` that answers the probe and, as `remote connect`, prints the link's snapshots:
-    /// connected, reconnecting once `drop` exists, connected once `back` exists.
+    /// connected with a socket that carries frames, reconnecting once `drop` exists, connected
+    /// once `back` exists to a daemon whose `mux-control` open lists no `bridge-frames-v1`.
     struct Fixture {
         let root: URL
         let link: SSHMachineLink
@@ -28,10 +30,10 @@ struct SSHLinkReconnectingTests {
                 remote)
                   while [ $# -gt 0 ]; do [ "$1" = --local-socket ] && S=$2; shift; done
                   : > "$S"
-                  snap() { printf '{"event":"connection-snapshot","local_socket":"%s","connection":{"session_id":"s","generation":1,"state":"%s","lane_bindings":[],"physical_link_count":1,"transport":{"provider":"ssh","route":"ssh://drill"}}}\\n' "$S" "$1"; }
-                  snap connected
-                  until [ -e '\(root.path)/drop' ]; do sleep 0.05; done; snap reconnecting
-                  until [ -e '\(root.path)/back' ]; do sleep 0.05; done; snap connected
+                  snap() { printf '{"event":"connection-snapshot","local_socket":"%s","local_socket_features":%s,"connection":{"session_id":"s","generation":1,"state":"%s","lane_bindings":[],"physical_link_count":1,"transport":{"provider":"ssh","route":"ssh://drill"}}}\\n' "$S" "$2" "$1"; }
+                  snap connected '["bridge-frames-v1"]'
+                  until [ -e '\(root.path)/drop' ]; do sleep 0.05; done; snap reconnecting '[]'
+                  until [ -e '\(root.path)/back' ]; do sleep 0.05; done; snap connected '[]'
                   exec sleep 60 ;;
                 esac
 
@@ -85,6 +87,28 @@ struct SSHLinkReconnectingTests {
 
         fixture.mark("back")
         #expect(await fixture.waitFor { $0 == .connected } == .connected)
+        await fixture.remove()
+    }
+
+    /// The link's socket is the local end of the SSH mux bridge: it passes frames only while the link's latest
+    /// snapshot lists `bridge-frames-v1`, so a daemon replaced behind the same link that lists nothing keeps the
+    /// next connection on JSON lines (p05-ipc-161).
+    @Test func theLinkSaysWhetherItsSocketCarriesFrames() async throws {
+        let fixture = try Fixture()
+        await fixture.link.handle(.connect)
+        let first = try await fixture.link.localSocket()
+        #expect(first.carriesFrames)
+        #expect(try await fixture.link.socketPath() == first.path)
+
+        fixture.mark("drop")
+        fixture.mark("back")
+        let deadline = ContinuousClock.now + .seconds(5)
+        var socket = try await fixture.link.localSocket()
+        while socket.carriesFrames, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+            socket = try await fixture.link.localSocket()
+        }
+        #expect(socket == LinkLocalSocket(path: first.path, carriesFrames: false))
         await fixture.remove()
     }
 }

@@ -522,10 +522,15 @@ platform handles pass only on a channel that can carry them
 (`mojo/core/channel_posix.cc`), and unversioned interfaces assume that both
 ends come from one build. A bridge that the daemon does not identify reaches
 it as a direct peer. The dialing client knows about the bridge, so it echoes
-`ipc-frames-v2` through a bridge only when the bridge's dial line lists
-`bridge-frames-v1` in `features` (`{"ok":true,"features":["bridge-frames-v1"]}`,
-p05-ipc-161). A bridge that does not list it cuts JSON lines only, so the
-client echoes only `attach-streams-v1` through it. A client never echoes
+`ipc-frames-v2` through a bridge only when the bridge passes frames
+(p05-ipc-161). The local socket of `cmux-tui remote connect` is the client
+end of the SSH mux bridge: it passes frames when the daemon's `mux-control`
+open marker lists `bridge-frames-v1`
+([`remote-daemon.md`](remote-daemon.md#services)), and the link reports this
+in each `--json` `connection-snapshot` as
+`"local_socket_features":["bridge-frames-v1"]`. A link socket without that
+entry, and a `cmux link dial` bridge, cut JSON lines only, so the client
+echoes only `attach-streams-v1` through them. A client never echoes
 `terminal-output-ring-v1` through a bridge and never sends a `SHARED_BUFFER`
 through one.
 

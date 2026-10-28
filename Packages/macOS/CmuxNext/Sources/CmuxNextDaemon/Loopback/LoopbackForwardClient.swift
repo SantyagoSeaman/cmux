@@ -102,7 +102,7 @@ public actor LoopbackForwardClient {
         }
         let transport: LineTransport
         do {
-            transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, role: .loopbackForward,
+            transport = try await LineTransport.open(path: endpoint.socketPath, bridge: endpoint.bridge, carrier: endpoint.carrier, role: .loopbackForward,
                                                      stats: endpoint.wireStats)
         } catch {
             throw LoopbackForwardError.unavailable(error.description)

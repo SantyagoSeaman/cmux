@@ -176,12 +176,54 @@ impl Drop for LocalPortForward {
     }
 }
 
+/// A `mux-control` stream opened before a local client dials the link's
+/// socket, as Chromium opens a socket ahead of its request
+/// (`net/http/http_stream_factory.cc`, `PreconnectStreams`): its open marker
+/// says what the socket carries before anyone connects, and the first client
+/// skips the open's round trip.
+pub struct PreopenedMux {
+    stream: ServiceStream,
+    opened: OpenedStream,
+}
+
+impl PreopenedMux {
+    pub async fn open(multiplexer: &Arc<ServiceMultiplexer>) -> Result<Self, BridgeError> {
+        let stream = multiplexer.open(Service::MuxControl, BTreeMap::new()).await?;
+        let opened = await_opened(&stream).await?;
+        Ok(Self { stream, opened })
+    }
+
+    /// Whether the daemon's open marker listed [`BRIDGE_FRAMES_V1_FEATURE`].
+    pub fn carries_frames(&self) -> bool {
+        self.opened.features.bridge_frames_v1
+    }
+}
+
+/// How a mux bridge starts: the stream its first client gets, and where each
+/// client's open says whether the daemon behind it carries frames.
+#[derive(Default)]
+pub struct MuxBridgeStart {
+    pub first: Option<PreopenedMux>,
+    pub carries_frames: Option<Arc<watch::Sender<bool>>>,
+}
+
 #[cfg(unix)]
 pub async fn serve_mux_bridge(
     multiplexer: Arc<ServiceMultiplexer>,
     listener: &tokio::net::UnixListener,
+    shutdown: oneshot::Receiver<()>,
+) {
+    serve_mux_bridge_from(multiplexer, listener, MuxBridgeStart::default(), shutdown).await;
+}
+
+#[cfg(unix)]
+pub async fn serve_mux_bridge_from(
+    multiplexer: Arc<ServiceMultiplexer>,
+    listener: &tokio::net::UnixListener,
+    start: MuxBridgeStart,
     mut shutdown: oneshot::Receiver<()>,
 ) {
+    let MuxBridgeStart { mut first, carries_frames } = start;
     let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
@@ -193,9 +235,20 @@ pub async fn serve_mux_bridge(
             accepted = listener.accept() => {
                 let Ok((socket, _)) = accepted else { break };
                 let multiplexer = multiplexer.clone();
+                let first = first.take();
+                let carries_frames = carries_frames.clone();
                 connections.spawn(async move {
-                    let Ok(stream) = multiplexer.open(Service::MuxControl, BTreeMap::new()).await else { return };
-                    let Ok(opened) = await_opened(&stream).await else { return };
+                    let mux = match first {
+                        Some(mux) => mux,
+                        None => match PreopenedMux::open(&multiplexer).await {
+                            Ok(mux) => mux,
+                            Err(_) => return,
+                        },
+                    };
+                    if let Some(carries_frames) = carries_frames {
+                        carries_frames.send_replace(mux.carries_frames());
+                    }
+                    let PreopenedMux { stream, opened } = mux;
                     let (reader, writer) = socket.into_split();
                     let _ = pump_mux_client_buffered(
                         Arc::new(stream),

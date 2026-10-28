@@ -168,9 +168,10 @@ final class SSHMachineSession {
         Task { [weak self] in
             await link.handle(.connect)
             guard let self, self.autoConnect, !self.daemon.policyBlock.isBlocked else { return }
-            self.daemon.start(remote: {
+            self.daemon.start(remoteSocket: {
                 do {
-                    return try await link.socketPath()
+                    let socket = try await link.localSocket()
+                    return DaemonSocket(path: socket.path, carrier: .bridge(carriesFrames: socket.carriesFrames))
                 } catch let error as SSHLinkError where error.waitsForUser {
                     // The next attempt waits for an event (DaemonStartup.shared.isPermanent).
                     throw DaemonError.endpointBlocked(error.description)

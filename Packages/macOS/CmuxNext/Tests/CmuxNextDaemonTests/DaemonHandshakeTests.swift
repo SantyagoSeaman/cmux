@@ -253,105 +253,88 @@ import Testing
 
     static let ring = "terminal-output-ring-v1"
 
-    /// A bridge child that writes a dial line naming its arguments after the digest as `features`, then answers
-    /// as a daemon at this build's revision and ``schema``, offering every framed IPC capability the ring
-    /// included, and answering ``served`` REQUEST frames with REPLY frames. It records what it read, each request
-    /// with `framed`, and returns that list to `test-wire-attempts`.
-    static let bridgeScript = #"""
-    import json, sys
-    digest, features = sys.argv[1], sys.argv[2:]
-    stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
-    print(json.dumps({'ok': True, 'features': features}), file=sys.stderr, flush=True)
-    seen = []
-    while True:
-        first = stdin.read(1)
-        if not first:
-            break
-        header = None
-        if first == b'\xff':
-            header = bytearray(first + stdin.read(15))
-            body = stdin.read(int.from_bytes(header[4:8], 'little'))
-        else:
-            body = first + stdin.readline()
-        request = json.loads(body)
-        command = request.get('cmd')
-        result = {}
-        if command == 'test-wire-attempts':
-            result = seen
-        else:
-            seen.append(dict(request, framed=header is not None))
-        if command == 'identify':
-            result = {'app': 'cmux-tui', 'protocol': 12, 'generation': 'bridge-test',
-                'capabilities': ['ipc-frames-v2', 'attach-streams-v1', 'attach-frames-v1', 'terminal-output-ring-v1']}
-            if request.get('revisions'):
-                result.update(api_revision=12, sdk_schema_digest=digest, framed_methods=[0x0100, 0x0101])
-        elif command == 'wire-echo':
-            result = {'cmd': command, 'text': request.get('text')}
-        reply = json.dumps({'id': request.get('id'), 'ok': True, 'data': result}).encode()
-        if header is None:
-            stdout.write(reply + b'\n')
-        else:
-            header[1] = 17
-            header[4:8] = len(reply).to_bytes(4, 'little')
-            stdout.write(bytes(header) + reply)
-        stdout.flush()
-    """#
-
-    /// Connects with ``upgrades`` through a bridge whose dial line names `features`, sends one `wire-echo`, and
-    /// returns the grants and every request the bridge read, in order.
-    static func throughBridge(features: [String]) async throws -> (DaemonWireGrants?, [JSONValue]) {
-        let digest = WireNegotiation.digestText(schema.identity.sdkSchemaDigest)
-        let bridge = DaemonBridge(executable: "/usr/bin/python3", arguments: ["-u", "-c", bridgeScript, digest] + features)
-        let connection = DaemonConnection(
-            endpoint: .init(socketPath: "/tmp/cmux-wire-bridge-\(UUID().uuidString.prefix(8)).sock", bridge: bridge),
-            configuration: configuration(upgrades: upgrades, hello: false))
+    /// Connects to `daemon` as through a link's forwarded socket whose carrier is `carrier`, sends one `wire-echo`,
+    /// and returns the grants and what the daemon read.
+    static func throughForwardedSocket(_ daemon: WireDaemon, carrier: WireCarrier) async throws -> (DaemonWireGrants?, [WireDaemon.Seen]) {
+        let connection = DaemonConnection(endpoint: DaemonEndpoint(socketPath: daemon.path, carrier: carrier),
+                                          configuration: configuration(upgrades: upgrades, hello: false))
         try await connection.start()
         let grants = await connection.ready?.transport.wireGrants
-        let echo = try await connection.request(Echo(text: "a"))
+        #expect(try await connection.request(Echo(text: "a")) == .object(["cmd": .string("wire-echo"), "text": .string("a")]))
+        await connection.close()
+        return (grants, daemon.seen.withLock { $0 })
+    }
+
+    /// A link socket whose `remote connect` snapshot listed `bridge-frames-v1` (the daemon's `mux-control` open
+    /// marker did) passes frames: at this build's revision and schema the daemon's framed methods go as REQUEST
+    /// frames. No descriptor crosses a bridge, so the app never asks for the ring the daemon offered.
+    @Test func aForwardedSocketThatCarriesFramesGetsFramesButNeverTheRing() async throws {
+        let daemon = try WireDaemon(Self.daemon(offers: [Self.frames, Self.streams, Self.ring]))
+        defer { daemon.stop() }
+        let (grants, seen) = try await Self.throughForwardedSocket(daemon, carrier: .bridge(carriesFrames: true))
+        #expect(grants == DaemonWireGrants(frames: true, streams: true))
+        #expect(seen.filter(\.framed).map(\.cmd) == ["wire-echo"])
+        let infos = seen.filter { $0.cmd == "set-client-info" }
+        let upgraded = try #require(infos.last?.capabilities)
+        #expect(upgraded.contains(Self.frames) && upgraded.contains(Self.streams))
+        #expect(infos.allSatisfy { !$0.capabilities.contains(Self.ring) })
+        #expect(infos.last?.apiRevision == WireNegotiation.apiRevision)
+    }
+
+    /// A link socket whose snapshot listed no `bridge-frames-v1` (an older daemon behind the SSH mux bridge cuts
+    /// JSON lines only, and the bridge closes a stream that carries a frame): the daemon may still offer frames,
+    /// but the app asks only for streams there, and every request stays a line. It is never taken for the
+    /// daemon's own socket.
+    @Test func aForwardedSocketWithoutTheFeatureKeepsJSONLines() async throws {
+        let daemon = try WireDaemon(Self.daemon(offers: [Self.frames, Self.streams, Self.ring]))
+        defer { daemon.stop() }
+        let (grants, seen) = try await Self.throughForwardedSocket(daemon, carrier: .bridge(carriesFrames: false))
+        #expect(grants == DaemonWireGrants(frames: false, streams: true))
+        #expect(seen.allSatisfy { !$0.framed })
+        let infos = seen.filter { $0.cmd == "set-client-info" }
+        let upgraded = try #require(infos.last?.capabilities)
+        #expect(upgraded.contains(Self.streams) && !upgraded.contains(Self.frames))
+        #expect(infos.allSatisfy { !$0.capabilities.contains(Self.ring) && $0.apiRevision == nil })
+        #expect(daemon.refusedFrames.withLock { $0 } == 0)
+    }
+
+    /// A `cmux link dial` bridge child cuts JSON lines only, whatever its dial line says: the daemon may see it as
+    /// a direct peer, so only the app knows frames cannot pass, and it asks only for streams there.
+    @Test func aBridgeChildAsksOnlyForStreams() async throws {
+        let script = #"""
+        import json, sys
+        seen = []
+        print('{"ok":true,"features":["bridge-frames-v1"]}', file=sys.stderr, flush=True)
+        for line in sys.stdin:
+            frame = json.loads(line)
+            command = frame.get('cmd')
+            result = {}
+            if command == 'test-wire-attempts':
+                result = seen
+            else:
+                seen.append(frame)
+            if command == 'identify':
+                result = {'app':'cmux-tui','protocol':12,'generation':'bridge-test',
+                    'capabilities':['ipc-frames-v2','attach-streams-v1','terminal-output-ring-v1']}
+                if frame.get('revisions'):
+                    result['api_revision'] = 12
+            print(json.dumps({'id':frame.get('id'),'ok':True,'data':result}), flush=True)
+        """#
+        let bridge = DaemonBridge(executable: "/usr/bin/python3", arguments: ["-u", "-c", script])
+        let connection = DaemonConnection(
+            endpoint: .init(socketPath: "/tmp/cmux-wire-bridge-\(UUID().uuidString.prefix(8)).sock", bridge: bridge,
+                            carrier: .bridge(carriesFrames: true)),
+            configuration: Self.configuration(upgrades: Self.upgrades, hello: false))
+        try await connection.start()
+        let grants = await connection.ready?.transport.wireGrants
         let attempts = try await connection.request(Attempts())
         await connection.close()
-        #expect(echo == .object(["cmd": .string("wire-echo"), "text": .string("a")]))
-        return (grants, try #require(attempts.arrayValue))
-    }
-
-    /// The capabilities each `set-client-info` of `attempts` echoed, in order.
-    static func echoed(_ attempts: [JSONValue]) -> [[JSONValue]] {
-        attempts.filter { $0["cmd"] == .string("set-client-info") }.map { $0["capabilities"]?.arrayValue ?? [] }
-    }
-
-    /// A bridge whose dial line names `bridge-frames-v1` passes frames: at this build's revision and schema the
-    /// daemon's framed methods go through it as REQUEST frames. No descriptor crosses a bridge, so the app never
-    /// asks for the ring the daemon offered.
-    @Test func aBridgeThatCarriesFramesGetsFramesButNeverTheRing() async throws {
-        let (grants, attempts) = try await Self.throughBridge(features: [DaemonBridge.framesFeature])
-        #expect(grants == DaemonWireGrants(frames: true, streams: true))
-        let framed = attempts.filter { $0["framed"]?.boolValue == true }.map { $0["cmd"]?.stringValue }
-        #expect(framed == ["wire-echo"])
-        let upgraded = try #require(Self.echoed(attempts).last)
-        #expect(upgraded.contains(.string(Self.frames)) && upgraded.contains(.string(Self.streams)))
-        #expect(Self.echoed(attempts).allSatisfy { !$0.contains(.string(Self.ring)) })
-        let declared = attempts.last { $0["cmd"] == .string("set-client-info") }?["api_revision"]?.doubleValue
-        #expect(declared == Double(WireNegotiation.apiRevision))
-    }
-
-    /// An older bridge names no `bridge-frames-v1` and cuts JSON lines only (the daemon may still see it as a
-    /// direct peer and offer frames): the app asks only for streams through it, and every request stays a line.
-    @Test func anOlderBridgeKeepsJSONLines() async throws {
-        let (grants, attempts) = try await Self.throughBridge(features: [])
         #expect(grants == DaemonWireGrants(frames: false, streams: true))
-        #expect(attempts.allSatisfy { $0["framed"]?.boolValue == false })
-        let upgraded = try #require(Self.echoed(attempts).last)
+        let infos = try #require(attempts.arrayValue).filter { $0["cmd"] == .string("set-client-info") }
+        let upgraded = try #require(infos.last?["capabilities"]?.arrayValue)
         #expect(upgraded.contains(.string(Self.streams)) && !upgraded.contains(.string(Self.frames)))
-        #expect(Self.echoed(attempts).allSatisfy { !$0.contains(.string(Self.ring)) })
-        #expect(attempts.filter { $0["cmd"] == .string("set-client-info") }.allSatisfy { $0["api_revision"] == nil })
-    }
-
-    /// The dial line's `features` list says whether the bridge passes frames; anything else, or a refusal, never does.
-    @Test func theDialLineSaysWhetherTheBridgeCarriesFrames() throws {
-        #expect(try DaemonBridge.check(Data(#"{"ok":true}"#.utf8)) == .bridge(carriesFrames: false))
-        #expect(try DaemonBridge.check(Data(#"{"ok":true,"features":["bridge-frames-v1"]}"#.utf8)) == .bridge(carriesFrames: true))
-        #expect(try DaemonBridge.check(Data(#"{"ok":true,"features":"bridge-frames-v1"}"#.utf8)) == .bridge(carriesFrames: false))
-        #expect(throws: DaemonError.self) { try DaemonBridge.check(Data(#"{"ok":false,"features":["bridge-frames-v1"]}"#.utf8)) }
+        #expect(infos.allSatisfy { $0["api_revision"] == nil })
+        #expect(infos.allSatisfy { !($0["capabilities"]?.arrayValue ?? []).contains(.string(Self.ring)) })
     }
 
     // MARK: - Wire format
