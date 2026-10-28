@@ -360,16 +360,36 @@ impl HolderSink {
     }
 
     /// A sink for a terminal a previous daemon left on the holder, whose
-    /// next byte has offset `oldest`. That daemon parsed the output before
-    /// `end` (the holder's ring end when this daemon listed the terminal)
-    /// and answered its queries, so their replay here answers nothing. A
-    /// query it died before parsing gets no answer either: programs time
-    /// such a query out (vim's `t_RV` request, a shell's cursor report),
-    /// where a second answer would be typed into them.
-    pub(crate) fn reattached(oldest: u64, end: u64) -> Arc<Self> {
+    /// next byte has offset `oldest`. Earlier daemons answered the queries
+    /// before `answered` (the highest offset they acknowledged,
+    /// `cmux_holder::Listed::answered`; [`Self::ack_answered`] acknowledges
+    /// a parse that answered at once), so their replay here answers
+    /// nothing. Output after it, which no daemon parsed (or none answered:
+    /// it died between the parse and the write), is live and answered.
+    pub(crate) fn reattached(oldest: u64, answered: u64) -> Arc<Self> {
         let sink = Self::new(oldest);
-        sink.state.lock().recover_poison().answered = end.max(oldest);
+        sink.state.lock().recover_poison().answered = answered.max(oldest);
         sink
+    }
+
+    /// The parser's last read answered queries, and the answers go to the
+    /// PTY next: acknowledge it to the holder first, so a daemon that dies
+    /// after the write leaves them answered (the holder's
+    /// `Listed::answered`) and its successor does not answer them again.
+    /// The ACK is on the holder's socket before the answer is written: a
+    /// daemon that dies between the two leaves the query unanswered, never
+    /// answered twice.
+    pub(crate) fn ack_answered(&self) {
+        let Some(acker) = self.acker.get() else { return };
+        let offset = {
+            let mut state = self.state.lock().recover_poison();
+            if state.confirmed <= state.acked {
+                return;
+            }
+            state.acked = state.confirmed;
+            state.confirmed
+        };
+        acker(offset);
     }
 
     /// Everything the parser has not finished parsing. Exact when called

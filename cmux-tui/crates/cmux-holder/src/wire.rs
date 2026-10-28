@@ -125,7 +125,9 @@ pub enum Kind {
     /// h->d: `status_kind u8` (0 exited, 1 signaled, 2 unobserved), `code i32, end u64`.
     Exit = 13,
     /// h->d: one terminal in a [`Kind::Welcome`]: `pid i32, oldest u64, end u64,
-    /// exited u8, id [u8; 16]`, plus one descriptor: a dup of its master.
+    /// exited u8, id [u8; 16]`, then the optional `answered u64` (the highest
+    /// offset a daemon ACKed, [`crate::Listed::answered`]; an older daemon
+    /// reads only the id), plus one descriptor: a dup of its master.
     Listed = 14,
     /// h->d: `request_kind u16, code u16`, then a UTF-8 message. Code
     /// `SUPERSEDED` on channel 0 (request kind [`Kind::Hello`]): another

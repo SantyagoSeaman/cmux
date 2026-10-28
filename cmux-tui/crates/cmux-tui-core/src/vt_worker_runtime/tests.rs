@@ -37,6 +37,8 @@ struct FakeConfig {
     prologue_crashes: bool,
     /// Never read the link (a hung worker).
     hung: bool,
+    /// Crash after a parse's answers, before its Parsed.
+    dies_after_answers: bool,
 }
 
 impl Default for FakeConfig {
@@ -48,6 +50,7 @@ impl Default for FakeConfig {
             snapshots: None,
             prologue_crashes: false,
             hung: false,
+            dies_after_answers: false,
         }
     }
 }
@@ -119,6 +122,9 @@ fn serve(
 fn report(out: &mut UnixStream, config: &FakeConfig, terminal: u64, end: u64) -> io::Result<()> {
     for (to, bytes) in &config.answers {
         out.write_all(&Frame::answer(to.unwrap_or(terminal), bytes).encode())?;
+    }
+    if config.dies_after_answers {
+        return Err(io::Error::other("crash between the answers and the Parsed"));
     }
     out.write_all(&Frame::parsed(terminal, end).encode())?;
     if let Some(ahead) = config.snapshots {
@@ -572,6 +578,36 @@ fn a_restarted_daemons_seed_stops_where_the_answered_output_ends() {
     assert_eq!(answers(&h.events, 2), [Err(AnswerRejected::Replayed), Ok(())]);
     wait_for(&h.events, |event| *event == HostEvent::Parsed(VtTerminalKey(1), 400));
     assert_eq!(restored(&h.events, 0).1, 1);
+}
+
+/// p01-process-210 review: a worker lost after a parse's Answer and before
+/// its Parsed wrote no answer, and the broker did not count the query as
+/// answered: its successor parses it again and answers it, once.
+#[test]
+fn a_worker_lost_between_an_answer_and_its_parsed_leaves_one_answer() {
+    let answering = FakeConfig { answers: vec![(None, DA1.to_vec())], ..FakeConfig::default() };
+    let dying = FakeConfig { dies_after_answers: true, ..answering.clone() };
+    let h = harness(1, vec![dying, answering], reseeds([1], reseed(0, 0, 400)));
+    h.broker.attach(spec(1));
+    let mut seen = Vec::new();
+    while !seen.contains(&HostEvent::Parsed(VtTerminalKey(1), 400)) {
+        seen.push(wait_for(&h.events, |_| true));
+    }
+    let lost = seen
+        .iter()
+        .position(|event| matches!(event, HostEvent::Life(WorkerLifecycle::Lost { .. })))
+        .unwrap_or_else(|| panic!("the first worker was not lost: {seen:#?}"));
+    let written: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, HostEvent::Answer(..)))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(written.len(), 1, "one answer for one query: {seen:#?}");
+    assert!(
+        written.iter().all(|&index| index > lost),
+        "the dead worker's answer was written: {seen:#?}"
+    );
 }
 
 /// p01-process-210: the worker's snapshots reach the holder once it

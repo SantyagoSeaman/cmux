@@ -87,6 +87,13 @@ pub struct Listed {
     pub oldest: u64,
     /// Offset after the newest output byte.
     pub end: u64,
+    /// Offset after the newest output byte a daemon acknowledged it parsed
+    /// (the highest ACK any daemon sent, or an ADOPT's base): the queries
+    /// before it were answered. A daemon ACKs at once when a parse answered
+    /// queries, so a restarted daemon parsing the ring again answers none of
+    /// them twice and every later one once. `oldest` from a holder that
+    /// predates the field: nothing counts as answered.
+    pub answered: u64,
     pub exited: bool,
     /// The custody dup of the master (`None` from the holder's own encode).
     pub master: Option<std::os::fd::OwnedFd>,
@@ -104,6 +111,7 @@ impl Listed {
             .u64(self.end)
             .u8(self.exited as u8)
             .bytes(&self.id)
+            .u64(self.answered)
             .0
     }
 
@@ -116,15 +124,19 @@ impl Listed {
     ) -> io::Result<Self> {
         let mut input = wire::In(payload);
         let mut fds = fds.into_iter();
+        let (pid, oldest, end) = (input.i32()?, input.u64()?, input.u64()?);
+        let (exited, id) = (input.u8()? != 0, input.array::<16>()?);
         Ok(Self {
             master: fds.next(),
             ring: fds.next(),
             chan,
-            pid: input.i32()?,
-            oldest: input.u64()?,
-            end: input.u64()?,
-            exited: input.u8()? != 0,
-            id: input.array::<16>()?,
+            pid,
+            oldest,
+            end,
+            // Optional: an older holder ends the payload at the id.
+            answered: input.u64().unwrap_or(oldest),
+            exited,
+            id,
         })
     }
 }

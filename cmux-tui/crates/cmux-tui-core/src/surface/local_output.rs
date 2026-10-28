@@ -39,6 +39,10 @@ pub(super) struct OutputPublisher {
     pending_responses: Arc<Mutex<Vec<u8>>>,
     pending_bells: PendingBells,
     registry_publication: Arc<RegistryPublication>,
+    /// A holder terminal's sink: a parse that answered queries is
+    /// acknowledged before its answers are written.
+    #[cfg(unix)]
+    parsed_sink: Option<Arc<crate::holder_runtime::HolderSink>>,
 }
 
 /// One terminal's registry publication (directory, progress and program
@@ -315,6 +319,8 @@ impl LocalOutput {
             pending_responses: self.pending_responses.clone(),
             pending_bells: self.pending_bells.clone(),
             registry_publication: self.registry_publication.clone(),
+            #[cfg(unix)]
+            parsed_sink: self.parsed_sink.clone(),
         }
     }
 }
@@ -365,8 +371,15 @@ impl OutputPublisher {
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
             if !responses.is_empty() {
-                // Waits while the child does not read its input.
-                let _ = will_block(|| surface.write_bytes(&responses));
+                // Waits while the child does not read its input, or the
+                // holder link's writer.
+                let _ = will_block(|| {
+                    #[cfg(unix)]
+                    if let Some(sink) = &self.parsed_sink {
+                        sink.ack_answered();
+                    }
+                    surface.write_bytes(&responses)
+                });
             }
         }
     }

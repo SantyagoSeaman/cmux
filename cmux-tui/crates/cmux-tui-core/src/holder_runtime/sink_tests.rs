@@ -250,3 +250,22 @@ fn replays_are_read_apart_from_live_output() {
     assert_eq!(read(), (b"more".to_vec(), false));
     assert!(!HolderSink::new(0).taken_replays(), "nothing taken");
 }
+
+/// p01-process-210 review: a parse that answered queries is acknowledged
+/// at once, under `ACK_EVERY`, so the holder's `Listed::answered` covers it
+/// when the daemon dies right after writing the answers.
+#[test]
+fn a_parse_that_answered_is_acknowledged_at_once() {
+    let acks = Arc::new(Mutex::new(Vec::new()));
+    let sink = HolderSink::new(0);
+    let recorded = acks.clone();
+    sink.set_acker(Box::new(move |offset| recorded.lock().unwrap().push(offset)));
+    sink.data(0, b"\x1b[c");
+    let mut buf = [0u8; 16];
+    assert_eq!(sink.read(&mut buf).0, 3);
+    sink.confirm_parsed();
+    sink.ack_answered();
+    // Nothing new parsed: no second acknowledgement.
+    sink.ack_answered();
+    assert_eq!(*acks.lock().unwrap(), vec![0, 3]);
+}

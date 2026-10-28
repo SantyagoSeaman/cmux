@@ -624,6 +624,61 @@ fn vim_redraws_after_a_daemon_sigkill() {
     assert_eq!(answers(), 1, "the replayed query was answered again");
 }
 
+/// A query a program sends while no daemon runs is live output, not a
+/// replay: the restarted daemon answers it, exactly once. The holder's
+/// LISTED names what earlier daemons acknowledged they answered
+/// (`Listed::answered`), not its ring end: output no daemon parsed is
+/// answered like any other (p01-process-210 review).
+#[test]
+fn a_query_sent_while_no_daemon_runs_is_answered_once_after_the_restart() {
+    let mut daemon = Daemon::start();
+    let dir = daemon.dir.join("da1");
+    fs::create_dir_all(&dir).unwrap();
+    // Raw mode, then on `go` one DA1 query; every answer read (it ends
+    // in `c`) adds a line to `answers`.
+    let script = r#"stty raw -echo
+: > "$1/ready"
+while [ ! -e "$1/go" ]; do sleep 0.05; done
+printf '\033[c'
+: > "$1/sent"
+while :; do
+  c=$(dd bs=1 count=1 2>/dev/null)
+  [ "$c" = c ] && echo answer >> "$1/answers"
+done"#;
+    let created = request(
+        &daemon.socket,
+        json!({"cmd": "run", "argv": ["/bin/sh", "-c", script, "sh", dir],
+            "new_workspace": true, "name": "da1", "cols": 80, "rows": 24}),
+    );
+    let surface = created["surface"].as_u64().unwrap();
+    let terminal_id = created["terminal_id"].as_str().unwrap().to_string();
+    daemon.track(surface);
+    let wait_file = |name: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !dir.join(name).exists() {
+            assert!(Instant::now() < deadline, "the program never wrote {name}");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    wait_file("ready");
+
+    daemon.sigkill();
+    fs::write(dir.join("go"), b"").unwrap();
+    wait_file("sent");
+    // The holder reads the query into its ring while no daemon runs.
+    std::thread::sleep(Duration::from_millis(300));
+    daemon.restart();
+    running_surface(&daemon.socket, &terminal_id);
+    let answers = || fs::read_to_string(dir.join("answers")).unwrap_or_default().lines().count();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while answers() == 0 {
+        assert!(Instant::now() < deadline, "the restarted daemon never answered the query");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(answers(), 1, "the query was answered more than once");
+}
+
 /// vim's status-line count once it stopped changing (vim drew its first
 /// screen and waits for input).
 fn settled_redraws(socket: &Path, surface: u64) -> u64 {

@@ -16,7 +16,10 @@
 //!   worker never makes the link queue grow with the output rate.
 //! - **Query answers.** A DA or DSR answer a worker sends is checked against
 //!   the fixed answer set ([`QueryAnswer`]) and against the shard's own
-//!   terminals before it reaches a PTY: a worker never writes input.
+//!   terminals before it reaches a PTY: a worker never writes input. It is
+//!   written when the Parsed of its parse comes, with the move of the
+//!   answered offset past that parse, so a worker lost between the two
+//!   leaves the query to its successor and nothing is answered twice.
 //! - **Restart and reseed.** A worker whose link ends is replaced at once,
 //!   and every terminal of its shard is reseeded from the holder's prologue
 //!   plus the ring tail after it ([`VtWorkerHost::reseed`]).

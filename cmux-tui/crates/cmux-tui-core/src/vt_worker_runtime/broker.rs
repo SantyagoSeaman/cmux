@@ -35,9 +35,10 @@ pub struct VtTerminalSpec {
     /// the terminal's shard gets can be handed the ring.
     pub ring: OwnedFd,
     /// Output before this offset was parsed, and its queries answered, by
-    /// an earlier owner (the daemon before a restart: the holder's ring end
-    /// when this daemon listed the terminal; 0 for a new terminal). A
-    /// worker parses it again from the ring and its answers are dropped.
+    /// an earlier owner (the daemon before a restart: the highest offset it
+    /// acknowledged, `cmux_holder::Listed::answered`; 0 for a new
+    /// terminal). A worker parses it again from the ring and its answers
+    /// are dropped.
     pub answered: u64,
 }
 
@@ -205,6 +206,11 @@ struct Terminal {
     /// restart, or by a worker that reported it parsed): parsed again, it
     /// answers nothing.
     answered: u64,
+    /// The checked answers of the parse in progress, written when its
+    /// Parsed comes, in the same step that moves `answered` past it: a
+    /// worker lost between the two leaves the query unanswered for its
+    /// successor, never answered twice.
+    held: Vec<QueryAnswer>,
     /// The base of the newest snapshot handed to the holder.
     snapshot_base: u64,
 }
@@ -294,6 +300,7 @@ impl Broker {
             parsed: 0,
             confirmed: 0,
             answered: spec.answered,
+            held: Vec::new(),
             snapshot_base: 0,
         };
         self.terminals.insert(spec.key, terminal);
@@ -411,6 +418,8 @@ impl Broker {
         terminal.end = terminal.end.max(end);
         terminal.sent = plan.end;
         terminal.parsed = plan.replay_from;
+        // A dead worker's unconfirmed answers: the new one parses it again.
+        terminal.held.clear();
         let (shard, cols, rows, ring) =
             (terminal.shard, terminal.cols, terminal.rows, terminal.ring.clone());
         if let Some(restore) = &mut self.shards[shard].restore {
@@ -491,9 +500,12 @@ impl Broker {
         // Never past what the ring holds: the holder trims by this offset.
         let offset = offset.min(terminal.end);
         terminal.parsed = terminal.parsed.max(offset);
-        // Its answers came before this report: a successor's replay of it
-        // answers nothing.
+        // The parse's answers go out with the move of `answered` past it:
+        // a successor's replay of it answers nothing.
         terminal.answered = terminal.answered.max(terminal.parsed);
+        for answer in std::mem::take(&mut terminal.held) {
+            self.host.write_answer(key, &answer.encode());
+        }
         if offset > terminal.confirmed {
             terminal.confirmed = offset;
             self.host.parsed(key, offset);
@@ -524,23 +536,24 @@ impl Broker {
         self.host.snapshot(key, base, replay.to_vec());
     }
 
+    /// A worker's answer: checked now, held until the Parsed of its parse
+    /// ([`Self::parsed`]).
     fn answer(&mut self, shard: usize, key: VtTerminalKey, bytes: &[u8]) {
-        let checked = match self.terminals.get(&key).filter(|terminal| terminal.shard == shard) {
+        let checked = match self.terminals.get_mut(&key).filter(|terminal| terminal.shard == shard)
+        {
             // Its parse started before the answered output ends (a seed
             // stops there): a replay, answered when it first ran.
             Some(terminal) if terminal.parsed < terminal.answered => Err(AnswerRejected::Replayed),
-            Some(terminal) => QueryAnswer::parse(bytes, terminal.cols, terminal.rows),
+            Some(terminal) if terminal.held.len() >= MAX_HELD_ANSWERS => {
+                let cause = format!("{MAX_HELD_ANSWERS} answers without a Parsed");
+                return self.lost(shard, LinkEnd::BadFrame(cause));
+            }
+            Some(terminal) => QueryAnswer::parse(bytes, terminal.cols, terminal.rows)
+                .map(|answer| terminal.held.push(answer)),
             None => Err(AnswerRejected::NotInShard),
         };
-        match checked {
-            Ok(answer) => self.host.write_answer(key, &answer.encode()),
-            Err(reason) => {
-                self.host.lifecycle(WorkerLifecycle::AnswerRejected {
-                    shard,
-                    terminal: key,
-                    reason,
-                });
-            }
+        if let Err(reason) = checked {
+            self.host.lifecycle(WorkerLifecycle::AnswerRejected { shard, terminal: key, reason });
         }
     }
 
@@ -571,6 +584,10 @@ impl Broker {
         let (generation, strikes) = (slot.generation, slot.strikes.recent(now));
         slot.restore = None;
         let link = kill(old);
+        // Its parses never confirmed: their answers are not written.
+        for terminal in self.terminals.values_mut().filter(|terminal| terminal.shard == shard) {
+            terminal.held.clear();
+        }
         self.host.lifecycle(WorkerLifecycle::Lost { shard, generation, cause, strikes, next });
         if !self.shards[shard].members.is_empty() {
             self.launch(shard, next, now);
@@ -588,6 +605,12 @@ impl Broker {
         self.host.lifecycle(WorkerLifecycle::Refused { shard, generation, version });
     }
 }
+
+/// Answers one parse may hold before its Parsed. A worker reports every
+/// slice it parses (at most 64 KiB, cmux-vt-worker `SLICE_BYTES`; a seed's
+/// prologue at most 128 KiB), and each answer needs a query of at least 3
+/// bytes in it: past this the worker is lying.
+const MAX_HELD_ANSWERS: usize = 64 * 1024;
 
 /// SIGKILL the worker; its link and process are reaped by [`reap`] once
 /// its successor is launched, so the restore does not wait for the reaping.

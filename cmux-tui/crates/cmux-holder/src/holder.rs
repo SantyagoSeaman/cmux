@@ -142,6 +142,10 @@ struct Terminal {
     held: Option<u64>,
     /// Offset the attached daemon acknowledged it parsed up to.
     acked: u64,
+    /// The highest offset any daemon acknowledged it parsed (or an ADOPT's
+    /// base): never lowered, unlike `acked`, which an ATTACH resets for its
+    /// credit. A restarted daemon hears it in LISTED (`Listed::answered`).
+    answered: u64,
     /// A CLOSE asked for its end: the holder forgets it once it ended and
     /// its EXIT went to an attached daemon.
     closing: bool,
@@ -788,6 +792,8 @@ impl Holder {
                     (In(&frame.payload).u64(), self.terminals.get_mut(&frame.chan))
                 {
                     terminal.acked = terminal.acked.max(offset);
+                    // No daemon parsed a byte the holder never read.
+                    terminal.answered = terminal.answered.max(offset.min(terminal.ring.end()));
                 }
                 Ok(())
             }
@@ -886,6 +892,9 @@ impl Holder {
         terminal.held = Some(resume);
         terminal.prologue = input.rest().to_vec();
         terminal.prologue_base = base;
+        // The daemon parsed the dead holder's output up to `base`, not to
+        // the end of a continued ring.
+        terminal.answered = base.min(terminal.ring.end());
         // Tell the daemon which ring this holder writes (the one it was
         // handed, or a fresh one), so the custody copy it hands the next
         // holder is never one nobody writes.
@@ -1340,6 +1349,7 @@ impl Terminal {
             sent: None,
             held: None,
             acked: base,
+            answered: base,
             closing: false,
             input: VecDeque::new(),
             kill_at: None,

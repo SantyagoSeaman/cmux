@@ -44,6 +44,7 @@ impl Holder {
                     pid: terminal.pid,
                     oldest: terminal.ring.oldest(),
                     end: terminal.ring.end(),
+                    answered: terminal.answered,
                     exited: terminal.ended(),
                     master: None,
                     ring: None,

@@ -145,25 +145,35 @@ processes and ~2,000 threads fewer.
   daemon's ATTACH gets it first and the ring from its base. A prologue older than the ring is
   still sent (modes survive) and the daemon cancels before the tail; a re-attach from a ring
   that dropped bytes starts with CAN.
-  Built (p01-process-210): the shard owner makes the snapshot and answers the queries.
-  - Snapshots. On the VT pool the terminal's shard run makes it (`SnapshottingReader`,
-    confirmed offset); with worker processes (`CMUX_TUI_VT_WORKERS=process`) the worker's
-    shard makes it with the same rule (`cmux-vt-worker` shard.rs, at most 128 KiB, after the
-    PARSED that reached its base), and the broker hands it to the holder only at an offset
-    the worker reported parsed (a later one is a bad message).
-  - Replays answer nothing. A re-attached terminal's prologue and the ring a previous daemon
-    parsed (up to the holder's ring end at LISTED), a reopen seed, and in process mode a dead
-    worker's parsed output that its successor replays are parsed again but their DA/DSR
-    answers are dropped: answered twice, they reached the program as typed input (vim read a
-    second `CSI > 1;0;0 c` after each daemon restart). The sink never hands the parser
-    replayed and live bytes in one read, and a worker's seed stops where answered output
-    ends. A query the old daemon died before parsing gets no answer; programs time it out.
+  Built (p01-process-210), VT pool mode: the shard owner snapshots and answers queries.
+  - Snapshots. The terminal's VT pool shard run makes it (`SnapshottingReader`, confirmed
+    offset).
+  - Replays answer nothing, live output is answered once. A re-attached terminal's prologue,
+    a reopen seed and the holder output an earlier daemon answered are parsed again but their
+    DA/DSR answers are dropped: answered twice, they reached the program as typed input (vim
+    read a second `CSI > 1;0;0 c` after each daemon restart). "Answered" is what the holder
+    names in LISTED (`Listed::answered`): the highest offset a daemon ACKed, never the ring
+    end. A parse that answered is ACKed before its answers are written
+    (`HolderSink::ack_answered`), so a daemon that dies after the write leaves them answered,
+    and one that dies before it leaves the query to its successor. Output no daemon parsed
+    (printed while none ran, or received and not parsed) is live: the restarted daemon answers
+    it. The sink never hands the parser replayed and live bytes in one read. Tests:
+    `holder_terminals.rs` `a_query_sent_while_no_daemon_runs_is_answered_once_after_the_restart`,
+    `cmux-holder` `tests/listed_answered.rs`.
   - The nudge. After a re-attach the daemon sends the PTY's foreground process group
     SIGWINCH: the kernel signals only a size change (Linux `tty_do_resize`, XNU `ttioctl`),
     so a same-size TIOCSWINSZ alone would not redraw. vim, less and top redraw their whole
     screen after the replayed ring. Test: `holder_terminals.rs`
     `vim_redraws_after_a_daemon_sigkill` (red without the nudge: vim's status-line count
     stays; red without the replay rule: vim logs two terminal responses).
+  Not built: worker-process mode (`CMUX_TUI_VT_WORKERS=process`). The pieces exist apart, run
+  only against stand-ins: `cmux-vt-worker`'s shard makes the snapshot with the same rule (at
+  most 128 KiB, after the PARSED that reached its base), and the broker relays one only at an
+  offset the worker reported parsed, holds a parse's answers until its Parsed and writes them
+  with the move of its answered offset (a worker lost between the two writes none), and stops
+  a seed where answered output ends. Nothing connects them to a holder: the worker and the
+  broker speak two wires, and no daemon `VtWorkerHost` exists. Task p01-process-137 wires them
+  and runs the replay race and the vim test in process mode.
 - A surface's close (Cmd-W) runs under its runtime lock, so it never connects, starts a holder
   or re-adopts (review 2): without an open link the CLOSE waits for the next link and the
   daemon hangs up the shell's groups itself.
