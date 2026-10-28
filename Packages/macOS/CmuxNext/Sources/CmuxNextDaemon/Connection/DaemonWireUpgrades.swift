@@ -36,7 +36,7 @@ public struct DaemonWireUpgrades: Sendable {
     }
 
     /// JSON lines only: what every connection did before framed IPC.
-    public static let none = DaemonWireUpgrades()
+    public static var none: DaemonWireUpgrades { DaemonWireUpgrades() }
 
     var asksAny: Bool { frames != nil || streams }
 }
