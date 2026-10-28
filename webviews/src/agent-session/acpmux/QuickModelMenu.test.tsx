@@ -208,7 +208,13 @@ test("inline effort picks a different model and its level together; model names 
   await loadQuickModelMenu();
   const picks: { id: string; effort?: string }[] = [];
   const effortPicks: string[] = [];
-  function InlineHarness({ combined = true }: { combined?: boolean }) {
+  function InlineHarness({
+    combined = true,
+    omitInlineEffort = false,
+  }: {
+    combined?: boolean;
+    omitInlineEffort?: boolean;
+  }) {
     const trigger = useRef<HTMLButtonElement | null>(null);
     const [open, setOpen] = useState(false);
     return (
@@ -219,7 +225,7 @@ test("inline effort picks a different model and its level together; model names 
         chip={{ "data-menu": "model", label: "Model", title: "Model" }}
         onMore={() => {}}
         menu={{
-          inlineEffort: combined,
+          ...(omitInlineEffort ? {} : { inlineEffort: combined }),
           models: [],
           current: "a",
           onModel() {},
@@ -293,6 +299,10 @@ test("inline effort picks a different model and its level together; model names 
   await settle();
   await act(async () => root!.render(<InlineHarness combined={false} />));
   await open();
+  expect(document.querySelectorAll(".acpmux-quick-effort-segment")).toHaveLength(0);
+  expect(labels(list())).toContain("Effort");
+  await act(async () => root!.render(<InlineHarness omitInlineEffort />));
+  await settle();
   expect(document.querySelectorAll(".acpmux-quick-effort-segment")).toHaveLength(0);
   expect(labels(list())).toContain("Effort");
 });
