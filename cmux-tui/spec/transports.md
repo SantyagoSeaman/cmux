@@ -190,7 +190,7 @@ Each frame is a 16-byte little-endian header and then `len` payload bytes:
 | --- | --- | --- |
 | OUTPUT, GRID, EVENT, SNAPSHOT, SNAPSHOT_MORE, REPLAY, RING, RING_ADVANCE | 1-8 | absolute PTY offset |
 | INPUT | 9 | flow id |
-| SHARED_BUFFER | 10 | byte size of the attached fd |
+| SHARED_BUFFER | 10 | byte size of the region the payload names |
 | RING_ACK | 11 | the reader's parsed PTY offset (consumer cursor) |
 | REQUEST, REPLY, ERROR, TYPED_EVENT, CANCEL | 16-20 | request id u32, method id u16, priority hint u8, flags u8 |
 
@@ -209,6 +209,25 @@ the connection with `bad_message` and the reason (`bad_magic`, `unknown_kind`,
 `oversize`, `data_on_control_stream`, `unknown_priority`, `unknown_flags`,
 `frames_not_negotiated`, `line_too_long`, `invalid_utf8`, `truncated`).
 Nothing after the bad byte is interpreted.
+
+A SHARED_BUFFER frame (p05-ipc-115) is a REQUEST whose body is in one of
+the connection's pooled shared memory regions, for bodies above 64 KiB (Mojo
+`BigBuffer`'s inline limit). Its 16-byte payload is the request's call fields
+(the 8 bytes a REQUEST frame's aux holds), the body length u32, the region id
+u16 (0-3), the layout version 1 and a flags byte whose bit `0x01` (ATTACHED)
+says the frame passes the region's read-only descriptor with its first byte
+(`SCM_RIGHTS`) and replaces the region that id named. A frame without it
+reuses the region. The daemon maps only a read-only descriptor of an object
+whose size cannot change (a memfd sealed against shrinking, a POSIX shm
+object on macOS), copies the body out before it parses anything, and then
+treats it as that REQUEST: the reply is its REPLY or ERROR frame, after
+which the client may write the region again. A region stays mapped on both
+ends while the kept regions of the connection hold at most 16 MiB; past
+that it is mapped for its one body, and the client attaches a new region
+next time. Any other descriptor, a frame for a region that is not mapped, a
+size that differs from the region's, a body longer than its region, or a
+writable or resizable descriptor is a bad message (`unexpected_fds`,
+`shared_buffer_*`). It needs the `shared-buffers-v1` grant.
 
 An INPUT frame (p05-ipc-078) is the raw bytes of a `send` to the surface of
 the attach stream it names, with no JSON and no base64. Its aux is the key
@@ -466,11 +485,12 @@ Status: `attach-streams-v1` is in the daemon (p05-ipc-074,
 [events.md](events.md#attach-streams)); the other three are a grant rule
 only. The daemon advertises and grants a capability only after its
 transport is in the daemon, so `identify` lists only `attach-streams-v1` of
-the four and `set-client-info` grants only it. A request that names a
+the five and `set-client-info` grants only it. A request that names a
 `stream` on a connection without the grant is refused with
 `streams_not_granted`. The task that adds a transport also turns on its
-capability: p05-ipc-061 for `ipc-frames-v2` and the ring task for
-`terminal-output-ring-v1`
+capability: p05-ipc-061 for `ipc-frames-v2`, the ring task for
+`terminal-output-ring-v1`, and `shared-buffers-v1` with `ipc-frames-v2` once
+a fleet bench row confirms the pool's win (p05-ipc-115)
 (`plans/cmux-next/chrome-parity/p05-ipc.md`, sections 3.1 and 3.2). Mojo
 works the same way: it exposes an interface only after its implementation
 is bound.
@@ -481,6 +501,7 @@ is bound.
 | `attach-streams-v1` | Client-minted streams on one connection. Their items stay JSON lines. | none |
 | `attach-frames-v1` | Attach output as `OUTPUT`, `GRID`, `SNAPSHOT` and `REPLAY` frames on a stream | `ipc-frames-v2`, `attach-streams-v1` |
 | `terminal-output-ring-v1` | The per-terminal shared-memory output ring (`RING`, `RING_ADVANCE`, `RING_ACK`) | `attach-frames-v1` |
+| `shared-buffers-v1` | Request bodies above 64 KiB in pooled shared regions (`SHARED_BUFFER`) | `ipc-frames-v2` |
 
 `identify` lists each capability that is in the daemon and that the
 connection can be granted in its current state. After the client declares an
@@ -493,7 +514,7 @@ it does for any other capability, and the reply stays `{}`.
 
 | Connection | Grants |
 | --- | --- |
-| Direct local peer on the Unix socket, with `api_revision` equal to the daemon's (declared in `set-client-info`) | all four |
+| Direct local peer on the Unix socket, with `api_revision` equal to the daemon's (declared in `set-client-info`) | all five |
 | Direct local peer at any other revision, or with no declared revision | `attach-streams-v1` |
 | Bridge that the daemon identifies at accept | `attach-streams-v1` |
 | Unverified Unix peer | `attach-streams-v1` |

@@ -12,8 +12,13 @@ use super::super::api_revision_wire::NegotiatedRevision;
 use super::*;
 use crate::request_origin::{HelloRole, PeerProcess};
 
-const ALL: [&str; 4] =
-    ["ipc-frames-v2", "attach-streams-v1", "attach-frames-v1", "terminal-output-ring-v1"];
+const ALL: [&str; 5] = [
+    "ipc-frames-v2",
+    "attach-streams-v1",
+    "attach-frames-v1",
+    "terminal-output-ring-v1",
+    "shared-buffers-v1",
+];
 
 /// A history whose current revision is 13, so revision 12 is one behind
 /// and translated.
@@ -147,7 +152,7 @@ fn ipc_grant_local_unix_at_the_current_revision_gets_all_four() {
 fn ipc_grant_one_revision_behind_gets_streams_only() {
     let mux = mux("ipc-grant-n-1");
     let older = Connection::local(&mux);
-    assert_eq!(older.advertised(), ALL, "identify before the revision offers all four");
+    assert_eq!(older.advertised(), ALL, "identify before the revision offers all five");
     assert_eq!(older.ask(12)["ok"], true);
     assert_eq!(older.granted(), ["attach-streams-v1"]);
     assert_eq!(older.advertised(), ["attach-streams-v1"], "identify after it offers streams");
@@ -278,9 +283,13 @@ fn ipc_grant_needs_what_each_capability_requires() {
     let mux = mux("ipc-grant-requires");
     let local = Connection::local(&mux);
     let reply = local.request(json!({"id":2,"cmd":"set-client-info",
-        "capabilities":["attach-frames-v1","terminal-output-ring-v1"],"api_revision":13}));
+        "capabilities":["attach-frames-v1","terminal-output-ring-v1","shared-buffers-v1"],
+        "api_revision":13}));
     assert_eq!(reply["ok"], true);
-    assert!(local.granted().is_empty(), "frames on a stream need ipc-frames-v2 and streams");
+    assert!(
+        local.granted().is_empty(),
+        "frames on a stream need ipc-frames-v2 and streams; shared buffers need ipc-frames-v2"
+    );
     let reply = local.request(json!({"id":3,"cmd":"set-client-info",
         "capabilities":["ipc-frames-v2","attach-streams-v1","attach-frames-v1"]}));
     assert_eq!(reply["ok"], true);
@@ -290,7 +299,7 @@ fn ipc_grant_needs_what_each_capability_requires() {
 
 #[test]
 fn ipc_grant_rule_table() {
-    use IpcCapability::{AttachFrames, AttachStreams, Frames, OutputRing};
+    use IpcCapability::{AttachFrames, AttachStreams, Frames, OutputRing, SharedBuffers};
     let bound = IpcTransports::default();
     bound.bind_all_for_test();
     for peer in [IpcPeer::WebSocket, IpcPeer::RemoteEntry, IpcPeer::PageRelay] {
@@ -298,7 +307,7 @@ fn ipc_grant_rule_table() {
     }
     assert_eq!(
         IpcCapability::offered(IpcPeer::Local, true, &bound),
-        [Frames, AttachStreams, AttachFrames, OutputRing]
+        [Frames, AttachStreams, AttachFrames, OutputRing, SharedBuffers]
     );
     assert_eq!(IpcCapability::offered(IpcPeer::Local, false, &bound), [AttachStreams]);
     assert_eq!(IpcCapability::offered(IpcPeer::Bridged, true, &bound), [AttachStreams]);
@@ -311,6 +320,8 @@ fn ipc_grant_rule_table() {
     assert!(!Frames.allowed(IpcPeer::Local, false));
     assert!(!OutputRing.allowed(IpcPeer::Bridged, true));
     assert!(!OutputRing.allowed(IpcPeer::Unverified, true));
+    assert!(!SharedBuffers.allowed(IpcPeer::Local, false));
+    assert!(!SharedBuffers.allowed(IpcPeer::Bridged, true));
     for capability in IpcCapability::ALL {
         assert_eq!(IpcCapability::named(capability.name()), Some(capability));
     }

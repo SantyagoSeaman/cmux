@@ -1525,8 +1525,9 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
         // settings-allow: C target, no Swift sources (signposts.c); its C settings come from the lander's kind "c" rows
         .target(name: "CmuxNextSignpostsC"),
         // shm_open (variadic, so not callable from Swift) for the Chromium host control channel's
-        // payloads over 64 KiB: a sealed read-only region (p01-process task 020).
-        // settings-allow: C target, no Swift sources (shared_region.c, input_ring.c); its C settings come from the lander's kind "c" rows
+        // payloads over 64 KiB: a sealed read-only region (p01-process task 020), and for the daemon
+        // connection's pooled SHARED_BUFFER regions (p05-ipc-115).
+        // settings-allow: C target, no Swift sources (shared_region.c, input_ring.c, shared_buffer_region.c); its C settings come from the lander's kind "c" rows
         .target(name: "CmuxNextSharedRegionC"),
         .testTarget(
             name: "CmuxNextSignpostsTests",
@@ -1765,7 +1766,9 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
             // CmuxNextCompat: the Mutex of FrameWriter's priority FIFOs (p05-ipc-055)
             // and of StreamDemux's sinks (p05-ipc-056).
             // CmuxSafeConcurrency: OnceContinuation (p10-stability-089).
-            dependencies: ["CmuxNextCompat", "CmuxNextWireDigest", .product(name: "CmuxSafeConcurrency", package: "CmuxSafeConcurrency")],
+            // CmuxNextSharedRegionC: shm_open for SharedBuffer.swift's pooled regions (p05-ipc-115).
+            dependencies: ["CmuxNextCompat", "CmuxNextWireDigest", "CmuxNextSharedRegionC",
+                           .product(name: "CmuxSafeConcurrency", package: "CmuxSafeConcurrency")],
             swiftSettings: daemonSwiftSettings,
             plugins: [.plugin(name: "CmuxNextWireGenPlugin")]
         ),
@@ -1782,6 +1785,8 @@ let packageTargets: [Target] = uiLayerPreviewTargets + [
                 .product(name: "CmuxFuzzSupport", package: "CmuxFuzzSupport"),
                 // The fixture schema's generated DaemonWireEvent, which WireEventSetTests decodes with.
                 "CmuxNextIPCTestSupport",
+                // SharedBufferTests checks a passed region is a read-only shm object (cmux_shared_region_is_sealed).
+                "CmuxNextSharedRegionC",
             ],
             swiftSettings: uiSwiftSettings
         ),

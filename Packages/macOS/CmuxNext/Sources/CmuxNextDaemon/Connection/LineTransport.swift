@@ -53,6 +53,10 @@ final class LineTransport: Sendable {
     /// lands on a reused fd.
     private struct Socket {
         var fd: Int32
+        /// The regions request bodies above 64 KiB go through once `shared-buffers-v1` is granted
+        /// (``SharedBufferPool``, p05-ipc-115); nil sends every body inline. A body is written into its region
+        /// under this lock, in the request's send order.
+        var sharedBuffers: SharedBufferPool?
     }
 
     /// The transport's routing state (LineTransport+State.swift); the reader's routing reads it
@@ -84,6 +88,9 @@ final class LineTransport: Sendable {
     private let elapsed: @Sendable () -> Duration
     /// ``elapsed`` in nanoseconds when the reader last read bytes: the heartbeat's silence (``inboundSilence``).
     private let lastInbound = Atomic<Int64>(0)
+    /// Requests whose body is in a shared region and whose reply has not come: the reader takes the socket lock
+    /// to free a region only while it is above 0.
+    private let sharedInFlight = Atomic<Int>(0)
     /// Where each request's `daemon.request` slice goes (LineTransport+RequestTrace.swift), the top bits of its
     /// async id (``traceConnectionBits(scope:)``) and its flow's seed (``requestFlowSeed(pid:)``).
     let trace: TraceRuntime, traceConnection: UInt64, traceFlowSeed: UInt64
@@ -142,6 +149,7 @@ final class LineTransport: Sendable {
             guard socket.fd >= 0 else { return false }
             Darwin.close(socket.fd)
             socket.fd = -1
+            socket.sharedBuffers = nil
             return true
         }
         if closed { recorder?.connectionClosed(role) }
@@ -273,8 +281,17 @@ final class LineTransport: Sendable {
                 }
             }
             submittedID = id
-            let message = Self.message(payload, id: id, cmd: waiter.cmd, framing: framing)
-            writeFailure = socket.fd >= 0 ? writer.write(message)?.description : "socket closed"
+            guard socket.fd >= 0 else {
+                writeFailure = "socket closed"
+                return nil
+            }
+            // A body above 64 KiB of a framed method goes through a pooled region when one is free; its fd, when
+            // the frame attaches the region, is the writer's from here (``SocketWriter/write(_:priority:fds:)``).
+            let shared = Self.sharedMessage(payload, id: id, cmd: waiter.cmd, framing: framing,
+                                            pool: &socket.sharedBuffers)
+            if shared != nil { sharedInFlight.add(1, ordering: .sequentiallyConsistent) }
+            let message = shared?.frame ?? Self.message(payload, id: id, cmd: waiter.cmd, framing: framing)
+            writeFailure = writer.write(message, priority: .control, fds: shared?.fd.map { [$0] } ?? [])?.description
             if writeFailure == nil { recorder?.lineWritten(bytes: message.count) }
             return nil
         }
@@ -287,6 +304,22 @@ final class LineTransport: Sendable {
             return .failure(DaemonError.connectionClosed(reason: writeFailure))
         }
         return .success(submittedID)
+    }
+
+    /// Starts sending large bodies through shared regions (``SharedBufferPool``): the handshake got
+    /// `shared-buffers-v1`.
+    func adoptSharedBuffers() {
+        socket.withLock { socket in
+            if socket.fd >= 0, socket.sharedBuffers == nil { socket.sharedBuffers = SharedBufferPool() }
+        }
+    }
+
+    /// Frees the region of the request whose reply frame carried `requestID`: the daemon copied its body before
+    /// it ran the request (``SharedBufferPool/release(requestID:)``). Called by the reader, holding no other lock.
+    func releaseSharedBuffer(requestID: UInt32) {
+        guard sharedInFlight.load(ordering: .sequentiallyConsistent) > 0 else { return }
+        let freed = socket.withLock { socket in socket.sharedBuffers?.release(requestID: requestID) ?? false }
+        if freed { sharedInFlight.subtract(1, ordering: .sequentiallyConsistent) }
     }
 
     /// Closes the socket; pending requests fail with `.connectionClosed`.

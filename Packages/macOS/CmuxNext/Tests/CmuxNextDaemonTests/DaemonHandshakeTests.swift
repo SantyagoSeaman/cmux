@@ -86,6 +86,7 @@ import Testing
 
     static let frames = WireNegotiation.framesCapability
     static let streams = WireNegotiation.streamsCapability
+    static let sharedBuffers = WireNegotiation.sharedBuffersCapability
 
     static func configuration(upgrades: DaemonWireUpgrades, hello: Bool) -> DaemonConnectionConfiguration {
         var configuration = DaemonConnectionConfiguration(requiredCapabilities: [], requestTimeout: .seconds(5),
@@ -151,6 +152,37 @@ import Testing
         let revisions = try #require(upgraded.lastIndex { $0.cmd == "identify" && $0.revisions })
         let declared = try #require(upgraded.lastIndex { $0.cmd == "set-client-info" })
         #expect(revisions > declared)
+    }
+
+    /// With `shared-buffers-v1` granted (p05-ipc-115), a framed body above 64 KiB goes as one SHARED_BUFFER frame
+    /// and its region's read-only descriptor, the next one reuses the region with no descriptor, a small one stays
+    /// a REQUEST frame, and each answers like its line. Without the upgrade asked, nothing asks for the grant.
+    @Test func largeBodiesGoThroughOnePooledSharedRegion() async throws {
+        let daemon = try WireDaemon(Self.daemon(offers: [Self.frames, Self.streams, Self.sharedBuffers]))
+        defer { daemon.stop() }
+        let (lines, _) = try await Self.connect(daemon, upgrades: Self.upgrades)
+        let shared = DaemonWireUpgrades(frames: Self.schema, streams: true, sharedBuffers: true)
+        let (framed, grants) = try await Self.connect(daemon, upgrades: shared)
+        #expect(grants == DaemonWireGrants(frames: true, streams: true))
+
+        let big = String(repeating: "x", count: 100 << 10)
+        #expect(try await framed.request(Echo(text: big)) == lines.request(Echo(text: big)))
+        #expect(try await framed.request(Echo(text: big + "y")) == lines.request(Echo(text: big + "y")))
+        #expect(try await framed.request(Echo(text: "small")) == lines.request(Echo(text: "small")))
+        await lines.close()
+        await framed.close()
+
+        let frames = daemon.sharedFrames.withLock { $0 }
+        #expect(frames.map(\.attached) == [true, false], "the second body reused the region")
+        #expect(frames.allSatisfy { $0.bodyLength > SharedBufferPool.inlineMax })
+        #expect(daemon.refusedFrames.withLock { $0 } == 0)
+        let seen = daemon.seen.withLock { $0 }
+        let asked = { (connection: Int) in
+            seen.filter { $0.connection == connection && $0.cmd == "set-client-info" }.last?.capabilities ?? []
+        }
+        #expect(!asked(0).contains(Self.sharedBuffers), "a connection that did not turn the upgrade on asked for it")
+        #expect(asked(1).contains(Self.sharedBuffers))
+        #expect(seen.filter { $0.connection == 1 && $0.cmd == "wire-echo" }.allSatisfy(\.framed))
     }
 
     /// At another revision the daemon withholds frames: streams are granted, and every request stays a line.

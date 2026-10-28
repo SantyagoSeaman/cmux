@@ -19,6 +19,8 @@ struct WireNegotiation {
     /// The daemon's grant names (cmux-tui capabilities.rs, `IpcCapability::name`).
     static let framesCapability = "ipc-frames-v2"
     static let streamsCapability = "attach-streams-v1"
+    /// Request bodies above 64 KiB in pooled shared regions (SHARED_BUFFER, p05-ipc-115); needs frames.
+    static let sharedBuffersCapability = "shared-buffers-v1"
 
     /// The API revision this build's wire types speak: the last revision of cmux-tui/spec/api-compat.json, or
     /// its `base` while it lists none (cmux-api-compat `Schema::current`). DaemonHandshakeTests reads the file
@@ -41,14 +43,17 @@ struct WireNegotiation {
     func echo(offered identity: DaemonIdentity) -> Echo? {
         let frames = bridged || !identity.supports(Self.framesCapability) ? nil : upgrades.frames
         let streams = upgrades.streams && identity.supports(Self.streamsCapability)
+        let sharedBuffers = frames != nil && upgrades.sharedBuffers && identity.supports(Self.sharedBuffersCapability)
         guard frames != nil || streams else { return nil }
-        return Echo(frames: frames, streams: streams)
+        return Echo(frames: frames, streams: streams, sharedBuffers: sharedBuffers)
     }
 
     /// What the handshake got: the grants and, with frames granted, how requests are framed.
     struct Granted: Sendable {
         var grants: DaemonWireGrants
         var framing: FramedRequests?
+        /// Bodies above 64 KiB of framed requests go through shared regions (``SharedBufferPool``).
+        var sharedBuffers = false
 
         static let linesOnly = Granted(grants: .linesOnly, framing: nil)
     }
@@ -58,12 +63,15 @@ struct WireNegotiation {
         /// The schema to frame with, when the echo asks for frames.
         let frames: DaemonFrameSchema?
         let streams: Bool
+        /// Asks for `shared-buffers-v1` (only with frames).
+        var sharedBuffers = false
 
         var asksFrames: Bool { frames != nil }
 
         /// The capability names to echo next to the connection's own.
         var capabilities: [String] {
             (asksFrames ? [WireNegotiation.framesCapability] : []) + (streams ? [WireNegotiation.streamsCapability] : [])
+                + (asksFrames && sharedBuffers ? [WireNegotiation.sharedBuffersCapability] : [])
         }
 
         /// The `api_revision` to declare: the grant of frames needs it; a daemon that offers a framed
@@ -77,7 +85,10 @@ struct WireNegotiation {
         func granted(accepted: Bool, after revisions: DaemonIdentity?) -> Granted {
             guard accepted else { return .linesOnly }
             let framing = frames.flatMap { schema in revisions.flatMap { Self.framing(schema, daemon: $0) } }
-            return Granted(grants: DaemonWireGrants(frames: framing != nil, streams: streams), framing: framing)
+            let shared = framing != nil && sharedBuffers
+                && revisions?.supports(WireNegotiation.sharedBuffersCapability) == true
+            return Granted(grants: DaemonWireGrants(frames: framing != nil, streams: streams), framing: framing,
+                           sharedBuffers: shared)
         }
 
         private static func framing(_ schema: DaemonFrameSchema, daemon: DaemonIdentity) -> FramedRequests? {

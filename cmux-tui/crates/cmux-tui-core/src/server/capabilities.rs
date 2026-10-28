@@ -130,12 +130,20 @@ pub(super) enum IpcCapability {
     AttachFrames,
     /// The per-terminal shared-memory output ring (RING, RING_ADVANCE, RING_ACK).
     OutputRing,
+    /// Request bodies above 64 KiB in pooled shared regions (SHARED_BUFFER,
+    /// p05-ipc-115; cmux-ipc `shared_buffer`).
+    SharedBuffers,
 }
 
 impl IpcCapability {
     /// Every one, each after the ones it [`requires`](Self::requires).
-    pub(super) const ALL: [Self; 4] =
-        [Self::Frames, Self::AttachStreams, Self::AttachFrames, Self::OutputRing];
+    pub(super) const ALL: [Self; 5] = [
+        Self::Frames,
+        Self::AttachStreams,
+        Self::AttachFrames,
+        Self::OutputRing,
+        Self::SharedBuffers,
+    ];
 
     pub(super) const fn name(self) -> &'static str {
         match self {
@@ -143,6 +151,7 @@ impl IpcCapability {
             Self::AttachStreams => "attach-streams-v1",
             Self::AttachFrames => "attach-frames-v1",
             Self::OutputRing => "terminal-output-ring-v1",
+            Self::SharedBuffers => "shared-buffers-v1",
         }
     }
 
@@ -154,13 +163,15 @@ impl IpcCapability {
         1 << self as u8
     }
 
-    /// What must be granted with it: frames on a stream need both, and the
-    /// ring announces its spans with frames on the attach stream.
+    /// What must be granted with it: frames on a stream need both, the
+    /// ring announces its spans with frames on the attach stream, and a
+    /// shared buffer is a frame.
     const fn requires(self) -> &'static [Self] {
         match self {
             Self::Frames | Self::AttachStreams => &[],
             Self::AttachFrames => &[Self::Frames, Self::AttachStreams],
             Self::OutputRing => &[Self::AttachFrames],
+            Self::SharedBuffers => &[Self::Frames],
         }
     }
 
@@ -204,7 +215,9 @@ impl IpcCapability {
 /// once its implementation is bound. The task that lands a transport adds its
 /// capability to [`Self::BOUND`]: the frame reader (p05-ipc-061) `Frames`,
 /// streams and `cancel-stream` (p05-ipc-074) `AttachStreams`, attach frames
-/// `AttachFrames`, the ring (p05-ipc-111) `OutputRing`.
+/// `AttachFrames`, the ring (p05-ipc-111) `OutputRing`. `SharedBuffers`
+/// (p05-ipc-115) is served by `frame_dispatch` and binds with `Frames`, once
+/// a fleet row of cmux-ipc's `shared_buffer_bench` confirms its win.
 pub(super) struct IpcTransports(AtomicU8);
 
 impl IpcTransports {

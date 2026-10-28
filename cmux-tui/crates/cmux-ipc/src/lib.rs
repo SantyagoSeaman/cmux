@@ -26,7 +26,12 @@
 //!
 //! [`fds`] passes file descriptors with `SCM_RIGHTS` and queues the ones that
 //! arrive in order: the holder link uses it, and so do the daemon's frame lanes.
-//! It is the only module with `unsafe` (libc `sendmsg`/`recvmsg`).
+//! It and [`shared_buffer`] are the only modules with `unsafe` (libc
+//! `sendmsg`/`recvmsg`; `mmap` of shared regions).
+//!
+//! [`shared_buffer`] moves a request body above 64 KiB through a pooled
+//! shared memory region (SHARED_BUFFER, task p05-ipc-115); the receiver
+//! copies it out before anything parses it.
 //!
 //! [`lane_writer`] is the outbound priority policy (design 3.4): input
 //! streams, then the one control FIFO, then bulk, then background, with
@@ -71,6 +76,12 @@ pub mod reader;
 pub mod schema;
 mod schema_digest;
 mod server_families;
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "shared regions need libc memfd_create/shm_open, mmap and fcntl; every mapping is bounded by the size it was made or checked with"
+)]
+pub mod shared_buffer;
 
 pub use frame::{
     Aux, AuxClass, BadMessage, CallAux, CallFlags, Frame, FrameHeader, FrameKind, HEADER_LEN,

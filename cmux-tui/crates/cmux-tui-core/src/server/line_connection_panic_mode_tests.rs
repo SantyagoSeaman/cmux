@@ -114,7 +114,7 @@ impl super::FrameLane for PanickingFrames {
     fn route(
         &mut self,
         _frame: cmux_ipc::Frame,
-        _connection: &super::FrameConnection<'_>,
+        _connection: &mut super::FrameConnection<'_>,
     ) -> Result<bool, super::ConnectionBadMessage> {
         panic!("a handler on the connection's reader panicked");
     }

@@ -35,7 +35,7 @@ impl FrameLane for RecordingFrames {
     fn route(
         &mut self,
         frame: cmux_ipc::Frame,
-        _connection: &FrameConnection<'_>,
+        _connection: &mut FrameConnection<'_>,
     ) -> Result<bool, ConnectionBadMessage> {
         let request = frame.header().call().map_or(0, |call| call.request_id);
         self.seen.lock().unwrap().push((frame.header().kind(), request, frame.payload().to_vec()));

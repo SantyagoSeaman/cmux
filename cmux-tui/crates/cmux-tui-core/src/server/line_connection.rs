@@ -12,8 +12,13 @@
 //! together, straight into the reader's buffer, as Mojo's
 //! `ChannelPosix::OnFileCanReadWithoutBlocking` reads into the buffer
 //! `Channel::GetReadBuffer` lends it (chromium mojo/core/channel_posix.cc).
-//! No frame kind carries descriptors yet, so a descriptor that arrives is a
-//! bad message: it is refused where the kernel would otherwise drop it unseen.
+//! Descriptors queue in arrival order ([`cmux_ipc::fds::FdReceiver`]) and
+//! only a SHARED_BUFFER frame takes one (p05-ipc-115), as Mojo's
+//! `ChannelPosix` hands each message the handles its header counts. They may
+//! arrive only while the client holds the shared-buffer grant, and at most
+//! [`FrameLane::descriptors_allowed`] may wait for their frame; any other
+//! descriptor is a bad message, refused where the kernel would otherwise drop
+//! it unseen.
 //!
 //! A bad message closes the connection, as Chrome's `ReportBadMessage`
 //! (mojo/public/cpp/bindings/message.h) ends the sender: nothing after the
@@ -36,6 +41,10 @@ use super::*;
 /// gets it (a local Unix peer at this daemon's api_revision); this loop only
 /// reads it from the client's record.
 pub(super) const IPC_FRAMES_CAPABILITY: &str = "ipc-frames-v2";
+
+/// The grant that lets a connection send SHARED_BUFFER frames and the
+/// descriptors they carry (capabilities.rs `IpcCapability::SharedBuffers`).
+pub(super) const SHARED_BUFFERS_CAPABILITY: &str = "shared-buffers-v1";
 
 /// A JSON line's payload may be `MAX_JSON_LINE_BYTES` long, its `\n`
 /// excluded, as with `read_line`; frames keep the wire's 32 MiB bound.
@@ -127,12 +136,18 @@ pub(super) trait FrameLane {
     /// frames (not a local Unix socket, or an admission that sees only lines).
     fn granted(&self, mux: &Mux, client: u64) -> bool;
 
+    /// How many received descriptors may wait for the frame that takes
+    /// them; asked only when one arrived. More is a bad message.
+    fn descriptors_allowed(&self, _mux: &Mux, _client: u64) -> usize {
+        0
+    }
+
     /// Takes one frame. `Ok(false)` closes the connection as a line's
     /// handler does; an error closes it as a bad message.
     fn route(
         &mut self,
         frame: Frame,
-        connection: &FrameConnection<'_>,
+        connection: &mut FrameConnection<'_>,
     ) -> Result<bool, ConnectionBadMessage>;
 }
 
@@ -145,6 +160,18 @@ pub(super) struct FrameConnection<'a> {
     pub(super) scheduler: &'a Arc<ConnectionSurfaceScheduler>,
     /// When the reader cut the frame, for its request span.
     pub(super) arrived: Instant,
+    /// The descriptors that arrived and no frame took yet.
+    #[cfg(unix)]
+    pub(super) fds: &'a mut cmux_ipc::fds::FdReceiver,
+}
+
+impl FrameConnection<'_> {
+    /// The oldest descriptor no frame took yet: the one a frame that
+    /// carries a descriptor sent with its first byte.
+    #[cfg(unix)]
+    pub(super) fn take_fd(&mut self) -> Option<std::os::fd::OwnedFd> {
+        self.fds.take(1).ok().and_then(|mut taken| taken.pop())
+    }
 }
 
 /// Why a connection was closed as a bad message.
@@ -160,8 +187,12 @@ pub(super) enum ConnectionBadMessage {
     /// A REQUEST or CANCEL frame that its method or the requests in flight
     /// refuse.
     Call(frame_dispatch::CallRefusal),
-    /// A descriptor arrived; no frame kind carries one yet.
+    /// A descriptor arrived without the shared-buffer grant, or more than
+    /// may wait for their frames.
     UnexpectedFds,
+    /// A SHARED_BUFFER frame its region or descriptor refuses.
+    #[cfg(unix)]
+    SharedBuffer(cmux_ipc::shared_buffer::SharedBufferRefusal),
 }
 
 impl ConnectionBadMessage {
@@ -173,6 +204,8 @@ impl ConnectionBadMessage {
             ConnectionBadMessage::UnknownStream { .. } => "unknown_stream",
             ConnectionBadMessage::Call(refusal) => refusal.reason(),
             ConnectionBadMessage::UnexpectedFds => "unexpected_fds",
+            #[cfg(unix)]
+            ConnectionBadMessage::SharedBuffer(refusal) => refusal.reason(),
         }
     }
 }
@@ -189,6 +222,8 @@ impl fmt::Display for ConnectionBadMessage {
             }
             ConnectionBadMessage::Call(refusal) => write!(f, "{refusal}"),
             ConnectionBadMessage::UnexpectedFds => write!(f, "a file descriptor arrived"),
+            #[cfg(unix)]
+            ConnectionBadMessage::SharedBuffer(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -319,22 +354,26 @@ pub(super) fn serve_connection(
                 }
                 Ok(Some(Message::Frame(frame))) => {
                     ipc.frame_received(frame.header().kind(), frame.header().frame_len());
-                    let connection = FrameConnection {
+                    let mut connection = FrameConnection {
                         mux: &mux,
                         client,
                         transport,
                         writer: &writer,
                         scheduler: &surface_scheduler,
                         arrived: Instant::now(),
+                        #[cfg(unix)]
+                        fds: &mut input.fds,
                     };
-                    match frames.route(frame, &connection) {
+                    match frames.route(frame, &mut connection) {
                         Ok(true) => continue,
                         Ok(false) => break ConnectionEnd::Dropped,
                         Err(bad) => break ConnectionEnd::BadMessage(bad),
                     }
                 }
                 Ok(None) if input.ended => break ConnectionEnd::PeerClosed,
-                Ok(None) => match input.fill() {
+                Ok(None) => match input.fill(|| {
+                    if carries_frames { frames.descriptors_allowed(&mux, client) } else { 0 }
+                }) {
                     Ok(()) => continue,
                     Err(end) => break end,
                 },
@@ -452,8 +491,9 @@ impl ConnectionInput {
         }
     }
 
-    /// One read into the reader; at end of stream marks it ended.
-    fn fill(&mut self) -> Result<(), ConnectionEnd> {
+    /// One read into the reader; at end of stream marks it ended. When
+    /// descriptors are queued, `allowed` says how many may wait.
+    fn fill(&mut self, allowed: impl FnOnce() -> usize) -> Result<(), ConnectionEnd> {
         let read = loop {
             match self.read() {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -461,7 +501,7 @@ impl ConnectionInput {
             }
         };
         match read {
-            Ok(_) if self.descriptors_queued() => {
+            Ok(_) if self.descriptors_queued() > 0 && self.descriptors_queued() > allowed() => {
                 Err(ConnectionEnd::BadMessage(ConnectionBadMessage::UnexpectedFds))
             }
             Ok(0) => {
@@ -492,13 +532,13 @@ impl ConnectionInput {
     }
 
     #[cfg(unix)]
-    fn descriptors_queued(&self) -> bool {
-        self.fds.queued() > 0
+    fn descriptors_queued(&self) -> usize {
+        self.fds.queued()
     }
 
     #[cfg(not(unix))]
-    fn descriptors_queued(&self) -> bool {
-        false
+    fn descriptors_queued(&self) -> usize {
+        0
     }
 
     /// Zeroes the line the reader still lends (it does so on its next call).

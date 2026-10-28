@@ -12,10 +12,14 @@ public struct DaemonWireUpgrades: Sendable {
     public var frames: DaemonFrameSchema?
     /// Asks for `attach-streams-v1` (client-minted streams on this connection).
     public var streams: Bool
+    /// With frames, asks for `shared-buffers-v1`: request bodies above 64 KiB go through pooled shared regions
+    /// (``SharedBufferPool``, p05-ipc-115). Off unless the composition root turns it on.
+    public var sharedBuffers: Bool
 
-    public init(frames: DaemonFrameSchema? = nil, streams: Bool = false) {
+    public init(frames: DaemonFrameSchema? = nil, streams: Bool = false, sharedBuffers: Bool = false) {
         self.frames = frames
         self.streams = streams
+        self.sharedBuffers = sharedBuffers
     }
 
     /// JSON lines only: what every connection did before framed IPC.

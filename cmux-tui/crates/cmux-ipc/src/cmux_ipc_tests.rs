@@ -11,6 +11,12 @@ mod methods_table_tests;
 mod reader_tests;
 mod schema_tests;
 mod server_families_tests;
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "the tests make descriptors the receiver must refuse with libc calls"
+)]
+mod shared_buffer_tests;
 
 use bytes::{Bytes, BytesMut};
 

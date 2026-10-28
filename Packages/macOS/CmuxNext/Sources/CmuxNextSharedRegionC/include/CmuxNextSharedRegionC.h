@@ -28,6 +28,14 @@ int cmux_shared_region_create(const void *bytes, size_t count);
 // Unix socket, so it passes the shm descriptor and checks its type.
 int cmux_shared_region_is_sealed(int fd);
 
+// A pooled SHARED_BUFFER region of the daemon connection (p05-ipc-115;
+// CmuxNextIPC SharedBuffer.swift, cmux-ipc shared_buffer.rs): an unlinked
+// POSIX shm object of `count` zero bytes. Returns its read-write,
+// close-on-exec descriptor, which the app maps and writes, and stores in
+// `*read_only` a read-only, close-on-exec descriptor of it, the one a frame
+// passes. -1 (errno set) and nothing stored when it fails.
+int cmux_shared_buffer_region_create(size_t count, int *read_only);
+
 // The Chromium host input ring (p01-process-041; ChromiumHostInputRing.swift,
 // ChromiumHost/src/chromium_host_input_ring.h).
 //

@@ -57,7 +57,8 @@ pub enum FrameKind {
     RingAdvance = 8,
     /// Terminal input bytes; aux is the flow id that joins traces.
     Input = 9,
-    /// A pooled shared buffer; aux is the size of the attached fd.
+    /// A request whose body is in a pooled shared region; aux is the
+    /// region's byte size, the payload its descriptor (`shared_buffer`).
     SharedBuffer = 10,
     /// The reader's consumer cursor; aux is the parsed PTY offset.
     RingAck = 11,
@@ -255,6 +256,30 @@ pub struct CallAux {
     pub flags: CallFlags,
 }
 
+impl CallAux {
+    /// The 8 aux bytes of a call frame: request id u32, method id u16,
+    /// priority hint u8, flags u8, little endian. A SHARED_BUFFER carries
+    /// its request's call fields in the same 8 bytes (`shared_buffer`).
+    pub fn to_wire(self) -> [u8; 8] {
+        let [i0, i1, i2, i3] = self.request_id.to_le_bytes();
+        let [m0, m1] = self.method_id.to_le_bytes();
+        [i0, i1, i2, i3, m0, m1, self.priority.wire(), self.flags.bits()]
+    }
+
+    /// Decodes [`to_wire`](Self::to_wire)'s bytes, refusing an unknown
+    /// priority hint or flag bit.
+    pub fn from_wire(bytes: [u8; 8]) -> Result<CallAux, BadMessage> {
+        let [i0, i1, i2, i3, m0, m1, priority, flags] = bytes;
+        Ok(CallAux {
+            request_id: u32::from_le_bytes([i0, i1, i2, i3]),
+            method_id: u16::from_le_bytes([m0, m1]),
+            priority: PriorityHint::from_wire(priority)
+                .ok_or(BadMessage::UnknownPriority { hint: priority })?,
+            flags: CallFlags::from_wire(flags).ok_or(BadMessage::UnknownFlags { flags })?,
+        })
+    }
+}
+
 /// The aux word, typed by the frame's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Aux {
@@ -279,11 +304,7 @@ impl Aux {
             Aux::Offset(value) | Aux::FlowId(value) | Aux::SharedBufferSize(value) => {
                 value.to_le_bytes()
             }
-            Aux::Call(call) => {
-                let [i0, i1, i2, i3] = call.request_id.to_le_bytes();
-                let [m0, m1] = call.method_id.to_le_bytes();
-                [i0, i1, i2, i3, m0, m1, call.priority.wire(), call.flags.bits()]
-            }
+            Aux::Call(call) => call.to_wire(),
         }
     }
 
@@ -293,16 +314,7 @@ impl Aux {
             AuxClass::Offset => Aux::Offset(value),
             AuxClass::FlowId => Aux::FlowId(value),
             AuxClass::SharedBufferSize => Aux::SharedBufferSize(value),
-            AuxClass::Call => {
-                let [i0, i1, i2, i3, m0, m1, priority, flags] = bytes;
-                Aux::Call(CallAux {
-                    request_id: u32::from_le_bytes([i0, i1, i2, i3]),
-                    method_id: u16::from_le_bytes([m0, m1]),
-                    priority: PriorityHint::from_wire(priority)
-                        .ok_or(BadMessage::UnknownPriority { hint: priority })?,
-                    flags: CallFlags::from_wire(flags).ok_or(BadMessage::UnknownFlags { flags })?,
-                })
-            }
+            AuxClass::Call => Aux::Call(CallAux::from_wire(bytes)?),
         })
     }
 }

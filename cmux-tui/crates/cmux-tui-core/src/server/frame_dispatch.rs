@@ -51,6 +51,19 @@
 //! (chromium third_party/blink/public/mojom/input/input_handler.mojom,
 //! `DispatchNonBlockingEvent`).
 //!
+//! A SHARED_BUFFER frame (p05-ipc-115) is a REQUEST whose body is in one of
+//! the connection's pooled shared regions (cmux-ipc `shared_buffer`): its
+//! payload names the request's call fields, the region and the body's
+//! length, and a frame that attaches a region carries its read-only
+//! descriptor. The body is copied out of the region before anything parses
+//! it, then takes the REQUEST path above, so its reply is the REPLY or ERROR
+//! of the same request. The client may reuse the region once that reply
+//! arrives. Like Mojo's `BigBuffer` from an untrusted sender (chromium
+//! mojo/public/cpp/base/big_buffer.h), the copy is what is validated: a
+//! sender that writes the region meanwhile changes nothing the daemon reads
+//! twice. It needs the `shared-buffers-v1` grant; without it the frame is
+//! unrouted, and a descriptor that arrives is a bad message.
+//!
 //! Only `Command` methods answer on frames yet. A feature route or a v2
 //! operation replies on its own writer, so a frame naming one gets the ERROR
 //! [`METHOD_NOT_FRAMED`]; the routes move to the method table in
@@ -80,6 +93,7 @@ use crate::diagnostics::{IpcTransport, JsonParseScope};
 use super::cmd_terminal_io::InputFailure;
 use super::line_connection::{
     ConnectionBadMessage, FrameConnection, FrameLane, IPC_FRAMES_CAPABILITY,
+    SHARED_BUFFERS_CAPABILITY,
 };
 use super::pending_streams::{ClientStreams, RequestLane, StreamEndpoint, post_request};
 use super::{
@@ -280,6 +294,9 @@ pub(super) struct RequestFrames {
     sweep_at: usize,
     /// The streams the client announced.
     streams: ClientStreams,
+    /// The regions SHARED_BUFFER frames attached.
+    #[cfg(unix)]
+    shared_buffers: cmux_ipc::shared_buffer::SharedBufferMappings,
 }
 
 impl Default for RequestFrames {
@@ -289,6 +306,8 @@ impl Default for RequestFrames {
             in_flight: HashMap::new(),
             sweep_at: SWEEP_MIN,
             streams: ClientStreams::default(),
+            #[cfg(unix)]
+            shared_buffers: cmux_ipc::shared_buffer::SharedBufferMappings::default(),
         }
     }
 }
@@ -309,16 +328,30 @@ impl FrameLane for RequestFrames {
         mux.control_clients.supports_capability(client, IPC_FRAMES_CAPABILITY)
     }
 
+    /// One per region a frame can attach before the daemon read it: a client
+    /// attaches a region again only after the reply to its last body.
+    fn descriptors_allowed(&self, mux: &Mux, client: u64) -> usize {
+        if !mux.control_clients.supports_capability(client, SHARED_BUFFERS_CAPABILITY) {
+            return 0;
+        }
+        #[cfg(unix)]
+        return cmux_ipc::shared_buffer::MAX_REGIONS;
+        #[cfg(not(unix))]
+        return 0;
+    }
+
     fn route(
         &mut self,
         frame: Frame,
-        connection: &FrameConnection<'_>,
+        connection: &mut FrameConnection<'_>,
     ) -> Result<bool, ConnectionBadMessage> {
         let header = *frame.header();
         match (header.kind(), header.call()) {
             (FrameKind::Request, Some(call)) => {
-                self.request(&header, call, frame.payload(), connection)
+                self.request(header.stream(), call, frame.payload(), connection)
             }
+            #[cfg(unix)]
+            (FrameKind::SharedBuffer, None) => self.shared_buffer(&frame, connection),
             (FrameKind::Cancel, Some(call)) => self
                 .cancel(&header, call, frame.payload().is_empty())
                 .map(|()| true)
@@ -332,7 +365,7 @@ impl FrameLane for RequestFrames {
 impl RequestFrames {
     fn request(
         &mut self,
-        header: &FrameHeader,
+        stream: u16,
         call: CallAux,
         payload: &[u8],
         connection: &FrameConnection<'_>,
@@ -352,7 +385,6 @@ impl RequestFrames {
         let body = std::str::from_utf8(payload).map_err(|error| {
             ConnectionBadMessage::Wire(BadMessage::InvalidUtf8 { valid_up_to: error.valid_up_to() })
         })?;
-        let stream = header.stream();
         let lane = self.streams.request_lane(stream, method).map_err(ConnectionBadMessage::Call)?;
         self.admit(call.request_id).map_err(ConnectionBadMessage::Call)?;
         // An admitted REQUEST is one framed request of `server-stats` `ipc`:
@@ -384,6 +416,33 @@ impl RequestFrames {
                 connection.arrived,
             )),
         }
+    }
+
+    /// A SHARED_BUFFER frame: its body, copied out of its region, takes the
+    /// REQUEST path. Without the grant the kind is unrouted.
+    #[cfg(unix)]
+    fn shared_buffer(
+        &mut self,
+        frame: &Frame,
+        connection: &mut FrameConnection<'_>,
+    ) -> Result<bool, ConnectionBadMessage> {
+        use cmux_ipc::shared_buffer::SharedBufferDescriptor;
+        let header = frame.header();
+        let granted = connection
+            .mux
+            .control_clients
+            .supports_capability(connection.client, SHARED_BUFFERS_CAPABILITY);
+        let (true, Aux::SharedBufferSize(region_bytes)) = (granted, header.aux()) else {
+            return Err(ConnectionBadMessage::UnroutedKind { kind: FrameKind::SharedBuffer });
+        };
+        let descriptor = SharedBufferDescriptor::decode(frame.payload())
+            .map_err(ConnectionBadMessage::SharedBuffer)?;
+        let fd = if descriptor.attached { connection.take_fd() } else { None };
+        let body = self
+            .shared_buffers
+            .receive(region_bytes, &descriptor, fd)
+            .map_err(ConnectionBadMessage::SharedBuffer)?;
+        self.request(header.stream(), descriptor.call, &body, connection)
     }
 
     /// Queues an INPUT frame's bytes on its stream, behind the line's gates.
@@ -566,3 +625,7 @@ pub(super) mod tests;
 #[cfg(all(test, unix))]
 #[path = "input_frames_tests.rs"]
 mod input_frames_tests;
+
+#[cfg(all(test, unix))]
+#[path = "shared_buffer_frames_tests.rs"]
+mod shared_buffer_frames_tests;

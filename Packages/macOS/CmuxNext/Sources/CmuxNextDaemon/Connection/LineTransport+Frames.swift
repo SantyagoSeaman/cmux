@@ -24,6 +24,17 @@ extension LineTransport {
             state.grants = granted.grants
             state.framing = granted.framing
         }
+        if granted.sharedBuffers { adoptSharedBuffers() }
+    }
+
+    /// The SHARED_BUFFER frame of request `id` when `framing` frames `cmd` and `pool` has a free region for its
+    /// body above 64 KiB, with the descriptor it passes; nil sends the request as ``message(_:id:cmd:framing:)``.
+    static func sharedMessage(_ payload: Data, id: UInt64, cmd: String, framing: FramedRequests?,
+                              pool: inout SharedBufferPool?) -> SharedBufferPool.Staged? {
+        guard payload.count > SharedBufferPool.inlineMax, pool != nil,
+              let method = framing?.method(for: cmd, bodyBytes: payload.count) else { return nil }
+        return pool?.stage(payload, requestID: UInt32(truncatingIfNeeded: id), methodID: method.id.rawValue,
+                           priority: method.priority.rawValue)
     }
 
     /// What goes on the wire for request `id`: a REQUEST frame when `framing` frames `cmd`, else its line.
@@ -79,6 +90,7 @@ extension LineTransport {
             return "unrouted frame kind \(header.kind) on stream \(header.stream)"
         }
         let call = FramedRequests.call(of: header)
+        releaseSharedBuffer(requestID: call.requestID)
         let line = Data(frame.payload)
         let id = state.withLock { FramedRequests.requestID(low: call.requestID, next: $0.nextID) }
         // An ERROR's body is decoded once, on the lane, for the fields that fail its waiter (p05-ipc-144: the
