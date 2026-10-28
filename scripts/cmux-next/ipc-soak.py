@@ -17,12 +17,16 @@ blocks of plain text lines to its tty at the asked rate and writes what it reach
 Every --sample seconds, for --minutes after a --warmup, it reads:
 
   * daemon: `server-stats {include:["ipc"]}` on the tag daemon's socket: `ring_resyncs`, `ring_laps` (p05-ipc-082),
-    `ring_capacity` when reported; and the daemon's pid (a restart resets the counters and is a failed run);
+    `ring_capacity` when reported; and the daemon's pid from `identify` at every sample (a restarted daemon binds
+    the same session socket and starts its counters at 0, so only a new pid shows it; a restart is a failed run);
   * app: `debug.daemon.wire` `output_bytes_copied_app` (p05-ipc-004): output bytes the app copied. With the ring in use
     the floods copy nothing (IPC-7), so copies of more than 1% of the flood bytes mean the floods did not go
     through the ring, and the run says nothing about its size;
-  * health: `system.ping` round trip on the app's control socket and whether the app still runs. A ping over
-    --hang-ms (250, IPC-14's hang) is a hang.
+  * health: the app's main-thread hangs, `debug.hangs` `count250` (MainThreadWatchdog's main-thread work gaps of
+    250 ms or more, IPC-14's hang; `count100` with --hang-ms 100), counted as the change from the first to the last
+    sample; whether the app still runs; and the `system.ping` round trip. The app answers the ping from its last
+    published snapshot, without the main thread, so a fast ping says nothing about the main thread; a ping over
+    --hang-ms or unanswered still fails the run.
 
 A counter is read from the section's top level, else summed over the nested objects that have it (per connection or
 per stream), so either layout of 082 and 004 reads the same total.
@@ -52,6 +56,7 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -66,6 +71,7 @@ DAEMON_RESYNCS = "ring_resyncs"    # server-stats --include ipc (p05-ipc-082)
 DAEMON_LAPS = "ring_laps"          # server-stats --include ipc (p05-ipc-082)
 DAEMON_CAPACITY = "ring_capacity"  # optional; the design's default when absent
 APP_COPIED = "output_bytes_copied_app"  # debug.daemon.wire (p05-ipc-004, DaemonWireControl.swift)
+APP_HANGS = {100: "count100", 250: "count250"}  # debug.hangs: main-thread work gaps of >= 100 / >= 250 ms
 DESIGN_CAPACITY = "1 MiB"  # app-daemon-connection-DESIGN.md 4.2
 RATE_FLOOR = 0.9  # a printer under 90% of its rate did not load the ring as asked
 COPIED_CEILING = 0.01  # copies above 1% of the flood bytes: the floods did not use the ring
@@ -142,8 +148,10 @@ def read_counter(section, name):
 
 
 def daemon_reader(binary, tag, status=None, request=None):
-    """A callable returning {pid, ipc} from the tag daemon (`server-stats {include:[ipc]}`), or {error}. The socket
-    is looked up again after a failure (a restarted daemon has a new one)."""
+    """A callable returning {pid, ipc} from the tag daemon (`identify`, then `server-stats {include:[ipc]}`), or
+    {error}. The pid is read at every call: a restarted daemon binds the same session socket, so its pid is what
+    shows the restart. The socket is looked up again after a failure or a new pid. A failed or slow `server status`
+    (its 10 s timeout under the flood) or a status reply without a socket is an {error} sample, not the soak's end."""
     if status is None or request is None:
         sys.path.insert(0, HERE)
         from daemon_teardown import daemon_status, request as daemon_request
@@ -157,30 +165,40 @@ def daemon_reader(binary, tag, status=None, request=None):
                 if not running:
                     return {"error": "no running daemon"}
                 found["socket"] = running["socket"]
-                found["pid"] = (request(found["socket"], {"id": 1, "cmd": "identify"}, 10).get("data") or {}).get("pid")
+            pid = (request(found["socket"], {"id": 1, "cmd": "identify"}, 10).get("data") or {}).get("pid")
             reply = request(found["socket"], {"id": 2, "cmd": "server-stats", "include": ["ipc"]}, 10)
-        except (OSError, ValueError, ConnectionError) as error:
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             found.clear()
-            return {"error": str(error)}
+            return {"error": f"{type(error).__name__}: {error}"[:200]}
+        if "pid" in found and pid != found["pid"]:
+            found.clear()  # a new daemon: look its socket up again at the next read
+        found["pid"] = pid
         if not reply.get("ok"):
-            return {"error": str(reply.get("error"))[:200]}
-        return {"pid": found.get("pid"), "ipc": (reply.get("data") or {}).get("ipc")}
+            return {"pid": pid, "error": str(reply.get("error"))[:200]}
+        return {"pid": pid, "ipc": (reply.get("data") or {}).get("ipc")}
     return read
 
 
-def sample(rpc, daemon, alive, clock=time.monotonic):
-    """One sample: the daemon's ring counters, the app's copied bytes, the ping round trip and liveness."""
+def answered(reply):
+    """`reply` when it is a dict without an error, else None."""
+    return reply if isinstance(reply, dict) and not reply.get("error") else None
+
+
+def sample(rpc, daemon, alive, hang_key=APP_HANGS[250], clock=time.monotonic):
+    """One sample: the daemon's ring counters and pid, the app's copied bytes, its main-thread hang count
+    (`debug.hangs` `hang_key`), the ping round trip and liveness."""
     started = clock()
     ping = rpc("system.ping", timeout=10)
     ping_ms = None if isinstance(ping, dict) and ping.get("error") else round((clock() - started) * 1000, 2)
     stats = daemon()
     ipc = stats.get("ipc")
-    wire = rpc("debug.daemon.wire", timeout=10)
-    wire = None if not isinstance(wire, dict) or wire.get("error") else wire
+    wire = answered(rpc("debug.daemon.wire", timeout=10))
+    hangs = answered(rpc("debug.hangs", {"limit": 0}, timeout=10))
     return {"t": round(clock(), 3), "alive": alive(), "ping_ms": ping_ms, "daemon_pid": stats.get("pid"),
             "daemon_error": stats.get("error"),
             "ring_resyncs": read_counter(ipc, DAEMON_RESYNCS), "ring_laps": read_counter(ipc, DAEMON_LAPS),
-            "ring_capacity": read_counter(ipc, DAEMON_CAPACITY), "copied_bytes": read_counter(wire, APP_COPIED)}
+            "ring_capacity": read_counter(ipc, DAEMON_CAPACITY), "copied_bytes": read_counter(wire, APP_COPIED),
+            "main_hangs": read_counter(hangs, hang_key)}
 
 
 def sample_for(seconds, every, take, clock=time.monotonic, sleep=time.sleep):
@@ -227,7 +245,8 @@ def phase_summary(name, samples, printers, hang_ms):
     minutes = (samples[-1]["t"] - samples[0]["t"]) / 60 if len(samples) > 1 else 0.0
     resyncs, laps, copied = delta(samples, "ring_resyncs"), delta(samples, "ring_laps"), delta(samples, "copied_bytes")
     pings = sorted(s["ping_ms"] for s in samples if s.get("ping_ms") is not None)
-    hangs = sum(1 for s in samples if s.get("ping_ms") is None or s["ping_ms"] > hang_ms)
+    slow_pings = sum(1 for s in samples if s.get("ping_ms") is None or s["ping_ms"] > hang_ms)
+    hangs = delta(samples, "main_hangs")
     pids = {s.get("daemon_pid") for s in samples if s.get("daemon_pid") is not None}
     flood_bytes = sum(p["bytes"] for p in printers if p)
     rates = [round(p["bytes_per_s"] / p["target_bytes_per_s"], 3) if p else 0.0 for p in printers]
@@ -242,8 +261,14 @@ def phase_summary(name, samples, printers, hang_ms):
         problems.append("the app exited")
     if len(pids) > 1:
         problems.append(f"the daemon restarted (pids {sorted(pids)})")
-    if hangs:
-        problems.append(f"{hangs} pings over {hang_ms} ms or unanswered")
+    elif not pids:
+        problems.append("no daemon pid (identify): a daemon restart is not ruled out")
+    if hangs is None:
+        problems.append(f"no app main-thread hang count (debug.hangs {APP_HANGS.get(int(hang_ms), '?')}) or it went back")
+    elif hangs:
+        problems.append(f"the app's main thread hung {hangs} times over {hang_ms:g} ms (debug.hangs)")
+    if slow_pings:
+        problems.append(f"{slow_pings} pings over {hang_ms:g} ms or unanswered")
     if minutes <= 0:
         problems.append("no measured time")
     if not printers:
@@ -256,7 +281,8 @@ def phase_summary(name, samples, printers, hang_ms):
             "ring_capacity": max(capacities) if capacities else None,
             "copied_bytes": copied, "flood_bytes": flood_bytes,
             "rate_reached": rates, "rates_ok": bool(rates) and min(rates) >= RATE_FLOOR,
-            "ping_ms_max": pings[-1] if pings else None, "hangs": hangs, "problems": problems}
+            "ping_ms_max": pings[-1] if pings else None, "hangs": hangs, "slow_pings": slow_pings,
+            "problems": problems}
 
 
 def capacity_verdict(phases):
@@ -289,8 +315,10 @@ def section9_row(date, host, sha, phases, verdict, opts, command):
     """The app-daemon-connection-DESIGN.md section 9 row: Date | Row | Host / sha / Hz | Light | STRESS | Note."""
     by_name = {p["phase"]: p for p in phases}
     capacity = next((p["ring_capacity"] for p in phases if p.get("ring_capacity")), None)
+    measured, asked = host.get("display_hz"), host.get("display_hz_requested")
+    hz = f"{measured or '?'} Hz" + (f" (asked {asked:g} Hz)" if asked and measured != asked else "")
     where = (f"{host.get('chip') or '?'}, macOS {host.get('macos') or '?'} ({host.get('macos_build') or '?'}) / "
-             f"{(sha or '?')[:11]} / {host.get('display_hz') or '?'} Hz")
+             f"{(sha or '?')[:11]} / {hz}")
     note = (f"capacity {capacity if capacity else DESIGN_CAPACITY}: {verdict['capacity']} ({verdict['reason']}); "
             f"`{command}`")
     return " | ".join(["", date, "p05-ipc-116 ring sizing", where,
@@ -380,8 +408,9 @@ def run_phase(name, opts, bench, stress_module):
         time.sleep(opts.warmup)  # bench pacing: the printers reach their rate before the first sample
         binary = os.path.join(app.app, "Contents/Resources/bin/cmux-tui")
         daemon = daemon_reader(binary, app.tag)
+        hang_key = APP_HANGS[opts.hang_ms]
         samples = sample_for(opts.minutes * 60, opts.sample,
-                             lambda: sample(app.rpc, daemon, lambda: app.process.poll() is None))
+                             lambda: sample(app.rpc, daemon, lambda: app.process.poll() is None, hang_key))
         printers = wait_reports(reports, 60)
         with open(os.path.join(out, "samples.json"), "w") as handle:
             json.dump(samples, handle, indent=1)
@@ -389,6 +418,20 @@ def run_phase(name, opts, bench, stress_module):
     finally:
         app.stop()
         stress.close()  # the STRESS pages' local server
+
+
+def with_requested_hz(host, requested):
+    """`host` with the --vdisplay rate asked for beside the measured `display_hz` (read_host: CoreGraphics' main
+    display, never replaced), and `display_problem` when no rate was measured or it is not the one asked for."""
+    if not requested:
+        return host
+    host = {**host, "display_hz_requested": requested}
+    measured = host.get("display_hz")
+    if not measured:
+        host["display_problem"] = f"asked a {requested:g} Hz virtual display; no main display rate was measured"
+    elif round(measured) != round(requested):
+        host["display_problem"] = f"asked a {requested:g} Hz virtual display; the main display runs at {measured} Hz"
+    return host
 
 
 def soak(opts):
@@ -402,8 +445,7 @@ def soak(opts):
             host = bench.read_host()
         except bench.RecordError as error:
             host = {"error": str(error)}
-        if opts.vdisplay:
-            host["display_hz"] = opts.vdisplay
+        host = with_requested_hz(host, opts.vdisplay)
         try:
             sha = bench.build_sha(opts.app)
         except bench.RecordError:
@@ -455,7 +497,8 @@ def parse(argv):
     parser.add_argument("--phases", type=lambda s: [p for p in s.split(",") if p], default=["stress", "cat"])
     parser.add_argument("--sample", type=float, default=5, help="seconds between samples")
     parser.add_argument("--warmup", type=float, default=10, help="seconds the printers run before the first sample")
-    parser.add_argument("--hang-ms", type=float, default=250)
+    parser.add_argument("--hang-ms", type=int, choices=sorted(APP_HANGS), default=250,
+                        help="the main-thread hang edge debug.hangs counts (count100 or count250); also the ping limit")
     parser.add_argument("--vdisplay", type=float, default=0, help="a 1920 x 1200 virtual main display at this Hz first")
     parser.add_argument("--app-env", type=env_pair, action="append", default=[], help="KEY=VALUE for the app")
     opts = parser.parse_args(argv)

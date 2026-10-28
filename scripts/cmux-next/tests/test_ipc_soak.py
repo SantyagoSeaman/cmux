@@ -3,7 +3,7 @@
 the daemon reader's socket lookup, the sampling window, the per-phase numbers and the capacity verdict (keep only
 with every number, raise only with a healthy app, inconclusive otherwise), and the section 9 row.
 Run: python3 -I scripts/cmux-next/tests/test_ipc_soak.py"""
-import importlib.util, json, os, shlex, sys, tempfile, types, unittest
+import importlib.util, json, os, shlex, subprocess, sys, tempfile, types, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("ipc_soak", os.path.join(HERE, "..", "ipc-soak.py"))
@@ -37,7 +37,7 @@ def samples(rows, start=0.0, every=5.0):
         extra = rest[0] if rest else {}
         out.append({"t": start + index * every, "alive": True, "ping_ms": 3.0, "daemon_pid": 7, "daemon_error": None,
                     "ring_resyncs": resyncs, "ring_laps": laps, "ring_capacity": None, "copied_bytes": copied,
-                    **extra})
+                    "main_hangs": 2, **extra})
     return out
 
 
@@ -119,24 +119,80 @@ class CounterTests(unittest.TestCase):
             return {"ok": True, "data": {"ipc": {"ring_resyncs": 2}}}
 
         read = soak.daemon_reader("/b/cmux-tui", "t", status=status, request=request)
-        self.assertEqual(read(), {"error": "closed"})
+        self.assertEqual(read(), {"error": "ConnectionError: closed"})
         self.assertEqual(read(), {"pid": 12, "ipc": {"ring_resyncs": 2}})
         self.assertEqual([c for c in calls if c[0] == "status"], [("status", "/b/cmux-tui", "t")] * 2)
         self.assertIn(("/s2", "server-stats"), calls)
 
+    def test_daemon_reader_sees_a_restart_on_the_same_socket(self):
+        # The restarted daemon binds the same session socket and its counters start at 0 again: only the pid shows it.
+        daemon = {"pid": 11, "resyncs": 0}
+
+        def request(path, body, timeout):
+            if body["cmd"] == "identify":
+                return {"ok": True, "data": {"pid": daemon["pid"]}}
+            return {"ok": True, "data": {"ipc": {"ring_resyncs": daemon["resyncs"], "ring_laps": 0}}}
+        read = soak.daemon_reader("/b/cmux-tui", "t", status=lambda b, t: {"socket": "/s"}, request=request)
+        clock = FakeClock()
+
+        def take():
+            clock.now += 5
+            return soak.sample(lambda method, params=None, timeout=60: {"output_bytes_copied_app": 0, "count250": 0},
+                               read, lambda: True, clock=clock.monotonic)
+        rows = [take() for _ in range(6)]
+        daemon["pid"] = 12
+        rows += [take() for _ in range(7)]
+        self.assertEqual([r["daemon_pid"] for r in rows], [11] * 6 + [12] * 7)
+        phase = soak.phase_summary("stress", rows, [printer(10 * soak.MB)], 250)
+        self.assertEqual(phase["ring_resyncs"], 0)
+        verdict = soak.capacity_verdict([phase])
+        self.assertEqual(verdict["capacity"], "inconclusive")
+        self.assertIn("the daemon restarted (pids [11, 12])", verdict["reason"])
+
+    def test_a_status_timeout_is_an_error_sample_not_the_end_of_the_soak(self):
+        replies = iter([subprocess.TimeoutExpired(["cmux-tui", "server", "status"], 10), {"status": "running"},
+                        {"socket": "/s"}])
+
+        def status(binary, tag):
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        def request(path, body, timeout):
+            if body["cmd"] == "identify":
+                return {"ok": True, "data": {"pid": 5}}
+            return {"ok": True, "data": {"ipc": {"ring_resyncs": 0}}}
+        read = soak.daemon_reader("/b/cmux-tui", "t", status=status, request=request)
+        self.assertIn("TimeoutExpired", read()["error"])
+        self.assertIn("KeyError", read()["error"])  # a running status without a socket
+        self.assertEqual(read(), {"pid": 5, "ipc": {"ring_resyncs": 0}})
+
     def test_sample_reads_both_sides_and_a_failed_ping_is_none(self):
         clock = FakeClock()
 
-        def rpc(method, timeout=60):
+        def rpc(method, params=None, timeout=60):
             clock.now += 0.004
             if method == "system.ping":
                 return {"error": "timeout"}
+            if method == "debug.hangs":
+                return {"count": 9, "count100": 4, "count250": 1}
             return {"connections": [{"output_bytes_copied_app": 10}, {"output_bytes_copied_app": 5}]}
         row = soak.sample(rpc, lambda: {"pid": 3, "ipc": {"ring_resyncs": 1, "ring_laps": 0, "ring_capacity": 1 << 20}},
                           lambda: True, clock=clock.monotonic)
         self.assertIsNone(row["ping_ms"])
-        self.assertEqual((row["ring_resyncs"], row["ring_laps"], row["ring_capacity"], row["copied_bytes"]),
-                         (1, 0, 1 << 20, 15))
+        self.assertEqual((row["ring_resyncs"], row["ring_laps"], row["ring_capacity"], row["copied_bytes"],
+                          row["main_hangs"]), (1, 0, 1 << 20, 15, 1))
+        row = soak.sample(rpc, lambda: {}, lambda: True, hang_key=soak.APP_HANGS[100], clock=clock.monotonic)
+        self.assertEqual(row["main_hangs"], 4)
+
+    def test_app_hang_count_is_the_key_debug_hangs_reports(self):
+        source = os.path.join(HERE, "..", "..", "..", "Packages/macOS/CmuxNext/Sources/CmuxNextControl/Diagnostics/"
+                              "ControlRouter+Diagnostics.swift")
+        with open(source) as handle:
+            text = handle.read()
+        for key in soak.APP_HANGS.values():
+            self.assertIn(f'"{key}": JSONValue(stalls.{key})', text)
 
     def test_app_counter_is_the_key_debug_daemon_wire_reports(self):
         source = os.path.join(HERE, "..", "..", "..", "Packages/macOS/CmuxNext/Sources/CmuxNextControl/Diagnostics/"
@@ -187,6 +243,28 @@ class VerdictTests(unittest.TestCase):
         verdict = soak.capacity_verdict([self.phase("stress", rows, [printer(10 * soak.MB)])])
         self.assertEqual(verdict["capacity"], "inconclusive")
         self.assertIn("1 pings over 250 ms", verdict["reason"])
+
+    def test_a_main_thread_hang_behind_fast_pings_changes_nothing(self):
+        # system.ping answers off the main thread: every ping is fast while debug.hangs count250 grows.
+        rows = samples([(0, 0, 0)] * 6 + [(5, 0, 0, {"main_hangs": 3})] * 7)
+        self.assertTrue(all(r["ping_ms"] < 250 for r in rows))
+        phase = self.phase("stress", rows, [printer(10 * soak.MB)])
+        self.assertEqual((phase["hangs"], phase["slow_pings"]), (1, 0))
+        verdict = soak.capacity_verdict([phase])
+        self.assertEqual(verdict["capacity"], "inconclusive")
+        self.assertIn("main thread hung 1 times over 250 ms (debug.hangs)", verdict["reason"])
+
+    def test_no_main_thread_hang_count_cannot_keep(self):
+        rows = samples([(0, 0, 0, {"main_hangs": None})] * 13)
+        verdict = soak.capacity_verdict([self.phase("cat", rows, [printer(50 * soak.MB)])])
+        self.assertEqual(verdict["capacity"], "inconclusive")
+        self.assertIn("no app main-thread hang count (debug.hangs count250)", verdict["reason"])
+
+    def test_no_daemon_pid_cannot_keep(self):
+        rows = samples([(0, 0, 0, {"daemon_pid": None})] * 13)
+        verdict = soak.capacity_verdict([self.phase("cat", rows, [printer(50 * soak.MB)])])
+        self.assertEqual(verdict["capacity"], "inconclusive")
+        self.assertIn("daemon restart is not ruled out", verdict["reason"])
 
     def test_missing_counters_never_read_as_zero(self):
         rows = samples([(None, None, None)] * 13)
@@ -244,6 +322,27 @@ class RowTests(unittest.TestCase):
         self.assertTrue(cells[4].startswith("10 x 10 MB/s: 0.0 ring resyncs/min"))
         self.assertIn("capacity 1 MiB: keep", cells[5])
         self.assertIn(command, cells[5])
+
+    def test_row_shows_the_measured_hz_and_flags_the_asked_one(self):
+        opts = types.SimpleNamespace(cat_mb=50.0, flood_mb=10.0, flood=10)
+        phases = [soak.phase_summary("cat", minutes_of_zero(), [printer(50 * soak.MB)], 250)]
+        base = {"chip": "Apple M4 Pro", "macos": "26.5", "macos_build": "25F71", "display_hz": 60}
+
+        def hz_cell(host):
+            row = soak.section9_row("2026-10-26", host, "ab" * 20, phases, soak.capacity_verdict(phases), opts, "c")
+            return [c.strip() for c in row.strip("|").split("|")][2].rsplit(" / ", 1)[1]
+        host = soak.with_requested_hz(base, 120.0)
+        self.assertEqual(host["display_hz"], 60)
+        self.assertEqual(host["display_hz_requested"], 120.0)
+        self.assertIn("runs at 60 Hz", host["display_problem"])
+        self.assertEqual(hz_cell(host), "60 Hz (asked 120 Hz)")
+        host = soak.with_requested_hz({**base, "display_hz": 120}, 120.0)
+        self.assertNotIn("display_problem", host)
+        self.assertEqual(hz_cell(host), "120 Hz")
+        host = soak.with_requested_hz({"error": "bench-launch: env-invalid"}, 120.0)  # read_host raised
+        self.assertIn("no main display rate was measured", host["display_problem"])
+        self.assertEqual(hz_cell(host), "? Hz (asked 120 Hz)")
+        self.assertEqual(soak.with_requested_hz(base, 0), base)
 
     def test_options_refuse_unknown_phases(self):
         with open(os.devnull, "w") as quiet:

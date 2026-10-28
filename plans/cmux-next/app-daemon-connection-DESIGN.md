@@ -266,11 +266,14 @@ the size is raised with that number as its reason.
 The measurement is `scripts/cmux-next/ipc-soak.py --minutes 10 --flood 10 --vdisplay 120` (p05-ipc-116): two
 launches, STRESS with 10 shown terminals at 10 MB/s each and a light session with one terminal at 50 MB/s,
 paced by the script's own printer; it reads the daemon's `ring_resyncs` and `ring_laps` (`server-stats
---include ipc`) and the app's `output_bytes_copied_app` (`debug.daemon.wire`) and prints the section 9 row.
-Its verdict is `keep` (0 resyncs, app healthy, every printer at >= 90% of its rate), `raise` (resyncs with a
-healthy app: the per-minute number is the reason) or `inconclusive` (a counter missing, output copied
-instead of read from the ring, a hang over 250 ms, a crash or a daemon restart). Only `raise` changes the
-capacity, and the commit that changes it carries the row.
+--include ipc`), the daemon's pid (`identify`) at every sample, the app's `output_bytes_copied_app`
+(`debug.daemon.wire`) and its main-thread hang count (`debug.hangs` `count250`), and prints the section 9 row
+with the measured display rate. A healthy app is one with no new `count250` hang, no unanswered or slow
+`system.ping`, and no exit; the ping alone cannot show it, because the app answers the ping without the main
+thread. Its verdict is `keep` (0 resyncs, app healthy, every printer at >= 90% of its rate), `raise` (resyncs
+with a healthy app: the per-minute number is the reason) or `inconclusive` (a counter missing, output copied
+instead of read from the ring, a main-thread hang of 250 ms or more, a crash or a new daemon pid). Only
+`raise` changes the capacity, and the commit that changes it carries the row.
 
 ### 4.3 Mapping and lifetime
 
