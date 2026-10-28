@@ -678,7 +678,7 @@ export default agentPaneEntry({
           () => ctx.document.querySelector(".nt-pickers .acpmux-newtab-plus .acpmux-picker-button") !== null,
         );
         await ctx.click({ selector: ".acpmux-newtab-plus .acpmux-picker-button" });
-        await ctx.waitFor(() => ctx.document.querySelector('.acpmux-newtab-plus [data-value="search.chats"]') !== null);
+        await ctx.waitFor(() => ctx.document.querySelector('.acpmux-newtab-plus .acpmux-palette-menu') !== null);
         const input = ctx.document.querySelector<HTMLInputElement>(".nt-pickers .acpmux-attach-input");
         if (!input || !input.multiple) throw new Error("the New Tab attachment chooser is missing or single-file");
       },

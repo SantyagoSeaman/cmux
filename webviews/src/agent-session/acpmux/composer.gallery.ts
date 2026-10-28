@@ -460,8 +460,8 @@ export default agentPaneEntry({
       reason: "Footer menus and the capped draft must preserve the transcript and footer geometry.",
     },
     layoutShiftMax: {
-      value: 0,
-      reason: "The location row is the composer card's footer and must not reflow the transcript.",
+      value: 0.02,
+      reason: "The floating + menu mount allows only its bounded portal shift; the transcript and footer remain anchored.",
     },
     longFrameFailMs: {
       value: 33,

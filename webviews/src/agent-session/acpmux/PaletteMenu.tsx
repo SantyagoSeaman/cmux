@@ -122,7 +122,9 @@ export function PaletteMenu({
     side: "top",
     align,
     gap: UI_ANCHOR_GAP,
-    kind: "list",
+    // Keep the searchable surface (input and section headers) in-page when it overflows;
+    // exporting a list would hide those controls in popupHost.
+    kind: "menu",
     active: ".acpmux-menu-active",
   });
   const filtered = useMemo(() => filterPaletteSections(sections, query), [query, sections]);
@@ -161,6 +163,11 @@ export function PaletteMenu({
   useEffect(() => {
     setActive((current) => Math.min(current, Math.max(rows.length - 1, 0)));
   }, [rows.length]);
+  useEffect(() => {
+    if (!open || !rows.length) return;
+    const row = menu.current?.querySelector<HTMLElement>(`#${menuId}-${selected}`);
+    row?.scrollIntoView?.({ block: "nearest" });
+  }, [open, rows.length, menuId, selected]);
   useEffect(() => registerPicker(label, openMenu), [label, onOpen]);
   const pick = (index: number) => {
     const row = rows[index];

@@ -46,7 +46,11 @@ export default componentEntry<{ variant: string }>({
   pane: true,
   height: 560,
   widths: { narrow: 360, normal: 520, wide: 760 },
-  anchors: [{ selector: ".acpmux-palette-menu" }],
+  anchors: [{ selector: ".acpmux-picker-button" }],
+  checks: {
+    anchorMovePx: { value: 0, reason: "The menu is portaled from a stable + trigger." },
+    layoutShiftMax: { value: 0.02, reason: "Opening the floating menu permits only its popup mount shift." },
+  },
   covers: ["agent-session/acpmux/PaletteMenu.tsx#PaletteMenu"],
   styles: () => import("./styles.css"),
   load: async () => Fixture,
