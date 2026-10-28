@@ -1,0 +1,1879 @@
+{
+ "schema": 1,
+ "task": "p01-process-208",
+ "checker": "scripts/cmux-next/vt-state-access.py --check",
+ "scope": "cmux-tui/crates/cmux-tui-core/src, *.rs, no tests/ directory, no *_tests.rs: every `ghostty_vt::` (the Q15 query) and every parser lock: `.term.lock(`, `.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`, and each call of a parser accessor (a function whose signature hands a closure the Terminal, found in the scanned code, or the item of an `accessor` row): `with_terminal(`, `try_with_terminal(`, `try_with_hot_terminal(`, `with_terminal_stream_update(`, `discard_unreplayable_replay_with(`",
+ "classes": {
+  "page": "reads a value the VT worker publishes in its seqlock screen page; no hop, safe on the key path (tasks 133, 209)",
+  "async": "reads parser state too large or too rare for the page (replays, snapshots, history, Kitty images); with process workers an asynchronous request to the shard owner, never on a key path (task 135)",
+  "in-worker": "runs where the parser runs (construction, byte feed, parser callbacks, frame builds, viewport and resize changes); moves into the worker, and the daemon sends it a command",
+  "dead": "the daemon reads no parser state here: test code, a doc comment, a compile-time constant, a type, or formatting of a value another row read"
+ },
+ "async_paths": {
+  "request": "a socket, CLI, resource or attach request waits for it (p01-process risk 8 counts these rows)",
+  "background": "daemon background work: journal checkpoint, archive, memory pass, persistence, respawn pre-fill, rehost",
+  "accessor": "a generic parser accessor; its callers are rows of their own"
+ },
+ "page_fields": {
+  "screen.size": "cols and rows",
+  "screen.generation": "content generation, stream revision and parsed offset, advanced after each parse slice; waiters sleep on it",
+  "screen.cells": "the visible rows: text, styles and the damage list (what viewport_text and a frame build read)",
+  "screen.cursor": "cursor position, visibility (DECTCEM), shape and blink",
+  "screen.active": "primary or alternate screen",
+  "modes.keyboard": "Kitty keyboard flag stack, DECCKM, DECKPAM and modifyOtherKeys: what KeyEncoder::sync_from_terminal reads",
+  "modes.mouse": "mouse tracking and format and the pointer semantic snapshot: what MouseEncoders::sync_from_terminal reads",
+  "modes.bracketed_paste": "DECSET 2004",
+  "modes.focus_reporting": "DECSET 1004",
+  "metadata.osc_progress": "OSC 9;4 progress state the parser callbacks set; published in the same seqlock generation as screen.cells, so a reader gets text and progress from one parse cut"
+ },
+ "sites": [
+  {
+   "file": "journal_checkpoint.rs",
+   "item": "fn terminal_replay_blob_with_recovery",
+   "symbols": [
+    "try_with_terminal()",
+    "Error::OutOfSpace",
+    "discard_unreplayable_replay_with()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "journal checkpoint: a bounded VT replay of a live terminal (retried smaller on OutOfSpace, and after CAN ends an unreplayable sequence in the parser); a replay request to the shard owner, off key paths"
+  },
+  {
+   "file": "journal_ingress.rs",
+   "item": "mod tests > fn shutdown_is_bounded_when_a_descendant_keeps_the_pty_open",
+   "symbols": [
+    "with_terminal()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "lib.rs",
+   "item": "use",
+   "symbols": [
+    "{CursorShape,Rgb}"
+   ],
+   "class": "dead",
+   "reason": "re-exports the CursorShape and Rgb value types; no parser state"
+  },
+  {
+   "file": "mux.rs",
+   "item": "use",
+   "symbols": [
+    "KittyGraphicsLimits"
+   ],
+   "class": "dead",
+   "reason": "KittyGraphicsLimits is the value the Kitty budget computes; it reaches the parser through Surface::set_kitty_graphics_limits_until (in-worker)"
+  },
+  {
+   "file": "program_status.rs",
+   "item": "use",
+   "symbols": [
+    "{ProgramStatusEvent,ProgramStatusKind,ProgramStatusReport,ProgramStatusState}"
+   ],
+   "class": "in-worker",
+   "reason": "ProgramStatusEvent reaches ProgramStatusRecords::apply from the parser callback built by `sink`; the records, JSON and kinds are daemon data once the event crossed (a validated worker event, task 141)"
+  },
+  {
+   "file": "program_status.rs",
+   "item": "fn sink",
+   "symbols": [
+    "ProgramStatusFn"
+   ],
+   "class": "in-worker",
+   "reason": "the OSC 7501 parser callback; it runs on the parse and becomes a worker event"
+  },
+  {
+   "file": "prompt_mode_reset.rs",
+   "item": "use",
+   "symbols": [
+    "{Screen,Terminal}"
+   ],
+   "class": "in-worker",
+   "reason": "write_output feeds the parser and resets modes at OSC 133 marks: part of the byte feed"
+  },
+  {
+   "file": "server.rs",
+   "item": "use",
+   "symbols": [
+    "KittyReplayState",
+    "{KeyAction,Mods,sys}",
+    "KeyInput"
+   ],
+   "class": "dead",
+   "reason": "key and Kitty replay value types for server submodules (`use super::*`); no parser state"
+  },
+  {
+   "file": "shell_history.rs",
+   "item": "struct TerminalCommandScreen",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "in-worker",
+   "reason": "reads the semantic input cells and OSC 7 cwd at OSC 133 marks, called from observe_shell_marks right after each parse; the finished command crosses as an event"
+  },
+  {
+   "file": "shell_integration.rs",
+   "item": "mod tests > fn a_daemon_integrated_zsh_titles_a_long_command_with_every_argument",
+   "symbols": [
+    "Terminal::new",
+    "Callbacks::default"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "sidebar_resource.rs",
+   "item": "use",
+   "symbols": [
+    "{Dirty,StyledRun,UnderlineStyle}"
+   ],
+   "class": "dead",
+   "reason": "formats a SurfaceRenderFrame that surface/attach.rs attach_render_stream read"
+  },
+  {
+   "file": "sidebar_resource.rs",
+   "item": "fn render_cursor_json",
+   "symbols": [
+    "CursorShape::Bar",
+    "CursorShape::Underline",
+    "CursorShape::Block",
+    "CursorShape::BlockHollow"
+   ],
+   "class": "dead",
+   "reason": "formats the cursor of a SurfaceRenderFrame read elsewhere"
+  },
+  {
+   "file": "surface.rs",
+   "item": "use",
+   "symbols": [
+    "{Callbacks,ClearHistoryOutcome,CursorShape,Dirty,KeyEncoder,KeyInput,KittyGraphicsLimits,KittyReplayState,MouseEncoders,MouseInput,RenderFrame,RenderState,Rgb,Screen,Scrollbar,Terminal,TerminalColorOverrides,TerminalPointerSemanticSnapshot,TrackedScreenPoint}"
+   ],
+   "class": "in-worker",
+   "reason": "Callbacks, Terminal, RenderState and the encoders are the PtySurface parser and its frame state; the value types (CursorShape, Rgb, Scrollbar, KittyReplayState) are dead"
+  },
+  {
+   "file": "surface.rs",
+   "item": "enum GuardedMouseEncode",
+   "symbols": [
+    "Result"
+   ],
+   "class": "dead",
+   "reason": "result type of the mouse encoders"
+  },
+  {
+   "file": "surface.rs",
+   "item": "struct AttachStream",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "carries a replay read by attach_stream_with_lifecycle"
+  },
+  {
+   "file": "surface.rs",
+   "item": "enum AttachFrame",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "carries replays read under the parser lock elsewhere"
+  },
+  {
+   "file": "surface.rs",
+   "item": "const VT_REPLAY_MAX_BYTES",
+   "symbols": [
+    "KITTY_INFLIGHT_REPLAY_MAX_BYTES"
+   ],
+   "class": "dead",
+   "reason": "a compile-time constant from ghostty-vt"
+  },
+  {
+   "file": "terminal_activity.rs",
+   "item": "fn terminal_modes",
+   "symbols": [
+    "Terminal",
+    "Screen::Alternate"
+   ],
+   "class": "in-worker",
+   "reason": "mouse, line and alternate-screen modes read right after each parse (observe_shell_marks, host_parser) to classify terminal activity; the result crosses as an event"
+  },
+  {
+   "file": "terminal_host_runtime.rs",
+   "item": "use",
+   "symbols": [
+    "{KeyInput,KittyGraphicsLimits,KittyImageAlias,KittyImageIdCursors,KittyReplayState,Rgb,TerminalColorOverrides}"
+   ],
+   "class": "dead",
+   "reason": "daemon/host wire payload types (key input, Kitty limits and aliases, color overrides); no parser state"
+  },
+  {
+   "file": "terminal_host_runtime.rs",
+   "item": "mod unix > use",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "dead",
+   "reason": "cfg(test) import"
+  },
+  {
+   "file": "terminal_host_runtime.rs",
+   "item": "mod tests > use",
+   "symbols": [
+    "CursorShape"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "terminal_metadata.rs",
+   "item": "impl TerminalNotification > fn from_program_status",
+   "symbols": [
+    "ProgramStatusState::Error",
+    "ProgramStatusState::Done"
+   ],
+   "class": "dead",
+   "reason": "maps a program status record that already crossed from the parser callback"
+  },
+  {
+   "file": "terminal_title.rs",
+   "item": "fn read",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "in-worker",
+   "reason": "reads the OSC 0/2 title right after the parse that changed it (local_output, hosted_reader, host_parser); the sanitized title crosses as an event"
+  },
+  {
+   "file": "terminal_title.rs",
+   "item": "mod tests > fn terminal",
+   "symbols": [
+    "Terminal",
+    "Terminal::new",
+    "Callbacks::default"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "mux/kitty_budget_state.rs",
+   "item": "const KITTY_IMAGE_PROCESS_BUDGET_COUNT",
+   "symbols": [
+    "MAX_KITTY_IMAGES"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/kitty_budget_state.rs",
+   "item": "const KITTY_PLACEMENT_PROCESS_BUDGET_COUNT",
+   "symbols": [
+    "MAX_KITTY_PLACEMENTS"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/kitty_budget_state.rs",
+   "item": "fn kitty_surface_byte_reservation",
+   "symbols": [
+    "kitty_inflight_replay_limit_for_image_bytes"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/kitty_budget_state.rs",
+   "item": "fn kitty_image_bytes_for_process_share",
+   "symbols": [
+    "MAX_KITTY_IMAGE_BYTES"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/kitty_budget_state.rs",
+   "item": "fn kitty_image_limits_for_capacity_in",
+   "symbols": [
+    "kitty_inflight_replay_limit_for_image_bytes",
+    "MAX_KITTY_IMAGES",
+    "MAX_KITTY_PLACEMENTS"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/kitty_share.rs",
+   "item": "fn kitty_recency_shares",
+   "symbols": [
+    "MAX_KITTY_IMAGE_BYTES"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/kitty_share.rs",
+   "item": "fn kitty_image_limits_for_share",
+   "symbols": [
+    "kitty_inflight_replay_limit_for_image_bytes"
+   ],
+   "class": "dead",
+   "reason": "Kitty budget arithmetic over ghostty-vt compile-time limits; no parser state"
+  },
+  {
+   "file": "mux/terminal_archive.rs",
+   "item": "impl Mux > fn capture_terminal_archive",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "archive of a closing terminal: VT replay or visible text. A resource close waits for it: batch_close.rs runs store_terminal_archives(capture_terminal_archives(..)) before it returns, and finish_resource_close runs archive_unplaced_terminals; the terminal reap path (background) shares it"
+  },
+  {
+   "file": "mux/terminal_archive.rs",
+   "item": "fn archive_screen",
+   "symbols": [
+    "Terminal",
+    "Screen::Primary"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "the replay or viewport text capture_terminal_archive reads for a resource close"
+  },
+  {
+   "file": "mux/terminal_exit_snapshot.rs",
+   "item": "(file)",
+   "symbols": [
+    "comment:Terminal::plain_text"
+   ],
+   "class": "dead",
+   "reason": "doc comment"
+  },
+  {
+   "file": "mux/terminal_exit_snapshot.rs",
+   "item": "fn render_terminal_output_plain",
+   "symbols": [
+    "Terminal::new",
+    "Callbacks::default"
+   ],
+   "class": "in-worker",
+   "reason": "parses stored raw output in a scratch Terminal: untrusted bytes, so the parse is a worker job (Rule of 2)"
+  },
+  {
+   "file": "mux/tests.rs",
+   "item": "fn live_authority_install_and_rotation_preserve_open_pty > fn wait_for_text",
+   "symbols": [
+    "with_terminal()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "mux/terminal_respawn/prefill.rs",
+   "item": "impl Prefill > fn type_on_prompt",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "respawn pre-fill: waits on the stream revision (page screen.generation) and asks whether the cursor is at a marked prompt; off key paths"
+  },
+  {
+   "file": "mux/terminal_respawn/prefill.rs",
+   "item": "impl Prefill > fn input",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "reads the prompt marks and input cells for the pre-fill request"
+  },
+  {
+   "file": "mux/terminal_respawn/prefill.rs",
+   "item": "mod tests > fn screen",
+   "symbols": [
+    "Terminal",
+    "Terminal::new"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "output_store/memory_budget.rs",
+   "item": "impl ScrollbackLimit for SurfaceScrollback > fn shrink",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "memory pass: sets the scrollback cap and reads resident bytes; a request to the shard owner, off key paths"
+  },
+  {
+   "file": "output_store/memory_budget.rs",
+   "item": "impl ScrollbackLimit for SurfaceScrollback > fn restore",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "memory pass: restores the scrollback cap; a request to the shard owner"
+  },
+  {
+   "file": "output_store/segments.rs",
+   "item": "fn rebuild",
+   "symbols": [
+    "Terminal::new",
+    "Callbacks::default"
+   ],
+   "class": "in-worker",
+   "reason": "parses stored raw output in a scratch Terminal to rebuild a replay: untrusted bytes, so a worker job (Rule of 2)"
+  },
+  {
+   "file": "output_store/snapshot.rs",
+   "item": "fn content_digest",
+   "symbols": [
+    "Terminal",
+    "Screen::Primary"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "persistence snapshot digest of viewport text, size, screen and history epoch; off key paths"
+  },
+  {
+   "file": "output_store/snapshot.rs",
+   "item": "fn write_pass_at",
+   "symbols": [
+    "try_with_hot_terminal()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "persistence write pass: content digest, cols, rows and a bounded VT replay of each hot dirty terminal; a replay request to the shard owner, off key paths"
+  },
+  {
+   "file": "resource_router/auxiliary.rs",
+   "item": "mod tests > fn sidebar_resource_lifecycle_uses_the_real_plugin_pty_and_exact_receipts",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "use",
+   "symbols": [
+    "{KeyEncoder,Mods,MouseAction,MouseButton,MouseInput,key_input_from_chord}"
+   ],
+   "class": "page",
+   "field": [
+    "modes.keyboard",
+    "modes.mouse"
+   ],
+   "reason": "KeyEncoder for terminal.input.keys and the mouse types for terminal.input.mouse (Surface::encode_mouse, page modes.mouse); key_input_from_chord and Mods are value conversions"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_state_read",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal.state: a bounded VT replay; a request to the shard owner"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_history_read",
+   "symbols": [
+    "try_with_terminal()",
+    "Error"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal.history: styled scrollback rows; scrollback is requested asynchronously (task 135)"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_wait",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": [
+    "screen.cells",
+    "screen.generation"
+   ],
+   "reason": "terminal.wait: viewport text after each stream revision"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_copy",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal.copy: mode screen reads page screen.cells; mode scrollback reads plain_text of the whole history (async)"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_keys",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": "modes.keyboard",
+   "reason": "terminal.input.keys: the key encoder syncs from the terminal modes; key encoding never hops (task 209)"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_focus",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": "modes.focus_reporting",
+   "reason": "terminal.input.focus: DECSET 1004 decides whether focus is reported"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "mod tests > fn terminal_reads_match_catalog_shapes_and_preserve_argv_boundaries",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "mod tests > fn terminal_viewport_scroll_uses_one_bounded_receipt_and_one_journal_outcome",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "resource_router/session.rs",
+   "item": "use",
+   "symbols": [
+    "CursorShape"
+   ],
+   "class": "dead",
+   "reason": "CursorShape as a session config value"
+  },
+  {
+   "file": "resource_router/content/history_json.rs",
+   "item": "use",
+   "symbols": [
+    "{Cell,Rgb,StyledRun,UnderlineStyle,rows_to_runs}"
+   ],
+   "class": "dead",
+   "reason": "formats history rows read by terminal_history_read"
+  },
+  {
+   "file": "server/clipboard_read.rs",
+   "item": "use",
+   "symbols": [
+    "{ClipboardLocation,MAX_CLIPBOARD_READ_BYTES}"
+   ],
+   "class": "dead",
+   "reason": "the clipboard-read broker gets OSC 52 read requests that crossed from the parser callback; the location and size cap are values"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "use",
+   "symbols": [
+    "KeyEncoder"
+   ],
+   "class": "page",
+   "field": "modes.keyboard",
+   "reason": "send_key syncs a KeyEncoder from the terminal modes"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "use",
+   "symbols": [
+    "KeyInput"
+   ],
+   "class": "dead",
+   "reason": "KeyInput for the clear-history fallback key; the encode runs in clear_history_in_terminal (in-worker)"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "use",
+   "symbols": [
+    "key_input_from_chord"
+   ],
+   "class": "dead",
+   "reason": "chord to KeyInput conversion; no parser state"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "use",
+   "symbols": [
+    "rows_to_runs"
+   ],
+   "class": "dead",
+   "reason": "formats styled rows read by read_scrollback"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn read_screen",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": "screen.cells",
+   "reason": "read-screen: viewport text (task 135 reads it from the page)"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn read_scrollback",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "read-scrollback: styled history rows; scrollback is requested asynchronously"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn wait_for",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": "screen.cells",
+   "reason": "wait-for: viewport text matched against a pattern"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn send_key",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": "modes.keyboard",
+   "reason": "send-key: the KeyEncoder syncs from the terminal modes (scroll_to_bottom before it is surface/scrolling.rs)"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn copy",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "copy: mode screen reads page screen.cells; mode scrollback reads the whole history (async)"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn set_default_colors",
+   "symbols": [
+    "CursorShape::Block",
+    "CursorShape::Underline",
+    "CursorShape::Bar"
+   ],
+   "class": "dead",
+   "reason": "parses a cursor style argument; the colors reach parsers through Surface::set_default_colors (in-worker)"
+  },
+  {
+   "file": "server/connection_frame.rs",
+   "item": "fn vt_state_command_reply",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "vt-state command: a bounded VT replay; a request to the shard owner"
+  },
+  {
+   "file": "server/connection_frame.rs",
+   "item": "fn write_vt_state_command_json",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "formats the replay vt_state_command_reply read"
+  },
+  {
+   "file": "server/protocol_key.rs",
+   "item": "use",
+   "symbols": [
+    "{KeyAction,KeyInput,Mods,sys}"
+   ],
+   "class": "dead",
+   "reason": "wire key types; no parser state"
+  },
+  {
+   "file": "server/render_messages.rs",
+   "item": "use",
+   "symbols": [
+    "{Dirty,KittyReplayState,StyledRun,UnderlineStyle}"
+   ],
+   "class": "dead",
+   "reason": "formats SurfaceRenderFrame rows and replay state read elsewhere"
+  },
+  {
+   "file": "server/render_messages.rs",
+   "item": "struct VtStateMessage",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "carries a replay read by the attach paths"
+  },
+  {
+   "file": "server/render_messages.rs",
+   "item": "fn render_cursor_json",
+   "symbols": [
+    "CursorShape::Bar",
+    "CursorShape::Underline",
+    "CursorShape::Block",
+    "CursorShape::BlockHollow"
+   ],
+   "class": "dead",
+   "reason": "formats the cursor of a SurfaceRenderFrame read elsewhere"
+  },
+  {
+   "file": "server/render_messages.rs",
+   "item": "impl From<&ghostty_vt::KittyPlacement> for RenderGraphicPlacementMessage",
+   "symbols": [
+    "KittyPlacement"
+   ],
+   "class": "dead",
+   "reason": "formats a Kitty placement from a graphics snapshot read elsewhere"
+  },
+  {
+   "file": "server/render_messages.rs",
+   "item": "impl From<&ghostty_vt::KittyPlacement> for RenderGraphicPlacementMessage > fn from",
+   "symbols": [
+    "KittyPlacement"
+   ],
+   "class": "dead",
+   "reason": "formats a Kitty placement from a graphics snapshot read elsewhere"
+  },
+  {
+   "file": "server/render_messages.rs",
+   "item": "fn render_graphics_message",
+   "symbols": [
+    "KittyGraphicsSnapshot",
+    "KittyImageFormat::Rgb",
+    "KittyImageFormat::Rgba"
+   ],
+   "class": "dead",
+   "reason": "formats a Kitty graphics snapshot read by the render attach paths"
+  },
+  {
+   "file": "server/render_service.rs",
+   "item": "use",
+   "symbols": [
+    "KittyReplayState"
+   ],
+   "class": "dead",
+   "reason": "Kitty replay state value carried by replay messages"
+  },
+  {
+   "file": "server/render_service.rs",
+   "item": "fn write_kitty_image_aliases_json",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "formats replay aliases read elsewhere"
+  },
+  {
+   "file": "server/resource_waits.rs",
+   "item": "fn run_terminal_resource_wait",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "page",
+   "field": [
+    "screen.cells",
+    "screen.generation"
+   ],
+   "reason": "resource wait: viewport text after each stream revision"
+  },
+  {
+   "file": "server/terminal_colors.rs",
+   "item": "fn terminal_colors_json",
+   "symbols": [
+    "CursorShape::Bar",
+    "CursorShape::Underline",
+    "CursorShape::Block",
+    "CursorShape::BlockHollow"
+   ],
+   "class": "dead",
+   "reason": "formats TerminalColors read elsewhere"
+  },
+  {
+   "file": "server/terminal_history.rs",
+   "item": "fn marker_error",
+   "symbols": [
+    "MarkerError",
+    "MarkerError::RangeEvicted",
+    "MarkerError::Invalid",
+    "MarkerError::Vt"
+   ],
+   "class": "dead",
+   "reason": "maps a history error"
+  },
+  {
+   "file": "server/terminal_history.rs",
+   "item": "fn history",
+   "symbols": [
+    "snapshot_version"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal.history: GHOSTSNP history pages through Surface::history_pages"
+  },
+  {
+   "file": "server/terminal_ports.rs",
+   "item": "fn terminal_ports",
+   "symbols": [
+    "try_with_terminal()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal ports: plain_text of the whole history scanned for listeners; off key paths"
+  },
+  {
+   "file": "server/terminal_snapshot.rs",
+   "item": "fn host_snapshot_version",
+   "symbols": [
+    "snapshot_version"
+   ],
+   "class": "dead",
+   "reason": "the GHOSTSNP codec version constant"
+  },
+  {
+   "file": "server/tests.rs",
+   "item": "use",
+   "symbols": [
+    "{Callbacks,RenderState,Terminal}"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "server/tests.rs",
+   "item": "fn active_clear_lanes_across_connections",
+   "symbols": [
+    "with_terminal()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "surface/attach.rs",
+   "item": "impl Surface > fn attach_stream",
+   "symbols": [
+    "Result"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "byte attach: delegates to attach_stream_with_lifecycle"
+  },
+  {
+   "file": "surface/attach.rs",
+   "item": "impl Surface > fn attach_stream_with_lifecycle",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "Error::NoValue"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "byte attach: a theme-portable VT replay and colors, with the tap registered at the same parse cut; a request to the shard owner that answers at a parsed offset"
+  },
+  {
+   "file": "surface/attach.rs",
+   "item": "impl Surface > fn attach_render_stream",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "Error::NoValue",
+    "Error::OutOfSpace"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "render attach: the initial frame and Kitty graphics snapshot with the render tap registered at the same cut; the shard owner answers, frames then stream from it"
+  },
+  {
+   "file": "surface/attach_tap.rs",
+   "item": "impl AttachFrame > fn retained_bytes",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "sizes queued frames"
+  },
+  {
+   "file": "surface/attach_tap.rs",
+   "item": "struct AttachResize",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "carries a resize replay read elsewhere"
+  },
+  {
+   "file": "surface/clear_history.rs",
+   "item": "impl Surface > fn clear_history_in_terminal",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "Command-K: clears history in the parser or encodes the fallback key; the transition runs where the parser runs"
+  },
+  {
+   "file": "surface/clipboard_read.rs",
+   "item": "use",
+   "symbols": [
+    "ClipboardReadRequest"
+   ],
+   "class": "dead",
+   "reason": "cfg(test) import"
+  },
+  {
+   "file": "surface/construct.rs",
+   "item": "impl Surface > fn apply_hosted_clear_history_replay",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "writes a host clear-history replay into the mirror parser"
+  },
+  {
+   "file": "surface/frame_producer.rs",
+   "item": "fn produce",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "the frame producer builds frames from the parser; the worker builds them and publishes screen.cells"
+  },
+  {
+   "file": "surface/holder_spawn.rs",
+   "item": "fn holder_prologue",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "the holder prologue replay at the parsed offset; the shard owner makes it (task 210)"
+  },
+  {
+   "file": "surface/host_frames.rs",
+   "item": "mod tests > fn negotiated_clipboard_read_requests_reach_the_inbox_outside_the_stream",
+   "symbols": [
+    "ClipboardReadRequest",
+    "ClipboardLocation::Selection"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "surface/host_frames.rs",
+   "item": "mod tests > fn clipboard_signals_reach_the_handler_and_a_cancel_drops_its_read",
+   "symbols": [
+    "ClipboardReadRequest",
+    "ClipboardLocation::Standard"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "surface/host_kitty_limits.rs",
+   "item": "impl PtySurface > fn apply_host_kitty_graphics_limits",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "applies Kitty limits a host committed to the mirror parser"
+  },
+  {
+   "file": "surface/hosted_stager.rs",
+   "item": "enum HostedTransition",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "carries host frames"
+  },
+  {
+   "file": "surface/hosted_stager.rs",
+   "item": "enum PendingHostedTransition",
+   "symbols": [
+    "KittyImageAlias"
+   ],
+   "class": "dead",
+   "reason": "carries host frames"
+  },
+  {
+   "file": "surface/input.rs",
+   "item": "impl Surface > fn write_paste_with_timeout",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "page",
+   "field": "modes.bracketed_paste",
+   "reason": "paste: DECSET 2004 decides the bracketed-paste wrap"
+  },
+  {
+   "file": "surface/kitty_pixels.rs",
+   "item": "impl Surface > fn write_rendered_output_for_test",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/kitty_pixels.rs",
+   "item": "impl Surface > fn release_kitty_pixel_caches",
+   "symbols": [
+    "try_with_hot_terminal()"
+   ],
+   "class": "in-worker",
+   "reason": "critical memory pressure: clears the parser's Kitty replay pixel cache; the daemon sends the worker a command"
+  },
+  {
+   "file": "surface/kitty_replay_cache.rs",
+   "item": "use",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "encodes the Kitty image replay for a READY snapshot inside take_viewer_snapshot"
+  },
+  {
+   "file": "surface/local_output.rs",
+   "item": "impl LocalOutput > fn read",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "the local PTY reader feeds output to the parser"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse",
+   "symbols": [
+    "Result"
+   ],
+   "class": "page",
+   "field": "modes.mouse",
+   "reason": "mouse input: MouseEncoders synced from the terminal mouse modes after each parse"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse_if_semantics",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "page",
+   "field": "modes.mouse",
+   "reason": "mouse input guarded by the pointer semantic snapshot the frontend saw"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse_if_snapshot",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.mouse",
+    "screen.generation"
+   ],
+   "reason": "mouse input guarded by the pointer semantics and content generation the frontend saw"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse_release",
+   "symbols": [
+    "Result"
+   ],
+   "class": "page",
+   "field": "modes.mouse",
+   "reason": "mouse input: MouseEncoders synced from the terminal mouse modes after each parse"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse_press_pair",
+   "symbols": [
+    "Result"
+   ],
+   "class": "page",
+   "field": "modes.mouse",
+   "reason": "mouse input: MouseEncoders synced from the terminal mouse modes after each parse"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse_press_pair_if_semantics",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "page",
+   "field": "modes.mouse",
+   "reason": "mouse input guarded by the pointer semantic snapshot the frontend saw"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl Surface > fn encode_mouse_press_pair_if_snapshot",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.mouse",
+    "screen.generation"
+   ],
+   "reason": "mouse input guarded by the pointer semantics and content generation the frontend saw"
+  },
+  {
+   "file": "surface/pty_surface.rs",
+   "item": "impl PtySurface > fn with_terminal_stream_update",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "applies a replacement to the parser and publishes the stream revision"
+  },
+  {
+   "file": "surface/pty_surface.rs",
+   "item": "impl PtySurface > fn publish_final_frame",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "builds the last frame at exit"
+  },
+  {
+   "file": "surface/pty_surface.rs",
+   "item": "impl PtySurface > fn finish_hosted_exit",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "drops exited modes and builds the final frame"
+  },
+  {
+   "file": "surface/pty_surface.rs",
+   "item": "impl PtySurface > fn build_producer_frame",
+   "symbols": [
+    "Result"
+   ],
+   "class": "in-worker",
+   "reason": "frame build from RenderState"
+  },
+  {
+   "file": "surface/pty_surface.rs",
+   "item": "impl PtySurface > fn build_frame_locked",
+   "symbols": [
+    "Result"
+   ],
+   "class": "in-worker",
+   "reason": "frame build from RenderState under the parser lock"
+  },
+  {
+   "file": "surface/pty_surface.rs",
+   "item": "impl PtySurface > fn commit_geometry_for_runtime",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "resize and reflow with no read-to-parser gap"
+  },
+  {
+   "file": "surface/rehost.rs",
+   "item": "fn replacement_seed",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "rehost seed: a bounded VT replay; a request to the shard owner"
+  },
+  {
+   "file": "surface/render_tap.rs",
+   "item": "impl RenderHub > fn build_attach_initial",
+   "symbols": [
+    "Result",
+    "Error::NoValue"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "a render attach initial frame with a Kitty graphics snapshot (attach_render_stream)"
+  },
+  {
+   "file": "surface/render_tap.rs",
+   "item": "impl RenderHub > fn final_attach_initial",
+   "symbols": [
+    "Result"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "the cached initial frame of an exited terminal (attach_render_stream)"
+  },
+  {
+   "file": "surface/render_tap.rs",
+   "item": "struct InitialGraphicsSnapshot",
+   "symbols": [
+    "KittyGraphicsSnapshot"
+   ],
+   "class": "dead",
+   "reason": "caches a graphics snapshot read by build_attach_initial"
+  },
+  {
+   "file": "surface/render_view.rs",
+   "item": "impl Surface > fn set_default_colors",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "writes theme defaults into the parser and rebuilds a frame; the colors come back in the page"
+  },
+  {
+   "file": "surface/render_view.rs",
+   "item": "impl Surface > fn snapshot",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "only cmux-tui-core/tests/pty.rs calls it"
+  },
+  {
+   "file": "surface/render_view.rs",
+   "item": "impl Surface > fn render_frame",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "Error::NoValue"
+   ],
+   "class": "dead",
+   "reason": "only mux/tests/kitty_budget_share.rs calls it"
+  },
+  {
+   "file": "surface/render_view.rs",
+   "item": "impl Surface > fn render_view_frame",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "Error::NoValue"
+   ],
+   "class": "in-worker",
+   "reason": "the in-process TUI frame of one placement viewport: moves the parser viewport to the placement offset, builds, restores; the worker builds per-viewport frames"
+  },
+  {
+   "file": "surface/render_view.rs",
+   "item": "impl Surface > fn try_pointer_semantics",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "page",
+   "field": "modes.mouse",
+   "reason": "pointer routing without waiting behind the parse"
+  },
+  {
+   "file": "surface/render_view.rs",
+   "item": "impl Surface > fn try_pointer_snapshot",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.mouse",
+    "screen.generation"
+   ],
+   "reason": "pointer routing and content generation without waiting behind the parse"
+  },
+  {
+   "file": "surface/scrolling.rs",
+   "item": "impl Surface > fn view_scroll_delta",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "per-placement viewport: resolves and moves tracked screen points (pins in the parser page list)"
+  },
+  {
+   "file": "surface/scrolling.rs",
+   "item": "impl Surface > fn view_scroll_delta_if_scrollbar",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "per-placement viewport: resolves and moves tracked screen points (pins in the parser page list)"
+  },
+  {
+   "file": "surface/scrolling.rs",
+   "item": "impl Surface > fn view_scrollbar",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "per-placement viewport: resolves and moves tracked screen points (pins in the parser page list)"
+  },
+  {
+   "file": "surface/scrolling.rs",
+   "item": "impl Surface > fn view_scroll_to_bottom",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "per-placement viewport: resolves and moves tracked screen points (pins in the parser page list)"
+  },
+  {
+   "file": "surface/scrolling.rs",
+   "item": "impl Surface > fn apply_scroll_delta",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "scrolls the parser viewport and rebuilds a frame; the daemon sends the delta"
+  },
+  {
+   "file": "surface/scrolling.rs",
+   "item": "impl Surface > fn scroll_to_bottom",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "scrolls the parser viewport to the bottom (before send-key); the daemon sends the command"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "use",
+   "symbols": [
+    "SnapshotPhase"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "SnapshotPhase selects the GHOSTSNP encode of take_viewer_snapshot and snapshot_digest"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "struct SnapshotImages",
+   "symbols": [
+    "KittyReplayStats"
+   ],
+   "class": "dead",
+   "reason": "carries Kitty replay stats"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "(file)",
+   "symbols": [
+    "comment:snapshot_digest_input"
+   ],
+   "class": "dead",
+   "reason": "doc comment"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn attach_snapshot_stream",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "Error::NoValue"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "snapshot attach: registers the viewer tap at a parse cut"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn take_viewer_snapshot",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "snapshot_ready_len",
+    "snapshot_version"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "GHOSTSNP READY plus history, colors and Kitty images at one cut; a request to the shard owner"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn snapshot_digest",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()",
+    "snapshot_version",
+    "snapshot_digest_input"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "idle digest of the READY encode"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn encode_terminal_snapshot",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue",
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn encode_kitty_replay_for_test",
+   "symbols": [
+    "Result",
+    "KittyReplayStats",
+    "Error::InvalidValue",
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn terminal_history_digest",
+   "symbols": [
+    "HistoryDigest",
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn history_pages",
+   "symbols": [
+    "HistoryPages",
+    "MarkerError",
+    "MarkerError::Invalid",
+    "term.lock()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal.history pages; scrollback is requested asynchronously"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn read_marker_range",
+   "symbols": [
+    "MarkerError",
+    "MarkerError::Invalid",
+    "term.lock()"
+   ],
+   "class": "async",
+   "path": "request",
+   "reason": "terminal.read_range text or VT of a marker range"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl Surface > fn inject_output_for_test",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/snapshot_attach.rs",
+   "item": "impl PtySurface > fn encode_local_ready_locked",
+   "symbols": [
+    "snapshot_version"
+   ],
+   "class": "in-worker",
+   "reason": "the local-history READY at the resize cut, under the same lock hold as the resize"
+  },
+  {
+   "file": "surface/spawn.rs",
+   "item": "use",
+   "symbols": [
+    "{Callbacks,RenderState,Terminal}"
+   ],
+   "class": "in-worker",
+   "reason": "constructs the Terminal, its callbacks and RenderState"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn with_terminal",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "async",
+   "path": "accessor",
+   "reason": "the generic parser accessor; each caller is its own row, and with workers it is the request entry to the shard owner"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn set_kitty_graphics_limits_until",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "applies Kitty limits to the parser and resynchronizes taps"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn terminal_stream_revision",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue"
+   ],
+   "class": "page",
+   "field": "screen.generation",
+   "reason": "the coalesced stream revision"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn terminal_screen_snapshot",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "page",
+   "field": [
+    "screen.cells",
+    "screen.cursor",
+    "screen.size",
+    "screen.generation",
+    "metadata.osc_progress"
+   ],
+   "reason": "terminal.read_screen (resource_router/content.rs): viewport text, cursor, cols and rows, revision and OSC progress at one cut; one seqlock read of the page"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn subscribe_terminal_stream_change",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue"
+   ],
+   "class": "page",
+   "field": "screen.generation",
+   "reason": "subscribes to stream revision changes"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn wait_for_terminal_stream_change",
+   "symbols": [
+    "Result",
+    "Error::InvalidValue"
+   ],
+   "class": "page",
+   "field": "screen.generation",
+   "reason": "waits for the stream revision to move"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn apply_stream_output_for_test",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn apply_local_pty_output_for_test",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "dead",
+   "reason": "cfg(test)"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn try_with_terminal",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "async",
+   "path": "accessor",
+   "reason": "the generic parser accessor; each caller is its own row, and with workers it is the request entry to the shard owner"
+  },
+  {
+   "file": "surface/terminal_stream.rs",
+   "item": "impl Surface > fn discard_unreplayable_replay_with",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "injects CAN into the parser to end an unreplayable sequence"
+  },
+  {
+   "file": "surface/tests.rs",
+   "item": "impl Write for TerminalProbeDuringWrite > fn write",
+   "symbols": [
+    "term.try_lock()"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  },
+  {
+   "file": "surface/hosted_reader/output.rs",
+   "item": "impl HostedReader > fn apply_output",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "the daemon mirror parses host output (the second of three parses per byte)"
+  },
+  {
+   "file": "surface/hosted_reader/reconnect.rs",
+   "item": "impl HostedReader > fn reconnect",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "replaces the mirror parser from a host snapshot"
+  },
+  {
+   "file": "surface/hosted_reader/resize.rs",
+   "item": "impl HostedReader > fn apply_resized_with_colors",
+   "symbols": [
+    "KittyImageAlias",
+    "with_terminal_stream_update()"
+   ],
+   "class": "in-worker",
+   "reason": "rebuilds the mirror parser from a host resize replay and swaps it in under the parser lock"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "use",
+   "symbols": [
+    "{ColdPagesError,ColdRefused,ColdTerminal,Screen,Terminal}"
+   ],
+   "class": "in-worker",
+   "reason": "freezes and thaws the parser state (cold scrollback, p07-memory-040)"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "impl Surface > fn freeze_cold_terminal",
+   "symbols": [
+    "term.slot.try_lock()"
+   ],
+   "class": "in-worker",
+   "reason": "compresses the parser state into cold pages (p07-memory-040); the worker owns the parser, so the freeze is a worker command"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "impl Surface > fn try_with_hot_terminal",
+   "symbols": [
+    "term.slot.lock()"
+   ],
+   "class": "async",
+   "path": "accessor",
+   "reason": "the parser accessor that skips a cold terminal; each caller is its own row, and with workers it is the request entry to the shard owner"
+  },
+  {
+   "file": "surface/terminal_runtime/cold_terminal.rs",
+   "item": "impl Surface > fn scrollback_memory",
+   "symbols": [
+    "term.slot.lock()"
+   ],
+   "class": "async",
+   "path": "background",
+   "reason": "memory pass (output_store/memory_budget.rs): resident bytes of a hot parser or held bytes of a cold one; a request to the shard owner, off key paths"
+  },
+  {
+   "file": "terminal_host_runtime/colors_wire.rs",
+   "item": "fn encode_terminal_color_overrides",
+   "symbols": [
+    "CursorShape::Block",
+    "CursorShape::BlockHollow",
+    "CursorShape::Underline",
+    "CursorShape::Bar"
+   ],
+   "class": "dead",
+   "reason": "wire codec of a cursor shape value"
+  },
+  {
+   "file": "terminal_host_runtime/colors_wire.rs",
+   "item": "fn decode_terminal_color_overrides",
+   "symbols": [
+    "CursorShape::Block",
+    "CursorShape::Underline",
+    "CursorShape::Bar"
+   ],
+   "class": "dead",
+   "reason": "wire codec of a cursor shape value"
+  },
+  {
+   "file": "terminal_host_runtime/shared/clipboard_read.rs",
+   "item": "use",
+   "symbols": [
+    "Terminal",
+    "{ClipboardLocation,ClipboardReadFn,ClipboardReadRequest,MAX_CLIPBOARD_READ_BYTES}"
+   ],
+   "class": "in-worker",
+   "reason": "the host parser OSC 52 read callback; runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/codec.rs",
+   "item": "use",
+   "symbols": [
+    "CursorShape"
+   ],
+   "class": "dead",
+   "reason": "wire codec of a cursor shape value"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_parser.rs",
+   "item": "use",
+   "symbols": [
+    "Callbacks"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_parser.rs",
+   "item": "fn run_host_parser",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "the host parser loop; runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_serve.rs",
+   "item": "impl ClientFrames > fn handle",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "host paste reads its own parser DECSET 2004; runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop; the daemon reads page modes.bracketed_paste (surface/input.rs)"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_shared.rs",
+   "item": "use",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_shared.rs",
+   "item": "impl HostShared > fn terminal_at_snapshot_boundary",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_shared.rs",
+   "item": "impl HostShared > fn apply_parser_defaults",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_shared.rs",
+   "item": "impl HostShared > fn apply_parser_clear_history",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_start.rs",
+   "item": "use",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_start.rs",
+   "item": "fn new_host_terminal",
+   "symbols": [
+    "Callbacks"
+   ],
+   "class": "in-worker",
+   "reason": "constructs the host parser; runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_state.rs",
+   "item": "use",
+   "symbols": [
+    "Terminal"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/metric_commits.rs",
+   "item": "impl HostShared > fn set_cell_pixel_size",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/metric_commits.rs",
+   "item": "impl HostShared > fn set_kitty_graphics_limits",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/program_status_codec.rs",
+   "item": "use",
+   "symbols": [
+    "{ProgramStatusKind,ProgramStatusState}"
+   ],
+   "class": "dead",
+   "reason": "wire codec of program status values"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_shared/lifecycle.rs",
+   "item": "impl HostShared > fn persist_and_publish_exit_if_drained",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/shared/host_shared/resize.rs",
+   "item": "impl HostShared > fn apply_parser_resize_after_pty",
+   "symbols": [
+    "term.lock()"
+   ],
+   "class": "in-worker",
+   "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
+  },
+  {
+   "file": "terminal_host_runtime/unix/tests.rs",
+   "item": "use",
+   "symbols": [
+    "Callbacks",
+    "CursorShape"
+   ],
+   "class": "dead",
+   "reason": "test code"
+  }
+ ]
+}
