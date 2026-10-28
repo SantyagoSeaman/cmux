@@ -78,6 +78,12 @@ struct TerminalSnapshotSequencer: Sendable {
     private(set) var generation: UInt64?
     private var cut: (generation: UInt64, offset: UInt64)?
 
+    /// The stream resumed a screen of `generation` with no READY (p05-ipc-114): output of an older grid is
+    /// dropped as after that screen's READY.
+    mutating func resumed(generation: UInt64) {
+        self.generation = generation
+    }
+
     mutating func admit(_ line: DecodedAttachLine) -> TerminalChannelEvent? {
         switch line.event {
         case .snapshot(let frame) where frame.phase == .ready:

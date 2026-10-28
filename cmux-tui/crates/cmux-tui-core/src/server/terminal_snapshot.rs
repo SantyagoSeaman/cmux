@@ -118,6 +118,10 @@ pub(crate) struct SnapshotAttachParams {
     /// Every READY with history is followed by its Kitty images
     /// (`terminal-snapshot-images-v1`). Only meaningful with `snapshot`.
     snapshot_images: bool,
+    /// Where a reattaching ring viewer's screen is (`terminal-output-ring-v1`,
+    /// p05-ipc-114): both or neither, checked by `cmd_attach::ring_resume`.
+    pub(super) resume_offset: Option<u64>,
+    pub(super) resume_generation: Option<u64>,
 }
 
 pub(crate) const MIN_VIEWER_BACKLOG_BYTES: usize = 64 * 1024;
@@ -134,6 +138,8 @@ impl SnapshotAttachParams {
             viewer_backlog_bytes: params.viewer_backlog_bytes.map(wire_usize),
             snapshot_local_history: params.snapshot_local_history,
             snapshot_images: params.snapshot_images,
+            resume_offset: params.resume_offset,
+            resume_generation: params.resume_generation,
         }
     }
 

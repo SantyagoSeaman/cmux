@@ -78,6 +78,8 @@ impl AttachBuilder {
             rows,
             expected_generation: Optional::Missing,
             expected_terminal_id: Optional::Missing,
+            resume_generation: Optional::Missing,
+            resume_offset: Optional::Missing,
             snapshot: Optional::Missing,
             snapshot_images: None,
             snapshot_local_history: None,

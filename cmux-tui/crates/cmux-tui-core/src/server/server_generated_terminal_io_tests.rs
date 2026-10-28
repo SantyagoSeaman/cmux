@@ -8,7 +8,8 @@
 //! Commands and fields the schema added after the freeze are added to the
 //! frozen family by hand, as the hand-written variant would have declared
 //! them: attach-streams-v1 (p05-ipc-074) `stream` on attach-surface and
-//! snapshot-request, and cancel-stream.
+//! snapshot-request, cancel-stream, and terminal-output-ring-v1 (p05-ipc-114)
+//! `resume_offset` and `resume_generation` on attach-surface.
 //!
 //! Fixture errors must match too, with two wording differences: a line that misses
 //! several required fields may name another of them (the generated fields are
@@ -75,6 +76,10 @@ struct OldSnapshotAttachParams {
     snapshot_local_history: bool,
     #[serde(default)]
     snapshot_images: bool,
+    #[serde(default)]
+    resume_offset: Option<u64>,
+    #[serde(default)]
+    resume_generation: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]

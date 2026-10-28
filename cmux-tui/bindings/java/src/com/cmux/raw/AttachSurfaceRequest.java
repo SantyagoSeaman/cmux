@@ -16,6 +16,8 @@ public final class AttachSurfaceRequest implements WireValue {
     private final Field<String> expectedGeneration;
     private final Field<String> expectedTerminalId;
     private final Field<AttachSurfaceRequestMode> mode;
+    private final Field<UInt64> resumeGeneration;
+    private final Field<UInt64> resumeOffset;
     private final Field<Integer> rows;
     private final Field<String> snapshot;
     private final Field<Boolean> snapshotImages;
@@ -30,6 +32,8 @@ public final class AttachSurfaceRequest implements WireValue {
         this.expectedGeneration = builder.expectedGeneration;
         this.expectedTerminalId = builder.expectedTerminalId;
         this.mode = builder.mode;
+        this.resumeGeneration = builder.resumeGeneration;
+        this.resumeOffset = builder.resumeOffset;
         this.rows = builder.rows;
         this.snapshot = builder.snapshot;
         this.snapshotImages = builder.snapshotImages;
@@ -46,6 +50,8 @@ public final class AttachSurfaceRequest implements WireValue {
     public Field<String> expectedGeneration() { return expectedGeneration; }
     public Field<String> expectedTerminalId() { return expectedTerminalId; }
     public Field<AttachSurfaceRequestMode> mode() { return mode; }
+    public Field<UInt64> resumeGeneration() { return resumeGeneration; }
+    public Field<UInt64> resumeOffset() { return resumeOffset; }
     public Field<Integer> rows() { return rows; }
     public Field<String> snapshot() { return snapshot; }
     public Field<Boolean> snapshotImages() { return snapshotImages; }
@@ -73,6 +79,14 @@ public final class AttachSurfaceRequest implements WireValue {
         Object rawMode = Wire.optional(object, "mode");
         if (!Wire.isMissing(rawMode)) {
             builder.mode(rawMode == null ? null : AttachSurfaceRequestMode.fromWire(rawMode));
+        }
+        Object rawResumeGeneration = Wire.optional(object, "resume_generation");
+        if (!Wire.isMissing(rawResumeGeneration)) {
+            builder.resumeGeneration(rawResumeGeneration == null ? null : Wire.uint64(rawResumeGeneration, "AttachSurfaceRequest.resume_generation"));
+        }
+        Object rawResumeOffset = Wire.optional(object, "resume_offset");
+        if (!Wire.isMissing(rawResumeOffset)) {
+            builder.resumeOffset(rawResumeOffset == null ? null : Wire.uint64(rawResumeOffset, "AttachSurfaceRequest.resume_offset"));
         }
         Object rawRows = Wire.optional(object, "rows");
         if (!Wire.isMissing(rawRows)) {
@@ -116,6 +130,8 @@ public final class AttachSurfaceRequest implements WireValue {
         Wire.put(object, "expected_generation", expectedGeneration);
         Wire.put(object, "expected_terminal_id", expectedTerminalId);
         Wire.put(object, "mode", mode);
+        Wire.put(object, "resume_generation", resumeGeneration);
+        Wire.put(object, "resume_offset", resumeOffset);
         Wire.put(object, "rows", rows);
         Wire.put(object, "snapshot", snapshot);
         Wire.put(object, "snapshot_images", snapshotImages);
@@ -130,11 +146,11 @@ public final class AttachSurfaceRequest implements WireValue {
     @Override
     public boolean equals(Object other) {
         if (!(other instanceof AttachSurfaceRequest that)) return false;
-        return Objects.equals(cols, that.cols) && Objects.equals(expectedGeneration, that.expectedGeneration) && Objects.equals(expectedTerminalId, that.expectedTerminalId) && Objects.equals(mode, that.mode) && Objects.equals(rows, that.rows) && Objects.equals(snapshot, that.snapshot) && Objects.equals(snapshotImages, that.snapshotImages) && Objects.equals(snapshotLocalHistory, that.snapshotLocalHistory) && Objects.equals(snapshotVersion, that.snapshotVersion) && Objects.equals(stream, that.stream) && Objects.equals(surface, that.surface) && Objects.equals(viewerBacklogBytes, that.viewerBacklogBytes);
+        return Objects.equals(cols, that.cols) && Objects.equals(expectedGeneration, that.expectedGeneration) && Objects.equals(expectedTerminalId, that.expectedTerminalId) && Objects.equals(mode, that.mode) && Objects.equals(resumeGeneration, that.resumeGeneration) && Objects.equals(resumeOffset, that.resumeOffset) && Objects.equals(rows, that.rows) && Objects.equals(snapshot, that.snapshot) && Objects.equals(snapshotImages, that.snapshotImages) && Objects.equals(snapshotLocalHistory, that.snapshotLocalHistory) && Objects.equals(snapshotVersion, that.snapshotVersion) && Objects.equals(stream, that.stream) && Objects.equals(surface, that.surface) && Objects.equals(viewerBacklogBytes, that.viewerBacklogBytes);
     }
 
     @Override
-    public int hashCode() { return Objects.hash(cols, expectedGeneration, expectedTerminalId, mode, rows, snapshot, snapshotImages, snapshotLocalHistory, snapshotVersion, stream, surface, viewerBacklogBytes); }
+    public int hashCode() { return Objects.hash(cols, expectedGeneration, expectedTerminalId, mode, resumeGeneration, resumeOffset, rows, snapshot, snapshotImages, snapshotLocalHistory, snapshotVersion, stream, surface, viewerBacklogBytes); }
 
     @Override
     public String toString() { return "AttachSurfaceRequest" + toWire(); }
@@ -144,6 +160,8 @@ public final class AttachSurfaceRequest implements WireValue {
         private Field<String> expectedGeneration = Field.omitted();
         private Field<String> expectedTerminalId = Field.omitted();
         private Field<AttachSurfaceRequestMode> mode = Field.omitted();
+        private Field<UInt64> resumeGeneration = Field.omitted();
+        private Field<UInt64> resumeOffset = Field.omitted();
         private Field<Integer> rows = Field.omitted();
         private Field<String> snapshot = Field.omitted();
         private Field<Boolean> snapshotImages = Field.omitted();
@@ -167,6 +185,14 @@ public final class AttachSurfaceRequest implements WireValue {
         }
         public Builder mode(AttachSurfaceRequestMode value) {
             this.mode = Field.ofNullable(value);
+            return this;
+        }
+        public Builder resumeGeneration(UInt64 value) {
+            this.resumeGeneration = Field.ofNullable(value);
+            return this;
+        }
+        public Builder resumeOffset(UInt64 value) {
+            this.resumeOffset = Field.ofNullable(value);
             return this;
         }
         public Builder rows(Integer value) {

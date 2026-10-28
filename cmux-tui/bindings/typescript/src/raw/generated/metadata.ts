@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR df10717146553dfa363854f65845a400d363319d750b9f1e04386389220171be. */
+/* cmux-tui mux protocol 12, IR 7d7ab569826435716c7b3e8f1573c6d14d3dde79e36de2eb72406de1a58fcfa8. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "df10717146553dfa363854f65845a400d363319d750b9f1e04386389220171be" as const;
+export const SDK_IR_SHA256 = "7d7ab569826435716c7b3e8f1573c6d14d3dde79e36de2eb72406de1a58fcfa8" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -727,6 +727,14 @@ export const COMMAND_METADATA = {
       "mode": {
         "since": 7,
         "capability": null
+      },
+      "resume_generation": {
+        "since": null,
+        "capability": "terminal-output-ring-v1"
+      },
+      "resume_offset": {
+        "since": null,
+        "capability": "terminal-output-ring-v1"
       },
       "rows": {
         "since": null,
@@ -20870,7 +20878,8 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
         "Browser surfaces reject mode:render.",
         "expected_generation and expected_terminal_id must be supplied together and match the current daemon and terminal.",
         "snapshot \"ghostsnp\" with the host's snapshot_version starts the byte stream with a snapshot event instead of vt-state; another version gets the byte replay. viewer_backlog_bytes (default 8388608 = 8 MiB, set per attach, no daemon setting; clamped to 65536..8388608) bounds the viewer's backlog; overflow resyncs by snapshot.",
-        "With stream, every item of the view carries stream, stream-end is its last item, and the id is free once the client reads that stream-end. A failure after the id was taken queues stream-end{reason:\"attach_failed\"} before the error reply."
+        "With stream, every item of the view carries stream, stream-end is its last item, and the id is free once the client reads that stream-end. A failure after the id was taken queues stream-end{reason:\"attach_failed\"} before the error reply.",
+        "resume_offset and resume_generation must be supplied together: the PTY offset the viewer parsed and the generation of its screen. When the stream gets the terminal's output ring (terminal-output-ring-v1), the ring still holds every byte from resume_offset and the grid is still at resume_generation, the stream skips the READY snapshot: RING, then RING_ADVANCE from resume_offset. Otherwise the attach starts with a READY as without them."
       ],
       "fields": {
         "cols": {
@@ -20914,6 +20923,26 @@ export const COMMAND_SCHEMAS: Readonly<Record<string, CommandSchema>> = {
               "bytes",
               "render"
             ]
+          }
+        },
+        "resume_generation": {
+          "capability": "terminal-output-ring-v1",
+          "default": null,
+          "nullable": true,
+          "presence": "optional",
+          "type": {
+            "kind": "scalar",
+            "name": "uint64"
+          }
+        },
+        "resume_offset": {
+          "capability": "terminal-output-ring-v1",
+          "default": null,
+          "nullable": true,
+          "presence": "optional",
+          "type": {
+            "kind": "scalar",
+            "name": "uint64"
           }
         },
         "rows": {

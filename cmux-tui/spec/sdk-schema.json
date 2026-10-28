@@ -20661,6 +20661,26 @@
       "default": null,
       "capability": "attach-identity-v1"
      },
+     "resume_generation": {
+      "type": {
+       "kind": "scalar",
+       "name": "uint64"
+      },
+      "presence": "optional",
+      "nullable": true,
+      "default": null,
+      "capability": "terminal-output-ring-v1"
+     },
+     "resume_offset": {
+      "type": {
+       "kind": "scalar",
+       "name": "uint64"
+      },
+      "presence": "optional",
+      "nullable": true,
+      "default": null,
+      "capability": "terminal-output-ring-v1"
+     },
      "snapshot": {
       "type": {
        "kind": "scalar",
@@ -20732,7 +20752,8 @@
      "Browser surfaces reject mode:render.",
      "expected_generation and expected_terminal_id must be supplied together and match the current daemon and terminal.",
      "snapshot \"ghostsnp\" with the host's snapshot_version starts the byte stream with a snapshot event instead of vt-state; another version gets the byte replay. viewer_backlog_bytes (default 8388608 = 8 MiB, set per attach, no daemon setting; clamped to 65536..8388608) bounds the viewer's backlog; overflow resyncs by snapshot.",
-     "With stream, every item of the view carries stream, stream-end is its last item, and the id is free once the client reads that stream-end. A failure after the id was taken queues stream-end{reason:\"attach_failed\"} before the error reply."
+     "With stream, every item of the view carries stream, stream-end is its last item, and the id is free once the client reads that stream-end. A failure after the id was taken queues stream-end{reason:\"attach_failed\"} before the error reply.",
+     "resume_offset and resume_generation must be supplied together: the PTY offset the viewer parsed and the generation of its screen. When the stream gets the terminal's output ring (terminal-output-ring-v1), the ring still holds every byte from resume_offset and the grid is still at resume_generation, the stream skips the READY snapshot: RING, then RING_ADVANCE from resume_offset. Otherwise the attach starts with a READY as without them."
     ]
    },
    "result": {

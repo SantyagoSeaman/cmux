@@ -14,7 +14,7 @@
 namespace cmux::raw {
 
 inline constexpr std::uint32_t kMuxProtocolVersion = 12U;
-inline constexpr std::string_view kProtocolIrSha256 = "df10717146553dfa363854f65845a400d363319d750b9f1e04386389220171be";
+inline constexpr std::string_view kProtocolIrSha256 = "7d7ab569826435716c7b3e8f1573c6d14d3dde79e36de2eb72406de1a58fcfa8";
 
 enum class AccessRequestKind;
 struct AccessRequestPending;
@@ -1957,6 +1957,8 @@ struct AttachSurfaceRequest {
     Field<std::string> expected_generation{};
     Field<std::string> expected_terminal_id{};
     Field<AttachSurfaceRequestMode> mode{};
+    Field<std::uint64_t> resume_generation{};
+    Field<std::uint64_t> resume_offset{};
     Field<std::uint16_t> rows{};
     Field<std::string> snapshot{};
     std::optional<bool> snapshot_images{};

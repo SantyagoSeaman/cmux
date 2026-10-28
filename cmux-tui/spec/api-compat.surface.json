@@ -8138,6 +8138,14 @@
           "render"
         ]
       },
+      "/resume_generation": {
+        "ty": "uint64",
+        "nullable": true
+      },
+      "/resume_offset": {
+        "ty": "uint64",
+        "nullable": true
+      },
       "/rows": {
         "ty": "uint16",
         "nullable": true

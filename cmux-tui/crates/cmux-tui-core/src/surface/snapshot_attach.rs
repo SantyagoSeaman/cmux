@@ -276,7 +276,6 @@ impl Surface {
     /// `grants_output_ring`). When no ring can be had the viewer is an
     /// ordinary snapshot viewer of bytes, and `ring` says why.
     #[cfg(unix)]
-    #[cfg_attr(not(test), expect(dead_code, reason = "attached by attach frames once bound"))]
     pub(crate) fn attach_snapshot_ring_stream(
         &self,
         lifecycle: AttachLifecycle,
@@ -559,6 +558,9 @@ impl PtySurface {
 
 #[path = "kitty_replay_cache.rs"]
 mod kitty_replay_cache;
+
+#[path = "ring_resume.rs"]
+pub(crate) mod ring_resume;
 
 #[cfg(test)]
 #[path = "tests/snapshot_attach.rs"]

@@ -26,6 +26,10 @@ import Foundation
 ///   ``TerminalRingLaps``, which asks for the fresh screen at once; the decoder then drops ring bytes as in
 ///   any resync. A RING or RING_ADVANCE the stream cannot use, or an advance past the ring's published end,
 ///   is a protocol error (app-daemon-connection-DESIGN.md sections 3.4, 4.3 and 4.4).
+/// - A stream that reattached with a ``TerminalRingResume`` (p05-ipc-114) keeps the screen it had: when the
+///   daemon served the resume, its first screen item is a RING_ADVANCE, whose bytes continue from the resume
+///   offset; when it did not, a READY comes first and the resume is dropped. ``resumePoint`` is what the next
+///   reattach names.
 ///
 /// JSON lines of the same stream go through ``admit(line:named:decoder:)``, so one ``TerminalSnapshotSequencer``
 /// orders both and one surface scopes both.
@@ -52,10 +56,25 @@ struct TerminalAttachFrameDecoder: Sendable {
     private let rings: RingStreams?
     /// The stream's mapped output ring, once a RING came.
     private var ring: RingReader?
+    /// The screen this stream reattached with, until a RING_ADVANCE continues it or a READY replaces it.
+    private var resume: TerminalRingResume?
 
-    init(surface: SurfaceID, rings: RingStreams? = nil) {
+    /// - Parameter resume: the screen the view kept from its last stream, named in this stream's attach.
+    init(surface: SurfaceID, rings: RingStreams? = nil, resume: TerminalRingResume? = nil) {
         self.surface = surface
         self.rings = rings
+        self.resume = resume
+        // Only a snapshot attach names a resume: a gap on it, or a lap of its ring, asks for a fresh READY.
+        snapshots = resume != nil
+    }
+
+    /// The screen the view has, for the next reattach to name: the offset after its last parsed byte and its
+    /// screen's generation. Nil while that screen is unknown: a byte-replay stream, a resync due, or no READY yet
+    /// (a stream that reattached with a resume still has that screen until its first advance).
+    var resumePoint: TerminalRingResume? {
+        guard snapshots, !resyncing else { return nil }
+        guard let offset = nextOffset, let generation = sequencer.generation else { return resume }
+        return TerminalRingResume(offset: offset, generation: generation)
     }
 
     /// What `frame` gives the view. `decoder` is the connection's (it counts each meta decode).
@@ -260,6 +279,7 @@ struct TerminalAttachFrameDecoder: Sendable {
         outputRun?.deliveredEnd = nil  // output before the cut is on the restored screen
         resyncing = false
         snapshots = snapshot
+        resume = nil  // the daemon did not serve it: this screen replaces the kept one
         guard let rings, let reader = ring else { return }
         reader.laps.retire()  // a lap of the replaced screen's bytes no longer matters
         ring?.laps = newLaps(rings)
@@ -319,6 +339,11 @@ struct TerminalAttachFrameDecoder: Sendable {
                                       after run: OutputRun?) -> TerminalFrameAdmission {
         guard let reader = ring, payload.count == 0 else { return .refused(.strayAdvance) }
         guard !resyncing else { return .nothing }
+        if let kept = resume.take() {
+            // The daemon served the resume: the view's screen is at its offset, so bytes continue from there.
+            nextOffset = kept.offset
+            sequencer.resumed(generation: kept.generation)
+        }
         let start = nextOffset ?? reader.sentEnd
         var current = run.flatMap { $0.end == start ? $0 : nil } ?? OutputRun(start: start, end: start)
         guard end > start else {

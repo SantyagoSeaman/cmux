@@ -8988,6 +8988,8 @@ Params:
 | `rows` | `uint16` | default null | `attach-initial-size` capability; paired with `cols`, clamped to at least 1 |
 | `snapshot_local_history` | `bool` | default false | `terminal-snapshot-local-history-v1`; only with `snapshot` |
 | `snapshot_images` | `bool` | default false | `terminal-snapshot-images-v1`; only with `snapshot` |
+| `resume_offset` | `uint64` | default null | `terminal-output-ring-v1`; paired with `resume_generation`: the PTY offset the reattaching ring viewer parsed. Inside the terminal's ring and at the current generation the stream gets RING, then RING_ADVANCE from it, and no READY; otherwise it starts with a READY |
+| `resume_generation` | `uint64` | default null | `terminal-output-ring-v1`; paired with `resume_offset`: the grid generation of the viewer's screen (its last READY's) |
 
 Result:
 
@@ -9003,6 +9005,7 @@ Errors:
 | `browser attach requires client capability browser-pointer-frame-guard-v1; ...` | The client did not advertise guarded pointer support |
 | `bad attach mode <mode>` | `mode` is not `"bytes"` or `"render"` |
 | `attach-surface cols and rows must be supplied together` | Only one initial dimension is supplied |
+| `attach-surface resume_offset and resume_generation must be supplied together` | Only one resume field is supplied |
 | `render attach requires protocol 7` | Server does not implement render mode |
 | terminal error string | VT replay generation fails |
 | thread spawn error string | Server cannot create the attach writer thread |

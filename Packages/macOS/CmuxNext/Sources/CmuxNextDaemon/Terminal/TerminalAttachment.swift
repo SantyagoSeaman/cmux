@@ -102,6 +102,7 @@ public actor TerminalAttachment: TerminalByteChannel {
     ///   shows (``NewTerminalTrace/FirstAttach``): its stages are that create's instants. 0: a restore or a
     ///   reattach, which writes none.
     /// - Parameter inputQueue: the view's serial input queue; the socket writer drains on it (nil: its own queue).
+    /// - Parameter resume: a reattaching ring view's screen (``TerminalRingResume``): no READY while the ring holds it.
     public static func attach(
         endpoint: DaemonEndpoint,
         target: Target,
@@ -114,7 +115,8 @@ public actor TerminalAttachment: TerminalByteChannel {
         device: TerminalSizingDevice? = nil,
         hangs: (any HangWatchScoping)? = nil,
         createIntent: UInt64 = 0,
-        inputQueue: DispatchQueue? = nil
+        inputQueue: DispatchQueue? = nil,
+        resume: TerminalRingResume? = nil
     ) async throws -> TerminalAttachment {
         DaemonLaunchTimings.shared.mark("terminal.attach_start")
         NewTerminalTrace.shared.attachEvent(.attachStart, surface: target.surface.rawValue, intent: createIntent)
@@ -122,9 +124,10 @@ public actor TerminalAttachment: TerminalByteChannel {
                                                      stats: endpoint.wireStats, hangs: hangs, writerTarget: inputQueue)
         let attachment = TerminalAttachment(transport: transport, surface: target.surface)
         do {
-            try await attachment.open(target: target, size: size, claimGeometry: claimGeometry,
-                                      snapshotVersion: snapshotVersion, localHistory: localHistory,
-                                      images: images, clientName: clientName, device: device, createIntent: createIntent)
+            let options = AttachOptions(snapshotVersion: snapshotVersion, localHistory: localHistory, images: images,
+                                        resume: resume)
+            try await attachment.open(target: target, size: size, claimGeometry: claimGeometry, options: options,
+                                      clientName: clientName, device: device, createIntent: createIntent)
         } catch {
             transport.close()
             throw error
@@ -143,9 +146,8 @@ public actor TerminalAttachment: TerminalByteChannel {
     /// Output bytes waiting for the consumer (diagnostics, tests).
     public nonisolated var bufferedOutputBytes: Int { queue.bufferedOutputBytes }
 
-    private func open(target: Target, size: CellSize, claimGeometry: Bool, snapshotVersion: UInt16?,
-                      localHistory: Bool, images: Bool, clientName: String,
-                      device: TerminalSizingDevice?, createIntent: UInt64) async throws {
+    private func open(target: Target, size: CellSize, claimGeometry: Bool, options: AttachOptions,
+                      clientName: String, device: TerminalSizingDevice?, createIntent: UInt64) async throws {
         let queue = queue
         let control = control
         let resolvedSurface = resolvedSurface
@@ -200,15 +202,8 @@ public actor TerminalAttachment: TerminalByteChannel {
             // Only the identity pair can name a terminal with no tab.
             throw DaemonError.missingCapabilities(["attach-identity-v1"])
         }
-        let request = AttachSurfaceRequest(
-            surface: useIdentity ? nil : target.surface,
-            expectedGeneration: useIdentity ? target.generation : nil,
-            expectedTerminalID: useIdentity ? target.terminalResourceID : nil,
-            size: size,
-            snapshotVersion: identity.supports(Self.snapshotCapability) ? snapshotVersion : nil,
-            snapshotLocalHistory: localHistory && identity.supports(DaemonCapability.terminalSnapshotLocalHistory.rawValue),
-            snapshotImages: images && identity.supports(DaemonCapability.terminalSnapshotImages.rawValue)
-        )
+        let request = Self.attachRequest(target: target, useIdentity: useIdentity, identity: identity, size: size,
+                                         options: options)
         // The reply carries the replay (up to 32 MiB): a longer, still bounded deadline.
         let response = try await DaemonConnection.perform(request, on: transport, timeout: .seconds(10))
         NewTerminalTrace.shared.attachEvent(.attachReplied, surface: target.surface.rawValue, intent: createIntent)

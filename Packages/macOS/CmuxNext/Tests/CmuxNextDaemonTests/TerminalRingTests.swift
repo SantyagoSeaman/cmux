@@ -341,6 +341,78 @@ struct TerminalRingTests {
         #expect(hooks.requests.withLock { $0 } == [.gap])
     }
 
+    // MARK: Resume by offset
+
+    /// p05-ipc-114: a stream that reattached with its screen's offset and generation, which the daemon served
+    /// (RING, then RING_ADVANCE, no READY), continues from that offset: the view gets exactly the bytes it
+    /// missed, out of the mapping, and its resume point follows what it parsed.
+    @Test func aResumedStreamContinuesFromItsOffsetWithNoReady() async throws {
+        let ring = InProcessRing(capacity: 1024)
+        let hooks = RingHooks()
+        let queue = TerminalEventQueue(recorder: nil)
+        let kept = TerminalRingResume(offset: 200, generation: 4)
+        var decoder = TerminalAttachFrameDecoder(surface: Self.surface, rings: Self.streams(ring.mapper, queue, hooks),
+                                                 resume: kept)
+        ring.write(Self.bytes(0x61, count: 200))  // on the view's screen already
+        ring.write(Self.bytes(0x62, count: 100))  // written while the view was away
+        deliver(Self.ringFrame(ring, end: 300), &decoder, queue, hooks)
+        #expect(decoder.resumePoint == kept)
+        deliver(Self.advance(to: 300), &decoder, queue, hooks)
+        guard case .output(let missed, nil)? = await queue.next() else {
+            Issue.record("no output")
+            return
+        }
+        #expect(missed == Data(Self.bytes(0x62, count: 100)))
+        #expect(ring.mapping.contains(Self.address(missed)))
+        ring.write(Self.bytes(0x63, count: 10))
+        deliver(Self.advance(to: 310), &decoder, queue, hooks)
+        queue.finish()
+        #expect(await Self.drain(queue) == [.output(Data(Self.bytes(0x63, count: 10)), colors: nil)])
+        #expect(decoder.resumePoint == TerminalRingResume(offset: 310, generation: 4))
+        #expect(hooks.requests.withLock { $0 }.isEmpty)
+    }
+
+    /// A resume the daemon did not serve (outside the ring, or another grid) starts with a READY: the kept
+    /// screen is dropped and output continues from the READY's offset. A gap after it makes the screen unknown,
+    /// so there is no resume point until the fresh READY.
+    @Test func aRefusedResumeStartsFromTheReady() async throws {
+        let ring = InProcessRing(capacity: 1024)
+        let hooks = RingHooks()
+        let queue = TerminalEventQueue(recorder: nil)
+        var decoder = TerminalAttachFrameDecoder(surface: Self.surface, rings: Self.streams(ring.mapper, queue, hooks),
+                                                 resume: TerminalRingResume(offset: 200, generation: 4))
+        ring.write(Self.bytes(0x61, count: 300))
+        deliver(Self.ready(offset: 300, generation: 5), &decoder, queue, hooks)
+        deliver(Self.ringFrame(ring, end: 300), &decoder, queue, hooks)
+        ring.write(Self.bytes(0x62, count: 10))
+        deliver(Self.advance(to: 310), &decoder, queue, hooks)
+        #expect(decoder.resumePoint == TerminalRingResume(offset: 310, generation: 5))
+        #expect(await queue.next() == .snapshot(Self.readyFrame(offset: 300, generation: 5)))
+        #expect(await queue.next() == .output(Data(Self.bytes(0x62, count: 10)), colors: nil))
+        ring.write(Self.bytes(0x63, count: 1100))  // more than the ring past the cursor: a gap
+        deliver(Self.advance(to: 1410), &decoder, queue, hooks)
+        #expect(decoder.resumePoint == nil)
+        queue.finish()
+        #expect(await Self.drain(queue).isEmpty)
+        #expect(hooks.requests.withLock { $0 } == [.gap])
+    }
+
+    /// A stream with no resume has no resume point before its READY; the request carries a resume only with a
+    /// snapshot attach.
+    @Test func theResumeRidesOnlyASnapshotAttach() throws {
+        let ring = InProcessRing(capacity: 1024)
+        let decoder = Self.decoder(ring, TerminalEventQueue(recorder: nil), RingHooks())
+        #expect(decoder.resumePoint == nil)
+        let resume = TerminalRingResume(offset: 42, generation: 3)
+        let size = CellSize(cols: 80, rows: 24)
+        let snapshot = AttachSurfaceRequest(surface: Self.surface, size: size, snapshotVersion: 1, resume: resume)
+        let fields = try Self.fields(snapshot)
+        #expect(fields["resume_offset"] as? UInt64 == 42)
+        #expect(fields["resume_generation"] as? UInt64 == 3)
+        let replay = try Self.fields(AttachSurfaceRequest(surface: Self.surface, size: size, resume: resume))
+        #expect(replay["resume_offset"] == nil && replay["resume_generation"] == nil)
+    }
+
     // MARK: Lifetime
 
     /// The stream holds one reference to the mapping and every span the view holds one more: the mapping goes
@@ -479,6 +551,10 @@ struct TerminalRingTests {
     }
 
     private static func bytes(_ value: UInt8, count: Int) -> [UInt8] { [UInt8](repeating: value, count: count) }
+
+    private static func fields(_ request: AttachSurfaceRequest) throws -> [String: Any] {
+        try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any] ?? [:]
+    }
 
     private static func address(_ data: Data) -> UInt {
         // SAFETY: only the address is read, inside the closure that lends it.

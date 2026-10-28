@@ -120,12 +120,16 @@ public struct AttachSurfaceRequest: DaemonRequest {
     public var snapshotLocalHistory: Bool?
     /// The view applies Kitty image replays (`terminal-snapshot-images-v1`).
     public var snapshotImages: Bool?
+    /// Where a reattaching ring view's screen is (``TerminalRingResume``); both or neither.
+    public var resumeOffset: UInt64?
+    public var resumeGeneration: UInt64?
 
     /// - Parameter snapshotVersion: the viewer's GHOSTSNP version, or nil for
     ///   a byte replay.
+    /// - Parameter resume: a reattaching ring view's screen; sent only with a snapshot attach.
     public init(surface: SurfaceID?, expectedGeneration: DaemonGeneration? = nil, expectedTerminalID: ResourceID? = nil,
                 size: CellSize?, snapshotVersion: UInt16? = nil, snapshotLocalHistory: Bool = false,
-                snapshotImages: Bool = false) {
+                snapshotImages: Bool = false, resume: TerminalRingResume? = nil) {
         self.surface = surface
         self.expectedGeneration = expectedGeneration
         self.expectedTerminalID = expectedTerminalID
@@ -136,11 +140,14 @@ public struct AttachSurfaceRequest: DaemonRequest {
         self.snapshotVersion = snapshotVersion
         self.snapshotLocalHistory = snapshotVersion != nil && snapshotLocalHistory ? true : nil
         self.snapshotImages = snapshotVersion != nil && snapshotImages ? true : nil
+        let resume = snapshotVersion == nil ? nil : resume
+        self.resumeOffset = resume?.offset
+        self.resumeGeneration = resume?.generation
     }
 
     enum CodingKeys: String, CodingKey {
         case surface, expectedGeneration = "expected_generation", expectedTerminalID = "expected_terminal_id", mode
         case cols, rows, snapshot, snapshotVersion = "snapshot_version", snapshotLocalHistory = "snapshot_local_history"
-        case snapshotImages = "snapshot_images"
+        case snapshotImages = "snapshot_images", resumeOffset = "resume_offset", resumeGeneration = "resume_generation"
     }
 }

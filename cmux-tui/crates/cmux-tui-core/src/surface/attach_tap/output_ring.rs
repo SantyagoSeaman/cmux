@@ -153,6 +153,13 @@ mod ring {
             self.writer.end()
         }
 
+        /// Offset of the oldest byte the ring still holds: the writer has
+        /// overwritten everything before the last `capacity` bytes, and the
+        /// ring never held a byte before its base.
+        pub(crate) fn oldest(&self) -> u64 {
+            self.writer.end().saturating_sub(self.writer.capacity()).max(self.writer.base())
+        }
+
         /// What one ring viewer's RING frame announces, with its own
         /// read-only descriptor.
         pub(crate) fn grant(&self) -> Result<OutputRingGrant, RingError> {
@@ -181,5 +188,57 @@ mod ring {
         /// The viewer's own output starts at its first READY's cut, at or
         /// after it.
         pub(crate) end: u64,
+    }
+}
+
+/// Resume by offset (p05-ipc-114): a reattaching ring viewer reads on from
+/// the offset it parsed when the terminal's ring still holds it.
+#[cfg(unix)]
+mod resume {
+    use super::super::super::snapshot_attach::ring_resume::ResumeRefused;
+    use super::super::{
+        AttachFrameReceiver, AttachLifecycle, AttachTap, AttachTaps, QueuedFrame, RingAdvance,
+    };
+    use super::{OutputRingGrant, TerminalRingSlot};
+
+    impl AttachTaps {
+        /// The ring a reattaching ring viewer that parsed up to `offset`
+        /// reads on from there: only a live ring that still holds every
+        /// byte from `offset` to its end. The caller holds the terminal lock,
+        /// so the ring does not move meanwhile.
+        pub(in crate::surface) fn ring_resume_grant(
+            &self,
+            offset: u64,
+        ) -> Result<OutputRingGrant, ResumeRefused> {
+            let TerminalRingSlot::Live(ring) = &self.ring else {
+                return Err(ResumeRefused::NoRing);
+            };
+            let (oldest, end) = (ring.oldest(), ring.end());
+            if offset < oldest || offset > end {
+                return Err(ResumeRefused::OutsideRing { offset, oldest, end });
+            }
+            ring.grant().map_err(ResumeRefused::Ring)
+        }
+    }
+
+    impl AttachTap {
+        /// A resumed ring viewer's queue: its screen is already at the
+        /// advance's start, so no READY is pending, and its first item is
+        /// `advance` (the ring bytes from the resume offset to the ring's
+        /// end). Later advances merge into it as into any other.
+        pub(in crate::surface) fn ring_resume_pair(
+            lifecycle: AttachLifecycle,
+            max_frames: usize,
+            backlog_bytes: usize,
+            advance: RingAdvance,
+        ) -> (Self, AttachFrameReceiver) {
+            let (tap, receiver) = Self::ring_pair(lifecycle, max_frames, backlog_bytes);
+            let mut queue = tap.state.queue.lock().unwrap();
+            queue.needs_snapshot = false;
+            queue.retained_bytes = advance.retained_bytes();
+            queue.frames.push_back(QueuedFrame::Ring(advance));
+            drop(queue);
+            (tap, receiver)
+        }
     }
 }

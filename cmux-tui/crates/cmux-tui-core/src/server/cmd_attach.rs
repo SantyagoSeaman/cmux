@@ -57,6 +57,7 @@ use crate::sizing_policy::TerminalDetachActor;
 use crate::sizing_policy::detach_reason;
 use crate::stream_interrupt::StreamInterrupt;
 use crate::surface::AttachLifecycle;
+use crate::surface::snapshot_attach::ring_resume::RingResume;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
@@ -204,6 +205,10 @@ pub(super) fn attach_surface(
         (None, None) => None,
         _ => anyhow::bail!("attach-surface cols and rows must be supplied together"),
     };
+    // Checked on every attach. Only a ring stream serves a resume
+    // (`Surface::resume_snapshot_ring_stream`); any other attach starts with
+    // its READY or replay, as without one.
+    ring_resume(snapshot.resume_offset, snapshot.resume_generation)?;
     let surface_id = match surface_id {
         Some(surface) => surface,
         None => {
@@ -300,6 +305,24 @@ pub(super) fn attach_surface(
         writer.end_client_stream(&outbound_stream, StreamEndReason::AttachFailed);
     }
     attached
+}
+
+/// `resume_offset` and `resume_generation` of an `attach-surface`, both or
+/// neither: where a reattaching ring viewer's screen is (p05-ipc-114). A ring
+/// stream that gets one resumes from the offset when the terminal's ring still
+/// holds it and the grid is at the generation (RING, then RING_ADVANCE, no
+/// READY); otherwise it starts with a READY.
+pub(super) fn ring_resume(
+    offset: Option<u64>,
+    generation: Option<u64>,
+) -> anyhow::Result<Option<RingResume>> {
+    match (offset, generation) {
+        (Some(offset), Some(generation)) => Ok(Some(RingResume { offset, generation })),
+        (None, None) => Ok(None),
+        _ => anyhow::bail!(
+            "attach-surface resume_offset and resume_generation must be supplied together"
+        ),
+    }
 }
 
 /// The render, browser or replay byte attach of `surface` on `outbound_stream`.
@@ -675,3 +698,7 @@ fn attach_view(
     )?;
     Ok(attach_response(mux, surface_id, client, lease))
 }
+
+#[cfg(all(test, unix))]
+#[path = "ring_resume_tests.rs"]
+mod ring_resume_tests;
