@@ -6,13 +6,15 @@
 use super::*;
 use crate::Surface;
 use crate::mux::mux_work::on_request_thread_in_panic_mode;
-use crate::vt_worker_runtime::fake_screen_source::{FakeScreenSource, text_row, text_screen};
+use crate::vt_worker_runtime::fake_screen_source::{
+    FakeScreenSource, parsed_terminal, published_screen, text_row, text_screen,
+};
 use crate::vt_worker_runtime::{HistoryPage, HistoryRange, PageReadError};
 
 /// A mux whose first terminal's screen comes from `source`; the daemon's
 /// own parser for it holds other text, so a read that does not use the page
 /// shows.
-fn worker_terminal(source: Arc<FakeScreenSource>) -> (Arc<Mux>, Arc<Surface>) {
+pub(super) fn worker_terminal(source: Arc<FakeScreenSource>) -> (Arc<Mux>, Arc<Surface>) {
     let mux = test_mux();
     let surface = mux.new_workspace(None, Some((20, 4))).unwrap();
     surface.apply_stream_output_for_test(b"daemon parser").unwrap();
@@ -20,7 +22,7 @@ fn worker_terminal(source: Arc<FakeScreenSource>) -> (Arc<Mux>, Arc<Surface>) {
     (mux, surface)
 }
 
-fn request(mux: &Arc<Mux>, request: Value) -> Value {
+pub(super) fn request(mux: &Arc<Mux>, request: Value) -> Value {
     let (writer, outbound) = captured_writer();
     let client = mux.control_clients.register(ClientTransport::Unix, writer.clone());
     assert!(handle_message(mux, client, &request.to_string(), &writer));
@@ -50,12 +52,21 @@ fn read_screen_wait_for_and_copy_read_the_worker_page() {
     mux.shutdown();
 }
 
+/// `terminal.screen.read` of a worker page answers what the daemon's parser
+/// answers for the same output, the cursor position included while the
+/// program hides the cursor (DECTCEM off, as vim, htop and agent TUIs do).
 #[test]
-fn terminal_screen_read_reads_the_worker_page() {
-    let mut page = text_screen(&["agent prompt", "> "], 20);
-    page.cursor = Some((2, 1));
-    page.cursor_visible = false;
-    let (mux, surface) = worker_terminal(Arc::new(FakeScreenSource::steady(Ok(page))));
+fn terminal_screen_read_of_a_worker_page_matches_the_daemon_with_the_cursor_hidden() {
+    let bytes = b"agent prompt\r\n> \x1b[?25l";
+    let mux = test_mux();
+    let surface = mux.new_workspace(None, Some((20, 4))).unwrap();
+    surface.apply_stream_output_for_test(bytes).unwrap();
+    let daemon = surface.terminal_screen_snapshot().unwrap();
+    assert_eq!((daemon.cursor_col, daemon.cursor_row, daemon.cursor_visible), (2, 1, false));
+    let mut worker = parsed_terminal(daemon.cols, daemon.rows, bytes);
+    let source = Arc::new(FakeScreenSource::steady(Ok(published_screen(&mut worker))));
+    mux.worker_screens().attach(surface.id, source.clone());
+
     let (writer, outbound) = captured_writer();
     let client = mux.control_clients.register(ClientTransport::Unix, writer.clone());
     let scheduler =
@@ -72,10 +83,18 @@ fn terminal_screen_read_reads_the_worker_page() {
     let reply = pop_json(&outbound);
     assert_eq!(reply["ok"], true, "{reply}");
     let result = &reply["result"];
-    assert_eq!(result["text"], "agent prompt\n>", "{reply}");
-    assert_eq!((result["cols"].as_u64(), result["rows"].as_u64()), (Some(20), Some(2)));
-    assert_eq!((result["cursor_col"].as_u64(), result["cursor_row"].as_u64()), (Some(2), Some(1)));
-    assert_eq!(result["cursor_visible"], false);
+    assert_eq!(source.reads(), 1, "the read did not use the worker page");
+    assert_eq!(result["text"], daemon.text.as_str(), "{reply}");
+    assert_eq!(
+        (result["cols"].as_u64(), result["rows"].as_u64()),
+        (Some(u64::from(daemon.cols)), Some(u64::from(daemon.rows)))
+    );
+    assert_eq!(
+        (result["cursor_col"].as_u64(), result["cursor_row"].as_u64()),
+        (Some(u64::from(daemon.cursor_col)), Some(u64::from(daemon.cursor_row))),
+        "{reply}"
+    );
+    assert_eq!(result["cursor_visible"], daemon.cursor_visible);
     mux.shutdown();
 }
 

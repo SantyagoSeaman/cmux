@@ -27,6 +27,7 @@ use super::{
 use crate::browser::{BrowserSource, BrowserStatus};
 use crate::model::State;
 use crate::mux::ResourceEffectProjection;
+use crate::mux::screen_reads::WorkerHistoryUnavailable;
 use crate::resource::{
     BrowserPublicId, ContentPublicId, ResourceError, ResourceOperation, TerminalPublicId,
     WireDecimal,
@@ -158,6 +159,14 @@ fn terminal_history_read(
 ) -> Result<Value, ResourceError> {
     let (_, surface) = resolve_terminal_surface(mux, &request.selectors)?;
     let HistoryReadFields { before, limit, styled } = HistoryReadFields::of(request)?;
+    // A client connection asks the worker (worker_history.rs); the
+    // synchronous callers (scripts, apps, the cloud host replica) cannot wait
+    // for its answer, and the daemon's parser of the terminal is stale.
+    if mux.is_worker_terminal(&surface) {
+        return Err(
+            WorkerHistoryUnavailable { operation: "terminal.history.read" }.resource_error()
+        );
+    }
     let (start, cells) = surface
         .try_with_terminal(|terminal| {
             let total = terminal.history_rows();
@@ -251,18 +260,25 @@ fn terminal_wait(mux: &Arc<Mux>, request: &ParsedResourceRequest) -> Result<Valu
             })
         })
         .transpose()?;
-    let check = || -> Result<String, ResourceError> {
-        mux.screen_text(&surface).map_err(resource_operation_error)
+    // At the deadline the read is final: a worker page that is still not
+    // readable fails the wait. Before it, such a page is "not matched yet"
+    // (`Mux::screen_text_for_wait`).
+    let final_check = || -> Result<Value, ResourceError> {
+        let text = mux.screen_text(&surface).map_err(resource_operation_error)?;
+        Ok(json!({"matched":regex.is_match(&text),"text":text}))
     };
+    let matched = || -> Result<Option<Value>, ResourceError> {
+        let text = mux.screen_text_for_wait(&surface).map_err(resource_operation_error)?;
+        Ok(text.filter(|text| regex.is_match(text)).map(|text| json!({"matched":true,"text":text})))
+    };
+    if timeout == Some(Duration::ZERO) {
+        return final_check();
+    }
     let mut observed = surface
         .terminal_stream_revision()
         .map_err(|error| resource_operation_error(error.into()))?;
-    let mut text = check()?;
-    if regex.is_match(&text) {
-        return Ok(json!({"matched":true,"text":text}));
-    }
-    if timeout == Some(Duration::ZERO) {
-        return Ok(json!({"matched":false,"text":text}));
+    if let Some(matched) = matched()? {
+        return Ok(matched);
     }
 
     loop {
@@ -272,18 +288,14 @@ fn terminal_wait(mux: &Arc<Mux>, request: &ParsedResourceRequest) -> Result<Valu
         {
             Some(revision) => {
                 observed = revision;
-                text = check()?;
-                if regex.is_match(&text) {
-                    return Ok(json!({"matched":true,"text":text}));
+                if let Some(matched) = matched()? {
+                    return Ok(matched);
                 }
             }
-            None => {
-                // Close the output/deadline race with one final authoritative
-                // snapshot. The progress notifier itself is coalesced and
-                // cannot disconnect or overflow.
-                text = check()?;
-                return Ok(json!({"matched":regex.is_match(&text),"text":text}));
-            }
+            // Close the output/deadline race with one final authoritative
+            // snapshot. The progress notifier itself is coalesced and cannot
+            // disconnect or overflow.
+            None => return final_check(),
         }
     }
 }
@@ -302,6 +314,9 @@ fn terminal_copy(mux: &Arc<Mux>, request: &ParsedResourceRequest) -> Result<Valu
     let mode = required_string(&request.fields, "mode")?;
     let text = match mode {
         "screen" => mux.screen_text(&surface).map_err(resource_operation_error)?,
+        "scrollback" if mux.is_worker_terminal(&surface) => {
+            return Err(WorkerHistoryUnavailable { operation: "terminal.copy" }.resource_error());
+        }
         "scrollback" => surface
             .try_with_terminal(|terminal| terminal.plain_text())
             .map_err(resource_operation_error)?

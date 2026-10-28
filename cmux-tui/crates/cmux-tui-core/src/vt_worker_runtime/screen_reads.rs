@@ -52,8 +52,9 @@ pub struct WorkerScreen {
     pub frame: u64,
     pub cols: u16,
     pub rows: u16,
-    /// The cursor's column and row when it is visible and in the viewport.
-    pub cursor: Option<(u16, u16)>,
+    /// The cursor's column and row (the page header's cursor x/y), whether
+    /// the program shows it or not, as `Terminal::cursor_position` reads it.
+    pub cursor: (u16, u16),
     /// DECTCEM (DEC 25): the program shows the cursor.
     pub cursor_visible: bool,
     /// The viewport, top row first.
@@ -73,7 +74,8 @@ impl WorkerScreen {
         if self.cells.iter().any(|row| row.len() > usize::from(self.cols)) {
             return Some("row length");
         }
-        if self.cursor.is_some_and(|(x, y)| x >= self.cols || y >= self.rows) {
+        let (x, y) = self.cursor;
+        if x >= self.cols || y >= self.rows {
             return Some("cursor outside the grid");
         }
         None
@@ -121,6 +123,16 @@ impl fmt::Display for ScreenReadError {
 }
 
 impl std::error::Error for ScreenReadError {}
+
+impl ScreenReadError {
+    /// Whether the page becomes readable by itself: the worker's first
+    /// publish, the end of a publish or the larger page each advance the
+    /// terminal's stream revision, so a wait reads again then. A bad page
+    /// does not.
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::NotPublished | Self::Busy | Self::Resizing)
+    }
+}
 
 /// Which history rows a request asks for (the oldest retained row is 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

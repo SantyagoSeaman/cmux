@@ -19,7 +19,10 @@ use super::{
     cmd_sizing, command_history, responses, terminal_io_wire::SetCellPixelsParams,
 };
 #[cfg(unix)]
-use super::{cmd_terminal_io, get_surface, require_pty, terminal_io_wire::ReadScrollbackParams};
+use super::{
+    cmd_terminal_io, connection_scheduler::long_read_hold, get_surface, require_pty,
+    terminal_io_wire::ReadScrollbackParams,
+};
 #[cfg(unix)]
 use crate::vt_worker_runtime::{HistoryRange, WorkerScreenSource};
 
@@ -67,6 +70,9 @@ pub(super) fn start(
         Command::ReadScrollback(params) => match worker_scrollback(mux, &params) {
             Ok(Some((source, range))) => {
                 let answer = Deferred::start(mux, id, span, writer);
+                // A long read: the surface's later requests wait for this
+                // answer, not only for the request to start.
+                let hold = long_read_hold::take();
                 crate::vt_worker_runtime::request_worker_history(
                     &source,
                     range,
@@ -76,6 +82,7 @@ pub(super) fn start(
                                 page.start, page.total, page.epoch, &page.rows,
                             )
                         }));
+                        drop(hold);
                     }),
                 );
                 true

@@ -18,9 +18,10 @@ pub(crate) struct PendingHistory {
 }
 
 pub(crate) struct FakeScreenSource {
-    /// Answers of the next reads, in order; then `steady` for ever.
+    /// Answers of the next reads, in order; then `steady` until the test
+    /// publishes another.
     script: Mutex<VecDeque<Result<WorkerScreen, PageReadError>>>,
-    steady: Result<WorkerScreen, PageReadError>,
+    steady: Mutex<Result<WorkerScreen, PageReadError>>,
     reads: AtomicUsize,
     bad: Mutex<Vec<&'static str>>,
     history: Mutex<Vec<PendingHistory>>,
@@ -37,11 +38,16 @@ impl FakeScreenSource {
     ) -> Self {
         Self {
             script: Mutex::new(script.into_iter().collect()),
-            steady,
+            steady: Mutex::new(steady),
             reads: AtomicUsize::new(0),
             bad: Mutex::new(Vec::new()),
             history: Mutex::new(Vec::new()),
         }
+    }
+
+    /// What the worker publishes from now on (after the script).
+    pub(crate) fn publish(&self, screen: Result<WorkerScreen, PageReadError>) {
+        *self.steady.lock().recover_poison() = screen;
     }
 
     pub(crate) fn reads(&self) -> usize {
@@ -60,7 +66,8 @@ impl FakeScreenSource {
 impl WorkerScreenSource for FakeScreenSource {
     fn read_page(&self) -> Result<WorkerScreen, PageReadError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
-        self.script.lock().recover_poison().pop_front().unwrap_or_else(|| self.steady.clone())
+        let scripted = self.script.lock().recover_poison().pop_front();
+        scripted.unwrap_or_else(|| self.steady.lock().recover_poison().clone())
     }
 
     fn request_history(&self, range: HistoryRange, reply: HistoryReply) {
@@ -73,13 +80,14 @@ impl WorkerScreenSource for FakeScreenSource {
 }
 
 /// The screen a worker would publish for `terminal`: its viewport cells as
-/// a render walk reads them (what `cmux_vt_worker::shard` encodes).
+/// a render walk reads them and the cursor position and DECTCEM from the
+/// terminal (what `cmux_vt_worker::shard` encodes in the page header).
 pub(crate) fn published_screen(terminal: &mut Terminal) -> WorkerScreen {
     let mut render = RenderState::new().expect("render state");
     render.update(terminal).expect("render update");
     let mut cells = Vec::new();
     render.walk_rows(|_, _, row| cells.push(row.to_vec())).expect("walk rows");
-    let cursor = render.cursor().map(|cursor| (cursor.x, cursor.y));
+    let cursor = terminal.cursor_position().expect("cursor position");
     WorkerScreen {
         parsed: 0,
         frame: 1,
@@ -106,14 +114,15 @@ pub(crate) fn text_row(text: &str, cols: u16) -> Vec<Cell> {
     row
 }
 
-/// A screen of `lines` (top first), `cols` wide, with no cursor.
+/// A screen of `lines` (top first), `cols` wide, with the cursor at the
+/// top left.
 pub(crate) fn text_screen(lines: &[&str], cols: u16) -> WorkerScreen {
     WorkerScreen {
         parsed: 0,
         frame: 1,
         cols,
         rows: u16::try_from(lines.len()).expect("rows"),
-        cursor: None,
+        cursor: (0, 0),
         cursor_visible: true,
         cells: lines.iter().map(|line| text_row(line, cols)).collect(),
     }

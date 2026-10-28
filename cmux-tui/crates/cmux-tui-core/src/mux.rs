@@ -229,7 +229,7 @@ mod metrics_file;
 mod oracle;
 mod pinned_columns;
 mod power_source;
-mod screen_reads;
+pub(crate) mod screen_reads;
 mod sqlite_trim;
 mod workspace_name;
 use kitty_reservation::kitty_image_limits_exceed;

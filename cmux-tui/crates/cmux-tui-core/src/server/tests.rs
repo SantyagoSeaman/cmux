@@ -569,5 +569,7 @@ mod view_leases;
 mod wire_commands;
 #[cfg(unix)]
 mod worker_screen_reads;
+#[cfg(unix)]
+mod worker_screen_waits;
 mod workspace_checklist_capability;
 mod workspace_name_source;

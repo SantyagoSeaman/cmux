@@ -23,6 +23,7 @@ use crate::DefaultColors;
 use crate::Mux;
 use crate::PaneId;
 use crate::SurfaceId;
+use crate::mux::screen_reads::WorkerHistoryUnavailable;
 use crate::platform;
 use crate::stream_interrupt::StreamInterrupt;
 use crate::workspace_registry::TerminalLifecycle;
@@ -275,21 +276,31 @@ pub(super) fn wait_for(
     require_pty(&surface)?;
     let regex = Regex::new(&pattern).map_err(|err| anyhow::anyhow!("bad regex: {err}"))?;
     let start = Instant::now();
-    let check = || -> anyhow::Result<Option<String>> {
-        let text = mux.screen_text(&surface)?;
-        Ok(regex.is_match(&text).then_some(text))
+    let matched = |text: String| {
+        json!({
+            "matched": true,
+            "text": text,
+            "elapsed_ms": start.elapsed().as_millis() as u64,
+        })
     };
     if timeout_ms == 0 {
-        if let Some(text) = check()? {
-            return Ok(json!({
-                "matched": true,
-                "text": text,
-                "elapsed_ms": start.elapsed().as_millis() as u64,
-            }));
+        // The only read is the final one: an unreadable worker page fails it.
+        let text = mux.screen_text(&surface)?;
+        if regex.is_match(&text) {
+            return Ok(matched(text));
         }
         anyhow::bail!("timeout waiting for pattern");
     }
+    // Before the deadline a worker page that is not readable yet is "not
+    // matched yet" (`Mux::screen_text_for_wait`).
+    let check = || -> anyhow::Result<Option<String>> {
+        Ok(mux.screen_text_for_wait(&surface)?.filter(|text| regex.is_match(text)))
+    };
     let deadline = start + Duration::from_millis(timeout_ms);
+    if mux.is_worker_terminal(&surface) {
+        let text = wait_for_worker_page(&surface, cancellation, deadline, check)?;
+        return text.map(matched).ok_or_else(|| anyhow::anyhow!("timeout waiting for pattern"));
+    }
     let attach = surface.attach_stream()?;
     // The wait ends on output, the deadline, or the connection
     // closing; it used to wake every 100 ms to check the last.
@@ -299,11 +310,7 @@ pub(super) fn wait_for(
     }
     attach.stream.wake_on(&interrupt);
     if let Some(text) = check()? {
-        return Ok(json!({
-            "matched": true,
-            "text": text,
-            "elapsed_ms": start.elapsed().as_millis() as u64,
-        }));
+        return Ok(matched(text));
     }
     // The wait blocks by design: a pool worker that runs it starts a
     // temporary one meanwhile (sequenced_pool.rs).
@@ -319,11 +326,7 @@ pub(super) fn wait_for(
             match attach.stream.recv_interruptible(&interrupt, Some(deadline)) {
                 Ok(_) => {
                     if let Some(text) = check()? {
-                        return Ok(json!({
-                            "matched": true,
-                            "text": text,
-                            "elapsed_ms": start.elapsed().as_millis() as u64,
-                        }));
+                        return Ok(matched(text));
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -334,6 +337,49 @@ pub(super) fn wait_for(
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     anyhow::bail!("timeout waiting for pattern");
                 }
+            }
+        }
+    })
+}
+
+/// `wait-for` of a terminal a VT worker process parses. It wakes on the
+/// terminal's stream revision, which the broker advances only after the
+/// worker published the parse it reports (as `terminal.wait` does), not on
+/// the daemon's output tap: output reaches the tap before the worker has
+/// parsed it, so a check on that wake reads the page before the output is
+/// in it. `check` gives the matching text; `Ok(None)` at the deadline.
+fn wait_for_worker_page(
+    surface: &crate::Surface,
+    cancellation: Option<&ConnectionCancellation>,
+    deadline: Instant,
+    check: impl Fn() -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<Option<String>> {
+    let cancelled = || cancellation.is_some_and(ConnectionCancellation::is_cancelled);
+    crate::request_path::will_block(|| {
+        loop {
+            // Subscribe before reading the page, so a publish between the
+            // read and the wait still wakes it; the connection's close
+            // wakes the same subscription.
+            let subscription = surface.subscribe_terminal_stream_change()?;
+            let interrupt = StreamInterrupt::new();
+            let wake = Arc::downgrade(&subscription.wake());
+            interrupt.on_fire(move || {
+                if let Some(wake) = wake.upgrade() {
+                    wake.notify();
+                }
+            });
+            if let Some(cancellation) = cancellation {
+                cancellation.register_interrupt(&interrupt);
+            }
+            if cancelled() {
+                anyhow::bail!("cancelled while waiting for pattern");
+            }
+            if let Some(text) = check()? {
+                return Ok(Some(text));
+            }
+            if !subscription.wait_until(Some(deadline)) {
+                // One last read closes the publish/deadline race.
+                return check();
             }
         }
     })
@@ -432,6 +478,9 @@ pub(super) fn copy(mux: &Arc<Mux>, surface: SurfaceId, mode: String) -> anyhow::
     require_pty(&surface)?;
     let text = match mode.as_str() {
         "screen" => mux.screen_text(&surface)?,
+        "scrollback" if mux.is_worker_terminal(&surface) => {
+            return Err(WorkerHistoryUnavailable { operation: "copy scrollback" }.into());
+        }
         "scrollback" => surface.try_with_terminal(|t| t.plain_text())??,
         "selection" => surface.selection_text().ok_or_else(|| anyhow::anyhow!("no selection"))?,
         other => anyhow::bail!("bad mode {other}"),

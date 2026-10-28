@@ -59,6 +59,8 @@ use super::terminal_create;
 use crate::Mux;
 #[path = "connection_qos.rs"]
 pub(super) mod connection_qos;
+#[path = "long_read_hold.rs"]
+pub(super) mod long_read_hold;
 use crate::SurfaceId;
 use crate::event_cause::EventCause;
 use crate::stream_interrupt::InterruptSet;
@@ -610,7 +612,8 @@ impl ConnectionSurfaceScheduler {
     }
 
     /// Runs `pending`, a long read of `surface`, on the mux's Cpu work lane
-    /// at its cause's priority. Its surface stays held until the item ends.
+    /// at its cause's priority. Its surface stays held until the read's
+    /// answer is sent (long_read_hold.rs).
     /// False when the lane refused it (shutdown began): the dropped read
     /// answered the request, and the connection closes.
     fn start_long_read(
@@ -626,7 +629,7 @@ impl ConnectionSurfaceScheduler {
             scheduler: self.clone(),
             mux: Arc::downgrade(mux),
             client,
-            surface,
+            hold: Some(long_read_hold::LongReadHold::new(self.clone(), surface)),
             writer: writer.clone(),
             pending: Some(pending),
         };
@@ -766,15 +769,17 @@ fn long_read_priority(cause: EventCause) -> Priority {
     }
 }
 
-/// A long read handed to the work lane. It holds its surface until it drops;
-/// dropped unrun (the lane refused it or shut down first), it answers its
-/// request with an error. It holds the mux weakly, as `Mux::post_mux_work`
+/// A long read handed to the work lane. It holds its surface until its
+/// answer is sent: when its run ends, or later when the request took the
+/// hold into an async reply (long_read_hold.rs). Dropped unrun (the lane
+/// refused it or shut down first), it answers its request with an error. It holds the mux weakly, as `Mux::post_mux_work`
 /// items do, so a queued read never keeps a dropped mux alive.
 struct LongRead {
     scheduler: Arc<ConnectionSurfaceScheduler>,
     mux: Weak<Mux>,
     client: u64,
-    surface: SurfaceId,
+    /// Dropped after the unrun answer (field order).
+    hold: Option<long_read_hold::LongReadHold>,
     writer: MessageWriter,
     pending: Option<PendingSurfaceRequest>,
 }
@@ -784,11 +789,14 @@ impl LongRead {
     fn run(mut self) {
         let Some(mux) = self.mux.upgrade() else { return };
         let Some(pending) = self.pending.take() else { return };
+        let Some(hold) = self.hold.take() else { return };
         let (scheduler, client, writer) = (&self.scheduler, self.client, &self.writer);
-        cmux_threads::blocking::with_blocking_disallowed(|| {
-            if !run_pending_request(scheduler, &mux, client, pending, writer) {
-                scheduler.close();
-            }
+        long_read_hold::run_holding(hold, || {
+            cmux_threads::blocking::with_blocking_disallowed(|| {
+                if !run_pending_request(scheduler, &mux, client, pending, writer) {
+                    scheduler.close();
+                }
+            });
         });
     }
 }
@@ -806,7 +814,6 @@ impl Drop for LongRead {
                 self.scheduler.close();
             }
         }
-        self.scheduler.finish_read(self.surface);
     }
 }
 

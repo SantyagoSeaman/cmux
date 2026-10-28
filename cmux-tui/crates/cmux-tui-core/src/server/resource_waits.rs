@@ -109,7 +109,10 @@ fn run_terminal_resource_wait(
             })
         })
         .transpose()?;
-    let check = || -> Result<String, ResourceError> {
+    // At the deadline the read is final: a worker page that is still not
+    // readable fails the wait. Before it, such a page is "not matched yet"
+    // (`Mux::screen_text_for_wait`).
+    let final_check = || -> Result<String, ResourceError> {
         mux.screen_text(&surface).map_err(resource_wait_runtime_error)
     };
     loop {
@@ -127,18 +130,19 @@ fn run_terminal_resource_wait(
         if resource_wait_stopped(canceled, writer) {
             return Ok(None);
         }
-        let text = check()?;
-        if regex.is_match(&text) {
-            return Ok(Some(json!({"matched":true,"text":text})));
-        }
         if timeout == Some(Duration::ZERO) {
-            return Ok(Some(json!({"matched":false,"text":text})));
+            let text = final_check()?;
+            return Ok(Some(json!({"matched":regex.is_match(&text),"text":text})));
+        }
+        let text = mux.screen_text_for_wait(&surface).map_err(resource_wait_runtime_error)?;
+        if let Some(text) = text.filter(|text| regex.is_match(text)) {
+            return Ok(Some(json!({"matched":true,"text":text})));
         }
 
         if !subscription.wait_until(deadline) {
             // Close the output/deadline race with one final authoritative
             // snapshot after the one deadline wake.
-            let text = check()?;
+            let text = final_check()?;
             return Ok(Some(json!({
                 "matched":regex.is_match(&text),
                 "text":text,
