@@ -15,7 +15,7 @@ import Testing
 /// list and runs the 10k benches that check nothing.
 @MainActor @Suite(.serialized)
 struct SidebarHugeGroupTests {
-    nonisolated static let wholeBench = ProcessInfo.processInfo.environment["CMUX_SIDEBAR_HUGE_BENCH"] == "1"
+    nonisolated static let wholeBench = true // proof only: CMUX_SIDEBAR_HUGE_BENCH=1
     /// How far each scroll pass goes below the top: two screens of the 900 pt sidebar, or the whole list.
     nonisolated static let scrollDepth: CGFloat? = wholeBench ? nil : 1_800
 
