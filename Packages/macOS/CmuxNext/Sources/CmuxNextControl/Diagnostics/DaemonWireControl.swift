@@ -3,7 +3,8 @@ public import CmuxNextDaemon
 internal import CmuxNextSettings
 
 /// `debug.daemon.wire`: the app side of the daemon wire since launch (``DaemonWireStats``): bytes and
-/// lines each way, inbound lines by kind, JSON decodes per line, terminal output bytes the app copied,
+/// lines each way, inbound lines by kind, JSON decodes per line, terminal output bytes the app copied, bad-message
+/// closes and crash-loop breaker trips,
 /// connections and bridge spawns by role, and each method's send-to-reply time (`methods`, the app
 /// end of the daemon's `server-stats` `ipc_methods`), for the p05-ipc benches (Debug and bench builds).
 /// `{"reset": true}` zeroes the traffic counters and the method histograms after the report;
@@ -46,6 +47,8 @@ public struct DaemonWireControl: Sendable {
             "json_decodes": number(snapshot.jsonDecodes),
             "decodes_per_line": .number(snapshot.decodesPerLine),
             "output_bytes_copied_app": number(snapshot.outputBytesCopiedApp),
+            "bad_messages": number(snapshot.badMessages),
+            "frame_breaker_trips": number(snapshot.frameBreakerTrips),
             "connections": .object([
                 "opened": byRole(snapshot.connectionsOpened),
                 "closed": byRole(snapshot.connectionsClosed),

@@ -505,3 +505,6 @@ fn line_connection_a_stalled_write_is_one_line_out_hang_and_idle_wakes_nothing()
     assert_eq!(settled_wakeups(&peer.mux), idle, "an idle connection wakes the watchdog 0 times");
     peer.finish();
 }
+
+#[path = "bad_message_tests.rs"]
+mod bad_message;

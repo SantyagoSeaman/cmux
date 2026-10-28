@@ -25,6 +25,8 @@ extension LineTransport {
         /// The reader cuts 0xFF frames: set once the handshake asks for `ipc-frames-v2`, before the daemon
         /// can send one.
         var acceptsFrames = false
+        /// Where a bad-message close of this framed connection counts (``DaemonFrameBreaker``).
+        var breakerWatch: DaemonFrameBreaker.Watch?
         /// Typed requests go as REQUEST frames (``FramedRequests``); nil keeps them lines.
         var framing: FramedRequests?
         /// What the handshake was granted (``DaemonWireGrants``).

@@ -53,7 +53,7 @@ enum HandshakeLines {
         let proof = helloProof(hello, start: first[1])
         let metadata = servesMachineMetadata(first[0]) ? [PipelinedLine(IdentifyRequest(machineMetadata: true))] : []
         let echo = offer(negotiation, in: first[0])
-        if echo?.asksFrames == true { transport.acceptFrames() }
+        if let echo, echo.asksFrames { transport.acceptFrames(reportingTo: echo.breakerWatch) }
         let setup = [PipelinedLine(clientInfo(configuration, echo: echo, device: device)), subscribe]
         let revisions = echo == nil ? [] : [PipelinedLine(IdentifyRequest(revisions: true))]
         let leading = proof.map { [PipelinedLine($0)] } ?? []
@@ -107,7 +107,7 @@ enum HandshakeLines {
     /// `set-client-info` went out before the offer was known. The reader takes frames before they are asked for.
     private static func upgradeLines(_ configuration: DaemonConnectionConfiguration, echo: WireNegotiation.Echo,
                                      device: TerminalSizingDevice?, on transport: LineTransport) -> [PipelinedLine] {
-        if echo.asksFrames { transport.acceptFrames() }
+        if echo.asksFrames { transport.acceptFrames(reportingTo: echo.breakerWatch) }
         return [PipelinedLine(clientInfo(configuration, echo: echo, device: device)), PipelinedLine(IdentifyRequest(revisions: true))]
     }
 

@@ -154,6 +154,11 @@ public final class DaemonWireStats: Sendable {
         public var bridgeSpawns: [Role: UInt64]
         /// Send-to-reply time of every method that got a reply, in table order.
         public var methods: [MethodLatency] = []
+        /// Connections closed because the daemon sent a bad message (a malformed line or frame, a frame the
+        /// connection cannot route).
+        public var badMessages: UInt64 = 0
+        /// Daemon lives whose frames the crash-loop breaker turned off (``DaemonFrameBreaker``).
+        public var frameBreakerTrips: UInt64 = 0
 
         public var connectionsOpenedTotal: UInt64 { connectionsOpened.values.reduce(0, &+) }
         public var bridgeSpawnsTotal: UInt64 { bridgeSpawns.values.reduce(0, &+) }
@@ -201,6 +206,12 @@ public final class DaemonWireStats: Sendable {
         /// The app parsed the JSON of one inbound line (or tried to) once.
         func decoded() { stats.add(stripe, Counter.jsonDecodes.rawValue, 1) }
 
+        /// The connection closed because the daemon sent a bad message.
+        func badMessage() { stats.add(stripe, Counter.badMessages.rawValue, 1) }
+
+        /// This connection's bad message turned frames off for its daemon's life.
+        func frameBreakerTripped() { stats.add(stripe, Counter.frameBreakerTrips.rawValue, 1) }
+
         /// The app copied `count` bytes of terminal output into a buffer of its own.
         func outputCopied(_ count: Int) {
             guard count > 0 else { return }
@@ -234,7 +245,7 @@ public final class DaemonWireStats: Sendable {
     }
 
     private enum Counter: Int, CaseIterable {
-        case bytesRead, bytesWritten, linesRead, linesWritten, jsonDecodes, outputBytesCopiedApp
+        case bytesRead, bytesWritten, linesRead, linesWritten, jsonDecodes, outputBytesCopiedApp, badMessages, frameBreakerTrips
     }
 
     private static let frameBase = Counter.allCases.count
@@ -336,10 +347,12 @@ public final class DaemonWireStats: Sendable {
             connectionsOpened: perRole(Self.openedBase),
             connectionsClosed: perRole(Self.closedBase),
             bridgeSpawns: perRole(Self.bridgeBase),
-            methods: methodLatency.snapshot())
+            methods: methodLatency.snapshot(),
+            badMessages: load(Counter.badMessages.rawValue),
+            frameBreakerTrips: load(Counter.frameBreakerTrips.rawValue))
     }
 
-    /// Zeroes the traffic counters (bytes, lines, frames, decodes, copies) of every stripe and the
+    /// Zeroes the traffic counters (bytes, lines, frames, decodes, copies, bad messages, breaker trips) of every stripe and the
     /// method histograms. The
     /// connection counts stay, so open connections stay `opened - closed`. A count recorded during
     /// the reset may be lost; benches reset at rest.

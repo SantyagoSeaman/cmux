@@ -353,6 +353,9 @@ pub(crate) struct ClientRegistry {
     pub(super) attach_stream_admission: Arc<super::attach_streams::AttachStreamAdmission>,
     /// The framed IPC transports this daemon serves (capabilities.rs).
     pub(super) ipc_transports: super::capabilities::IpcTransports,
+    /// Turns frames off for the daemon's life after repeated bad-message
+    /// closes of framed connections (frame_breaker.rs).
+    pub(super) frame_breaker: super::frame_breaker::FrameBreaker,
     pub(super) state: Mutex<ClientRegistryState>,
 }
 
@@ -426,6 +429,7 @@ impl ClientRegistry {
                 super::ATTACH_STREAMS_SERVER_CAPACITY,
             ),
             ipc_transports: super::capabilities::IpcTransports::default(),
+            frame_breaker: super::frame_breaker::FrameBreaker::default(),
             state: Mutex::new(ClientRegistryState::default()),
         }
     }

@@ -164,6 +164,11 @@ impl IpcCapability {
         }
     }
 
+    /// Whether it is `other` or requires it, directly or through another.
+    fn needs(self, other: Self) -> bool {
+        self == other || self.requires().iter().any(|required| required.needs(other))
+    }
+
     /// The grant rule. Streams are JSON lines, so any peer that reaches the
     /// full local surface may have them, through a bridge and at any revision
     /// the daemon translates. Frames, the ring and shared buffers carry
@@ -213,6 +218,18 @@ impl IpcTransports {
 
     pub(super) fn bound(&self, capability: IpcCapability) -> bool {
         self.0.load(Ordering::Acquire) & capability.bit() != 0
+    }
+
+    /// Unbinds frames and every capability that requires them, for the rest
+    /// of this daemon's life: the crash-loop breaker tripped
+    /// (frame_breaker.rs). They are no longer offered or granted, and a held
+    /// grant lapses at its next use ([`holds`]).
+    pub(super) fn unbind_frames(&self) {
+        let off = IpcCapability::ALL
+            .into_iter()
+            .filter(|capability| capability.needs(IpcCapability::Frames))
+            .fold(0, |bits, capability| bits | capability.bit());
+        self.0.fetch_and(!off, Ordering::AcqRel);
     }
 
     /// Binds every transport, so tests can check the grant rule before the

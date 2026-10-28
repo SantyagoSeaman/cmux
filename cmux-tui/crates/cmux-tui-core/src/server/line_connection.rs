@@ -17,7 +17,11 @@
 //!
 //! A bad message closes the connection, as Chrome's `ReportBadMessage`
 //! (mojo/public/cpp/bindings/message.h) ends the sender: nothing after the
-//! bad byte is interpreted.
+//! bad byte is interpreted. Every such close adds one to `server-stats`
+//! `ipc.bad_message` and logs its reason. A close of a connection that had
+//! negotiated frames also counts toward the crash-loop breaker
+//! ([`frame_breaker`]), which turns frames off for the daemon's life after
+//! the third in 60 s.
 //!
 //! REQUEST and CANCEL frames go to [`frame_dispatch`] (p05-ipc-071), and so
 //! do INPUT frames, which queue on the stream they name until its opener is
@@ -289,6 +293,9 @@ pub(super) fn serve_connection(
     );
     let mut input = ConnectionInput::new(stream);
     let carries_frames = matches!(transport, ClientTransport::Unix) && admission.admits_frames();
+    // The reader cut frames on this connection: its bad message counts
+    // toward the crash-loop breaker.
+    let mut framed = false;
     // A panic while serving (a handler's, or a blocking call's in the
     // detector's panic mode) still ends the connection below, then goes on
     // as the thread's panic. Before, the teardown never ran: the client
@@ -302,6 +309,7 @@ pub(super) fn serve_connection(
                     ));
                 }
                 input.messages.negotiate_frames();
+                framed = true;
             }
             let buffered = input.messages.buffered_len();
             let mut line = match input.messages.next_message() {
@@ -395,8 +403,7 @@ pub(super) fn serve_connection(
     };
     input.release();
     if let ConnectionEnd::BadMessage(bad) = &end {
-        ipc.bad_message();
-        eprintln!("cmux-tui: client {client} closed: bad_message {}: {bad}", bad.reason());
+        report_bad_message(&mux, client, bad, framed, Instant::now());
     }
     if end == ConnectionEnd::PeerClosed {
         surface_scheduler.finish_and_wait();
@@ -412,6 +419,30 @@ pub(super) fn serve_connection(
         std::panic::resume_unwind(panic);
     }
     end
+}
+
+/// Counts a bad-message close (`ipc.bad_message`) and logs its reason; a
+/// close of a connection that negotiated frames also counts toward the
+/// crash-loop breaker, and the close that trips it says so.
+fn report_bad_message(
+    mux: &Mux,
+    client: u64,
+    bad: &ConnectionBadMessage,
+    framed: bool,
+    at: Instant,
+) {
+    mux.ipc_stats().bad_message();
+    eprintln!("cmux-tui: client {client} closed: bad_message {}: {bad}", bad.reason());
+    if framed
+        && mux.control_clients.framed_bad_message(at) == frame_breaker::BreakerVerdict::Tripped
+    {
+        eprintln!(
+            "cmux-tui: frames off for this daemon's life: {} framed connections closed with \
+             bad_message within {} s; clients go on with JSON lines",
+            frame_breaker::TRIP_CLOSES,
+            frame_breaker::TRIP_WINDOW.as_secs()
+        );
+    }
 }
 
 /// The end of a connection's writer, however the writer ends: its queue

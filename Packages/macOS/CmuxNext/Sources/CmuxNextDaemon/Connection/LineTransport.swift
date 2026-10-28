@@ -356,17 +356,25 @@ final class LineTransport: Sendable {
         // are copies of that output (``DaemonWireStats/Snapshot/outputBytesCopiedApp``).
         let outputStream = role == .terminalAttach ? recorder : nil
         // Frames come only with their negotiation (p05-ipc-092); until the handshake asks for them
-        // (``acceptFrames()``) a 0xFF boundary is a bad message.
+        // (``acceptFrames(reportingTo:)``) a 0xFF boundary is a bad message.
         var reader = FrameReader(limits: FrameReader.Limits(maxLine: Self.maxLineBytes, maxFramePayload: FrameHeader.maxPayloadCap))
         var framesAccepted = false
         var chunk = [UInt8](repeating: 0, count: Self.socketBufferBytes)
         var closeDetail = "EOF"
+        // Why the daemon's bytes were a bad message, when they were.
+        var badMessage: String?
         // wakeup-allow: bounded: blocking read on a dedicated thread; EOF, errors and bad messages end it, EINTR retries
         while true {
             // SAFETY: read writes at most $0.count bytes into the array's own storage, which the closure lends
             // for the call and nothing else touches meanwhile.
             let count = unsafe chunk.withUnsafeMutableBytes { unsafe Darwin.read(fd, $0.baseAddress, $0.count) }
-            if count == 0 { break }
+            if count == 0 {
+                // A close inside a frame is a bad message (`truncated`). A line cut by the close is not routed:
+                // the daemon died while writing it, and a partial reply must not answer its request.
+                reader.markEndOfStream()
+                if case .failure(let bad) = Self.nextMessage(&reader) { badMessage = bad.reason }
+                break
+            }
             if count < 0 {
                 if errno == EINTR { continue }
                 closeDetail = "read: \(POSIXErrorText(errno))"
@@ -391,23 +399,39 @@ final class LineTransport: Sendable {
                 if unrouted == nil { next = Self.nextMessage(&reader) }
             }
             if let unrouted {
-                closeDetail = "bad message: \(unrouted)"
+                badMessage = unrouted
                 break
             }
             if case .failure(let bad) = next {
-                closeDetail = "bad message: \(bad.reason)"
+                badMessage = bad.reason
                 break
             }
         }
-        let reason: TransportCloseReason = state.withLock { state in
+        if let badMessage { closeDetail = "bad message: \(badMessage)" }
+        var reason: TransportCloseReason = state.withLock { state in
             if let closed = state.closed { return closed }
             return state.sawShutdown ? .daemonShutdown : .lost(closeDetail)
+        }
+        // Bytes cut short by the app's own close are not the daemon's bad message. The close that trips the
+        // breaker says so in the reason the connection reports.
+        if let badMessage, case .lost = reason, closedOnBadMessage(badMessage, framed: framesAccepted) {
+            reason = .lost("\(closeDetail); \(DaemonFrameBreaker.tripDetail)")
         }
         failAll(reason)
         writer.close()
         closeDescriptor()
         endAttachStreams(reason)
         onClose(reason)
+    }
+
+    /// Counts a bad-message close; once the reader cut frames, it also counts toward the crash-loop breaker of
+    /// the daemon's life (``DaemonFrameBreaker``), whose trip turns frames off for the connections after it.
+    /// Returns whether this close tripped it.
+    private func closedOnBadMessage(_ reason: String, framed: Bool) -> Bool {
+        recorder?.badMessage()
+        guard framed, let watch = breakerWatch, watch.badMessage(reason) == .tripped else { return false }
+        recorder?.frameBreakerTripped()
+        return true
     }
 
     /// Stream-0 events routed so far; a reply captures it as its barrier.

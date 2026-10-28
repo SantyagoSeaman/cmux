@@ -38,11 +38,14 @@ struct WireNegotiation {
 
     /// What to echo to a daemon whose first `identify` offered `offered`; nil when nothing is offered or asked,
     /// so the handshake stays what it was (an older daemon refuses `revisions` and `api_revision`).
+    /// Frames are not asked of a daemon life the crash-loop breaker turned them off for (``DaemonFrameBreaker``).
     func echo(offered identity: DaemonIdentity) -> Echo? {
-        let frames = bridged || !identity.supports(Self.framesCapability) ? nil : upgrades.frames
+        let breaker = upgrades.frameBreaker
+        let framesOff = bridged || !identity.supports(Self.framesCapability) || breaker?.framesOff(for: identity) == true
+        let frames = framesOff ? nil : upgrades.frames
         let streams = upgrades.streams && identity.supports(Self.streamsCapability)
         guard frames != nil || streams else { return nil }
-        return Echo(frames: frames, streams: streams)
+        return Echo(frames: frames, streams: streams, breakerWatch: frames == nil ? nil : breaker?.watch(identity))
     }
 
     /// What the handshake got: the grants and, with frames granted, how requests are framed.
@@ -58,6 +61,8 @@ struct WireNegotiation {
         /// The schema to frame with, when the echo asks for frames.
         let frames: DaemonFrameSchema?
         let streams: Bool
+        /// Where the connection reports a bad-message close once it reads frames; nil when it asks for none.
+        let breakerWatch: DaemonFrameBreaker.Watch?
 
         var asksFrames: Bool { frames != nil }
 

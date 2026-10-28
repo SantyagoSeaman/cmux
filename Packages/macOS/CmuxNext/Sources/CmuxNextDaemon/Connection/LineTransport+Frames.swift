@@ -10,9 +10,16 @@ extension LineTransport {
 
     /// Lets the reader cut 0xFF frames. The handshake calls it before it writes the `set-client-info` that
     /// echoes `ipc-frames-v2`, so no frame the daemon may send after its grant meets a reader that refuses it.
-    func acceptFrames() {
-        state.withLock { $0.acceptsFrames = true }
+    /// A bad message that closes the connection once it reads frames counts toward `watch`'s crash-loop breaker.
+    func acceptFrames(reportingTo watch: DaemonFrameBreaker.Watch? = nil) {
+        state.withLock { state in
+            state.acceptsFrames = true
+            state.breakerWatch = watch
+        }
     }
+
+    /// The breaker a bad-message close counts toward: set once the reader cuts frames.
+    var breakerWatch: DaemonFrameBreaker.Watch? { state.withLock { $0.breakerWatch } }
 
     /// Whether the reader cuts frames (read by the reader thread once per read until it does).
     var acceptsFrames: Bool { state.withLock { $0.acceptsFrames } }

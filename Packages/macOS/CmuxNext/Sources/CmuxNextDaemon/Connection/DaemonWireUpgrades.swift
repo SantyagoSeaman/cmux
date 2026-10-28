@@ -12,14 +12,21 @@ public struct DaemonWireUpgrades: Sendable {
     public var frames: DaemonFrameSchema?
     /// Asks for `attach-streams-v1` (client-minted streams on this connection).
     public var streams: Bool
+    /// Turns frames off for a daemon life whose framed connections keep closing on bad messages
+    /// (``DaemonFrameBreaker``). Shared by every copy of this value, so by every connection configured with it;
+    /// nil when no frames are asked.
+    public let frameBreaker: DaemonFrameBreaker?
 
-    public init(frames: DaemonFrameSchema? = nil, streams: Bool = false) {
+    /// - Parameter frameBreaker: The breaker of the daemon these connections reach; with `frames` and none
+    ///   given, a new one.
+    public init(frames: DaemonFrameSchema? = nil, streams: Bool = false, frameBreaker: DaemonFrameBreaker? = nil) {
         self.frames = frames
         self.streams = streams
+        self.frameBreaker = frameBreaker ?? (frames == nil ? nil : DaemonFrameBreaker())
     }
 
-    /// JSON lines only: what every connection did before framed IPC.
-    public static let none = DaemonWireUpgrades()
+    /// JSON lines only: what every connection did before framed IPC. A new value each time: it holds no breaker.
+    public static var none: DaemonWireUpgrades { DaemonWireUpgrades() }
 
     var asksAny: Bool { frames != nil || streams }
 }

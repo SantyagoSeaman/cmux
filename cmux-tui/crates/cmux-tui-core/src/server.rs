@@ -158,6 +158,7 @@ pub use app_trust::{FrontendKey, frontend_proof, install_frontend_key, read_fron
 mod client_hello;
 pub use client_hello::{daemon_features, install_daemon_features};
 mod command_args;
+mod frame_breaker;
 mod frame_dispatch;
 #[cfg(unix)]
 mod fs_wire;

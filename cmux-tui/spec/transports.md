@@ -210,6 +210,17 @@ the connection with `bad_message` and the reason (`bad_magic`, `unknown_kind`,
 `frames_not_negotiated`, `line_too_long`, `invalid_utf8`, `truncated`).
 Nothing after the bad byte is interpreted.
 
+Crash-loop breaker (p05-ipc-191). Each such close adds one to `server-stats`
+`ipc.bad_message`. When 3 connections that had negotiated frames close as bad
+messages within 60 s, the daemon turns frames off for the rest of its life:
+`identify` no longer offers `ipc-frames-v2` or the capabilities that require
+it, `set-client-info` no longer grants them, and a connection that still holds
+the grant closes with `frames_not_negotiated` at its next frame. JSON lines
+keep working. The app keeps the same rule per daemon life (its `identify` pid
+and `generation`): after 3 bad-message closes of its framed connections to one
+life within 60 s it asks that life for no frames, and the close reason of the
+third says so.
+
 An INPUT frame (p05-ipc-078) is the raw bytes of a `send` to the surface of
 the attach stream it names, with no JSON and no base64. Its aux is the key
 press's flow id (0: none), which joins the daemon's flow hops to the echo, as
