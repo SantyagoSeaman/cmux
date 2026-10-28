@@ -96,8 +96,12 @@ impl Surface {
             // input FIFO, taken before the terminal lock (crate::lock_rank).
             let turn = pty.input_fifo.enter();
             let mut term = pty.term.lock().recover_poison();
+            // The published modes: they change only under the terminal lock
+            // held here, so they match the screen the transition decides on.
+            let fallback = fallback_key
+                .map(|key| ClearHistoryFallbackKey { key, modes: pty.input_modes.load() });
             let before = terminal_scroll_position(&term);
-            let scroll_changed = match apply_clear_history_transition(&mut term, fallback_key)
+            let scroll_changed = match apply_clear_history_transition(&mut term, fallback)
                 .map_err(ClearHistoryFailure::known_not_delivered)?
             {
                 ClearHistoryTransition::Blocked => {
@@ -288,9 +292,18 @@ pub(crate) enum ClearHistoryTransition {
     Noop,
 }
 
+/// The key typed in place of a clear on the alternate screen, and the input
+/// modes it is encoded with: the published modes in the daemon, the parser's
+/// own where the parser runs (the terminal host).
+#[derive(Clone, Copy)]
+pub(crate) struct ClearHistoryFallbackKey<'a> {
+    pub(crate) key: &'a KeyInput,
+    pub(crate) modes: InputModes,
+}
+
 pub(crate) fn apply_clear_history_transition(
     term: &mut Terminal,
-    fallback_key: Option<&KeyInput>,
+    fallback: Option<ClearHistoryFallbackKey<'_>>,
 ) -> anyhow::Result<ClearHistoryTransition> {
     if term.active_screen() != Screen::Alternate {
         return Ok(match term.clear_history_preserving_prompt() {
@@ -301,9 +314,9 @@ pub(crate) fn apply_clear_history_transition(
             }
         });
     }
-    let Some(input) = fallback_key else {
+    let Some(fallback) = fallback else {
         return Ok(ClearHistoryTransition::Noop);
     };
-    let encoded = encode_key_from_terminal(term, input)?;
+    let encoded = encode_fallback_key(fallback.key, fallback.modes)?;
     Ok(ClearHistoryTransition::EncodedFallback(encoded))
 }

@@ -18,9 +18,9 @@ use crate::surface::{
     CLEAR_HISTORY_FALLBACK_UNREPRESENTABLE_ERROR, CLEAR_HISTORY_FALLBACK_WRITE_TIMEOUT_ERROR,
     CLEAR_HISTORY_PRESERVATION_ERROR, CLEAR_HISTORY_STREAM_TIMEOUT_ERROR,
     CLEAR_HISTORY_STREAM_WAIT_TIMEOUT, ClearHistoryDelivery, ClearHistoryFailure,
-    ClearHistoryTransition, ConfirmedInputFailure, DefaultColors, SurfaceOptions,
-    TerminalStreamProgress, apply_clear_history_transition, replace_ghostty_cursor_defaults,
-    write_clear_history_fallback,
+    ClearHistoryFallbackKey, ClearHistoryTransition, ConfirmedInputFailure, DefaultColors,
+    SurfaceOptions, TerminalStreamProgress, apply_clear_history_transition,
+    replace_ghostty_cursor_defaults, write_clear_history_fallback,
 };
 pub use crate::terminal_activity::ShellActivitySnapshot;
 use crate::terminal_host::{

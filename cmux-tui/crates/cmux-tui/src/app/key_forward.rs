@@ -3,6 +3,7 @@
 
 use cmux_tui_core::{PaneId, SurfaceId, SurfaceKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ghostty_vt::{InputModes, KeyInput};
 
 use crate::app::{App, browser_key_mapping, browser_modifiers};
 use crate::browser_input::{BrowserInputEvent, BrowserInputKind};
@@ -59,13 +60,7 @@ impl App {
         };
         self.encode_buf.clear();
         let _ = surface.scroll_to_bottom();
-        let Some(encoded) = surface.with_terminal(|term| {
-            self.encoder.sync_from_terminal(term);
-            self.encoder.encode(&input, &mut self.encode_buf)
-        }) else {
-            return;
-        };
-        if encoded.is_ok() && !self.encode_buf.is_empty() {
+        if self.encode_terminal_key(&surface, &input) {
             let _ = self.write_encoded_pty_bytes(surface_id, surface, PtyInputKind::Ordered);
         }
     }
@@ -103,13 +98,7 @@ impl App {
         let Some(input) = keys::key_input_from(key) else { return };
         self.encode_buf.clear();
         let _ = surface.scroll_to_bottom();
-        let Some(encoded) = surface.with_terminal(|term| {
-            self.encoder.sync_from_terminal(term);
-            self.encoder.encode(&input, &mut self.encode_buf)
-        }) else {
-            return;
-        };
-        if encoded.is_ok() && !self.encode_buf.is_empty() {
+        if self.encode_terminal_key(&surface, &input) {
             let _ = self.write_encoded_pty_bytes(surface_id, surface, PtyInputKind::Ordered);
         }
     }
@@ -122,15 +111,22 @@ impl App {
         let Some(surface) = self.sidebar_surface_handle() else { return };
         self.encode_buf.clear();
         let _ = surface.scroll_to_bottom();
-        let Some(encoded) = surface.with_terminal(|term| {
-            self.encoder.sync_from_terminal(term);
-            self.encoder.encode(&input, &mut self.encode_buf)
-        }) else {
-            return;
-        };
-        if encoded.is_ok() && !self.encode_buf.is_empty() {
+        if self.encode_terminal_key(&surface, &input) {
             let _ = self.write_encoded_pty_bytes(surface_id, surface, PtyInputKind::Ordered);
         }
+    }
+
+    /// Encode `input` into `encode_buf` with the surface's published input
+    /// modes: no terminal lock and no parser read (p01-process-209), so a
+    /// keystroke never waits on output parsing. True when there are bytes.
+    pub(super) fn encode_terminal_key(
+        &mut self,
+        surface: &SurfaceHandle,
+        input: &KeyInput,
+    ) -> bool {
+        let Some(modes) = surface.input_modes() else { return false };
+        self.encoder.sync_from_modes(modes);
+        self.encoder.encode(input, &mut self.encode_buf).is_ok() && !self.encode_buf.is_empty()
     }
 
     pub(super) fn forward_browser_key_to(
@@ -212,9 +208,10 @@ impl App {
             });
             return;
         }
-        let Some(bracketed) = surface.with_terminal(|t| t.mode(2004, false)) else {
+        let Some(modes) = surface.input_modes() else {
             return;
         };
+        let bracketed = modes.contains(InputModes::BRACKETED_PASTE);
         if bracketed {
             let mut bytes = Vec::with_capacity(text.len() + 12);
             bytes.extend_from_slice(b"\x1b[200~");
@@ -234,9 +231,10 @@ impl App {
     pub(super) fn paste_sidebar(&mut self, text: &str) {
         let Some(surface_id) = self.sidebar_plugin_surface else { return };
         let Some(surface) = self.sidebar_surface_handle() else { return };
-        let Some(bracketed) = surface.with_terminal(|t| t.mode(2004, false)) else {
+        let Some(modes) = surface.input_modes() else {
             return;
         };
+        let bracketed = modes.contains(InputModes::BRACKETED_PASTE);
         if bracketed {
             let mut bytes = Vec::with_capacity(text.len() + 12);
             bytes.extend_from_slice(b"\x1b[200~");

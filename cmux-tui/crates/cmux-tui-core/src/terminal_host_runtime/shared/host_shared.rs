@@ -443,7 +443,10 @@ impl HostShared {
         fallback_key: Option<&KeyInput>,
     ) -> anyhow::Result<ParserClearHistoryResult> {
         let mut term = self.term.lock().recover_poison();
-        Ok(match apply_clear_history_transition(&mut term, fallback_key)? {
+        // The host runs the parser, so it encodes from the parser's modes.
+        let fallback =
+            fallback_key.map(|key| ClearHistoryFallbackKey { key, modes: term.input_modes() });
+        Ok(match apply_clear_history_transition(&mut term, fallback)? {
             ClearHistoryTransition::Cleared(clear) => {
                 // Legacy mirrors consume this replay directly. The
                 // command submitter publishes the smart resync marker

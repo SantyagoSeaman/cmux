@@ -33,7 +33,8 @@ use cmux_tui_core::{
     TerminalPointerSnapshot, ViewportWidthError, WorkspaceId, WorkspaceMutation, ZoomMode,
 };
 use ghostty_vt::{
-    KeyInput, MouseInput, RenderState, Scrollbar, Terminal, TerminalPointerSemanticSnapshot,
+    InputModes, KeyInput, MouseInput, RenderState, Scrollbar, Terminal,
+    TerminalPointerSemanticSnapshot,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -2452,6 +2453,20 @@ impl SurfaceHandle {
             SurfaceHandle::Remote(_, _) | SurfaceHandle::RemoteBrowserUnsupported => {
                 Err(ghostty_vt::Error::InvalidValue)
             }
+        }
+    }
+
+    /// The terminal's input modes for the key and paste encoders; `None`
+    /// for a browser surface. A local surface reads the word its parser
+    /// publishes, with no terminal lock (p01-process-209); a remote surface
+    /// reads its client mirror, where the modes replay too.
+    pub fn input_modes(&self) -> Option<InputModes> {
+        match self {
+            SurfaceHandle::Local(surface, _) => surface.input_modes(),
+            SurfaceHandle::Remote(surface, _) if surface.kind == SurfaceKind::Pty => {
+                Some(surface.term.lock().unwrap().input_modes())
+            }
+            SurfaceHandle::Remote(_, _) | SurfaceHandle::RemoteBrowserUnsupported => None,
         }
     }
 

@@ -209,7 +209,30 @@ check || { cat "$tmp/err" >&2; fail "a complete table must pass"; }
 grep -q 'async rows on request paths 1 (within the risk 8 limit 20)' "$tmp/err" \
   || { cat "$tmp/err" >&2; fail "the risk 8 limit is reported"; }
 
-# 10. The repo's table classifies every site of the tree.
+# 10. A read of the published input modes (task 209) is a site, and its page
+#     row names the field it reads.
+reset_fixture
+cat >>"$CORE/server/read.rs" <<'RS'
+
+fn send_key(surface: &Surface) -> anyhow::Result<bool> {
+    let encoder = surface.key_encoder()?;
+    Ok(surface.pty.input_modes.load().contains(BRACKETED_PASTE) && encoder.ok())
+}
+RS
+write_table
+if check; then fail "a read of the published input modes must be a site"; fi
+grep -q "unclassified: server/read.rs:.*item='fn send_key'.*symbol='key_encoder()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the key_encoder() read is named"; }
+grep -q "unclassified: server/read.rs:.*item='fn send_key'.*symbol='input_modes.load()'" "$tmp/err" \
+  || { cat "$tmp/err" >&2; fail "the input_modes.load() read is named"; }
+write_table ',
+  {"file": "server/read.rs", "item": "fn send_key", "symbols": ["key_encoder()", "input_modes.load()"], "class": "page", "reason": "r"}'
+if check; then fail "a page row over the published modes must name its field"; fi
+write_table ',
+  {"file": "server/read.rs", "item": "fn send_key", "symbols": ["key_encoder()", "input_modes.load()"], "class": "page", "field": "modes.bracketed_paste", "reason": "r"}'
+check || { cat "$tmp/err" >&2; fail "classified input-mode reads must pass"; }
+
+# 11. The repo's table classifies every site of the tree.
 python3 -I "$CHECK" --repo "$ROOT_DIR" --check >/dev/null 2>"$tmp/err" \
   || { cat "$tmp/err" >&2; fail "plans/cmux-next/vt-worker-state-access.json must classify every site"; }
 

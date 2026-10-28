@@ -51,8 +51,8 @@ pub use clear_history::{
     ClearHistoryFailure,
 };
 pub(crate) use clear_history::{
-    CLEAR_HISTORY_KEY_TEXT_MAX_BYTES, CLEAR_HISTORY_STREAM_WAIT_TIMEOUT, ClearHistoryTransition,
-    apply_clear_history_transition, write_clear_history_fallback,
+    CLEAR_HISTORY_KEY_TEXT_MAX_BYTES, CLEAR_HISTORY_STREAM_WAIT_TIMEOUT, ClearHistoryFallbackKey,
+    ClearHistoryTransition, apply_clear_history_transition, write_clear_history_fallback,
 };
 #[cfg(any(unix, windows, test))]
 use color_overrides::{
@@ -161,9 +161,10 @@ use std::time::{Duration, Instant};
 
 use cmux_pty::{ChildKiller, MasterPty, PtyCommand, PtySize};
 use ghostty_vt::{
-    Callbacks, ClearHistoryOutcome, CursorShape, Dirty, KeyEncoder, KeyInput, KittyGraphicsLimits,
-    KittyReplayState, MouseEncoders, MouseInput, RenderFrame, RenderState, Rgb, Screen, Scrollbar,
-    Terminal, TerminalColorOverrides, TerminalPointerSemanticSnapshot, TrackedScreenPoint,
+    Callbacks, ClearHistoryOutcome, CursorShape, Dirty, InputModes, KeyEncoder, KeyInput,
+    KittyGraphicsLimits, KittyReplayState, MouseEncoders, MouseInput, RenderFrame, RenderState,
+    Rgb, Screen, Scrollbar, Terminal, TerminalColorOverrides, TerminalPointerSemanticSnapshot,
+    TrackedScreenPoint,
 };
 
 use crate::daemon_env::set_env;
@@ -554,10 +555,10 @@ struct HostedSurfaceLaunch {
     adopted: bool,
 }
 
-fn encode_key_from_terminal(term: &Terminal, input: &KeyInput) -> anyhow::Result<Vec<u8>> {
+fn encode_fallback_key(input: &KeyInput, modes: InputModes) -> anyhow::Result<Vec<u8>> {
     let mut encoder = KeyEncoder::new()?;
     let mut encoded = Vec::new();
-    encoder.sync_from_terminal(term);
+    encoder.sync_from_modes(modes);
     encoder.encode(input, &mut encoded)?;
     if encoded.is_empty() {
         anyhow::bail!(CLEAR_HISTORY_FALLBACK_UNREPRESENTABLE_ERROR);

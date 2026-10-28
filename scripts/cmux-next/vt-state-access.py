@@ -17,8 +17,10 @@ The scope is the Q15 query
         --glob '!**/tests/**' --glob '!*_tests.rs'
 
 plus every parser lock in the same files: the lock itself (`.term.lock(`,
-`.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`) and every
-call of a parser accessor. The accessors are `with_terminal`,
+`.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`), every read
+of a terminal's input modes (`.input_modes(`, `.input_modes.load(`,
+`.key_encoder(`: the word the key, paste, focus and mouse encoders read,
+task 209) and every call of a parser accessor. The accessors are `with_terminal`,
 `try_with_terminal` and `try_with_hot_terminal`, every function in the
 scanned files whose signature hands a closure the parser (`Fn(&Terminal)`,
 `FnMut(&mut Terminal)`, `FnOnce(&mut Terminal)`), and the item of every
@@ -89,6 +91,11 @@ TABLE = "plans/cmux-next/vt-worker-state-access.json"
 # The Q15 needle and the parser lock; accessor calls are added per scan.
 VT_NEEDLE = r"(?P<vt>ghostty_vt::)"
 TERM_LOCK = r"\.term\.(?:slot\.)?(?:lock|try_lock)\("
+# Reads of a terminal's input modes (task 209): the parser's own
+# (`term.input_modes()`) and the published word the key, paste, focus and
+# mouse encoders read with no lock (`input_modes.load()`, `Surface::
+# input_modes()`, `Surface::key_encoder()`). A page row names that word.
+MODES_READ = r"\.(?:input_modes\.load|input_modes|key_encoder)\("
 # The daemon's parser accessors; scan() adds every other function that hands
 # a closure the parser and the item of every `accessor` row.
 ACCESSORS = frozenset({"with_terminal", "try_with_terminal", "try_with_hot_terminal"})
@@ -339,7 +346,7 @@ def accessor_names(masked: str) -> set[str]:
 
 
 def site_pattern(accessors: set[str]) -> re.Pattern[str]:
-    lock = TERM_LOCK
+    lock = f"{TERM_LOCK}|{MODES_READ}"
     if accessors:
         names = "|".join(sorted(map(re.escape, accessors), key=lambda n: (-len(n), n)))
         lock += rf"|(?<![A-Za-z0-9_])(?:{names})\("

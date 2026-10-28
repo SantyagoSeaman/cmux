@@ -2,7 +2,7 @@
  "schema": 1,
  "task": "p01-process-208",
  "checker": "scripts/cmux-next/vt-state-access.py --check",
- "scope": "cmux-tui/crates/cmux-tui-core/src, *.rs, no tests/ directory, no *_tests.rs: every `ghostty_vt::` (the Q15 query) and every parser lock: `.term.lock(`, `.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`, and each call of a parser accessor (a function whose signature hands a closure the Terminal, found in the scanned code, or the item of an `accessor` row): `with_terminal(`, `try_with_terminal(`, `try_with_hot_terminal(`, `with_terminal_stream_update(`, `discard_unreplayable_replay_with(`",
+ "scope": "cmux-tui/crates/cmux-tui-core/src, *.rs, no tests/ directory, no *_tests.rs: every `ghostty_vt::` (the Q15 query) and every parser lock: `.term.lock(`, `.term.try_lock(`, `.term.slot.lock(`, `.term.slot.try_lock(`, every read of a terminal's input modes: `.input_modes(`, `.input_modes.load(`, `.key_encoder(`, and each call of a parser accessor (a function whose signature hands a closure the Terminal, found in the scanned code, or the item of an `accessor` row): `with_terminal(`, `try_with_terminal(`, `try_with_hot_terminal(`, `with_terminal_stream_update(`, `discard_unreplayable_replay_with(`",
  "classes": {
   "page": "reads a value the VT worker publishes in its seqlock screen page; no hop, safe on the key path (tasks 133, 209)",
   "async": "reads parser state too large or too rare for the page (replays, snapshots, history, Kitty images); with process workers an asynchronous request to the shard owner, never on a key path (task 135)",
@@ -24,6 +24,7 @@
   "modes.mouse": "mouse tracking and format and the pointer semantic snapshot: what MouseEncoders::sync_from_terminal reads",
   "modes.bracketed_paste": "DECSET 2004",
   "modes.focus_reporting": "DECSET 1004",
+  "modes.input_word": "the InputModes word (InputModes::to_word): every mode above, published in one atomic word after each parse under the terminal lock, or from the VT worker page header (PageReader::read_modes); key, paste, focus and mouse encoders load it with no lock (task 209)",
   "metadata.osc_progress": "OSC 9;4 progress state the parser callbacks set; published in the same seqlock generation as screen.cells, so a reader gets text and progress from one parse cut"
  },
  "sites": [
@@ -85,15 +86,6 @@
    "reason": "the OSC 7501 parser callback; it runs on the parse and becomes a worker event"
   },
   {
-   "file": "prompt_mode_reset.rs",
-   "item": "use",
-   "symbols": [
-    "{Screen,Terminal}"
-   ],
-   "class": "in-worker",
-   "reason": "write_output feeds the parser and resets modes at OSC 133 marks: part of the byte feed"
-  },
-  {
    "file": "server.rs",
    "item": "use",
    "symbols": [
@@ -148,10 +140,10 @@
    "file": "surface.rs",
    "item": "use",
    "symbols": [
-    "{Callbacks,ClearHistoryOutcome,CursorShape,Dirty,KeyEncoder,KeyInput,KittyGraphicsLimits,KittyReplayState,MouseEncoders,MouseInput,RenderFrame,RenderState,Rgb,Screen,Scrollbar,Terminal,TerminalColorOverrides,TerminalPointerSemanticSnapshot,TrackedScreenPoint}"
+    "{Callbacks,ClearHistoryOutcome,CursorShape,Dirty,InputModes,KeyEncoder,KeyInput,KittyGraphicsLimits,KittyReplayState,MouseEncoders,MouseInput,RenderFrame,RenderState,Rgb,Screen,Scrollbar,Terminal,TerminalColorOverrides,TerminalPointerSemanticSnapshot,TrackedScreenPoint}"
    ],
    "class": "in-worker",
-   "reason": "Callbacks, Terminal, RenderState and the encoders are the PtySurface parser and its frame state; the value types (CursorShape, Rgb, Scrollbar, KittyReplayState) are dead"
+   "reason": "Callbacks, Terminal, RenderState and the encoders are the PtySurface parser and its frame state; the value types (CursorShape, Rgb, Scrollbar, KittyReplayState) are dead; InputModes and KeyEncoder encode the clear-history fallback key from the published modes"
   },
   {
    "file": "surface.rs",
@@ -464,14 +456,15 @@
    "file": "resource_router/content.rs",
    "item": "use",
    "symbols": [
-    "{KeyEncoder,Mods,MouseAction,MouseButton,MouseInput,key_input_from_chord}"
+    "{InputModes,Mods,MouseAction,MouseButton,MouseInput,key_input_from_chord}"
    ],
    "class": "page",
    "field": [
-    "modes.keyboard",
+    "modes.input_word",
+    "modes.focus_reporting",
     "modes.mouse"
    ],
-   "reason": "KeyEncoder for terminal.input.keys and the mouse types for terminal.input.mouse (Surface::encode_mouse, page modes.mouse); key_input_from_chord and Mods are value conversions"
+   "reason": "InputModes for terminal.input.focus (DECSET 1004 from the published word) and the mouse types for terminal.input.mouse (Surface::encode_mouse, page modes.mouse); key_input_from_chord and Mods are value conversions"
   },
   {
    "file": "resource_router/content.rs",
@@ -519,26 +512,6 @@
   },
   {
    "file": "resource_router/content.rs",
-   "item": "fn terminal_keys",
-   "symbols": [
-    "try_with_terminal()"
-   ],
-   "class": "page",
-   "field": "modes.keyboard",
-   "reason": "terminal.input.keys: the key encoder syncs from the terminal modes; key encoding never hops (task 209)"
-  },
-  {
-   "file": "resource_router/content.rs",
-   "item": "fn terminal_focus",
-   "symbols": [
-    "try_with_terminal()"
-   ],
-   "class": "page",
-   "field": "modes.focus_reporting",
-   "reason": "terminal.input.focus: DECSET 1004 decides whether focus is reported"
-  },
-  {
-   "file": "resource_router/content.rs",
    "item": "mod tests > fn terminal_reads_match_catalog_shapes_and_preserve_argv_boundaries",
    "symbols": [
     "try_with_terminal()"
@@ -554,6 +527,32 @@
    ],
    "class": "dead",
    "reason": "test code"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_keys",
+   "symbols": [
+    "key_encoder()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.input_word",
+    "modes.keyboard"
+   ],
+   "reason": "terminal.input.keys: a KeyEncoder set from the published InputModes word; no terminal lock, no worker request (task 209)"
+  },
+  {
+   "file": "resource_router/content.rs",
+   "item": "fn terminal_focus",
+   "symbols": [
+    "input_modes()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.input_word",
+    "modes.focus_reporting"
+   ],
+   "reason": "terminal.input.focus: DECSET 1004 from the published InputModes word (task 209)"
   },
   {
    "file": "resource_router/session.rs",
@@ -581,16 +580,6 @@
    ],
    "class": "dead",
    "reason": "the clipboard-read broker gets OSC 52 read requests that crossed from the parser callback; the location and size cap are values"
-  },
-  {
-   "file": "server/cmd_terminal_io.rs",
-   "item": "use",
-   "symbols": [
-    "KeyEncoder"
-   ],
-   "class": "page",
-   "field": "modes.keyboard",
-   "reason": "send_key syncs a KeyEncoder from the terminal modes"
   },
   {
    "file": "server/cmd_terminal_io.rs",
@@ -651,16 +640,6 @@
   },
   {
    "file": "server/cmd_terminal_io.rs",
-   "item": "fn send_key",
-   "symbols": [
-    "try_with_terminal()"
-   ],
-   "class": "page",
-   "field": "modes.keyboard",
-   "reason": "send-key: the KeyEncoder syncs from the terminal modes (scroll_to_bottom before it is surface/scrolling.rs)"
-  },
-  {
-   "file": "server/cmd_terminal_io.rs",
    "item": "fn copy",
    "symbols": [
     "try_with_terminal()"
@@ -679,6 +658,19 @@
    ],
    "class": "dead",
    "reason": "parses a cursor style argument; the colors reach parsers through Surface::set_default_colors (in-worker)"
+  },
+  {
+   "file": "server/cmd_terminal_io.rs",
+   "item": "fn send_key",
+   "symbols": [
+    "key_encoder()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.input_word",
+    "modes.keyboard"
+   ],
+   "reason": "send-key: a KeyEncoder set from the published InputModes word (scroll_to_bottom before it is surface/scrolling.rs); no terminal lock (task 209)"
   },
   {
    "file": "server/connection_frame.rs",
@@ -928,10 +920,11 @@
    "file": "surface/clear_history.rs",
    "item": "impl Surface > fn clear_history_in_terminal",
    "symbols": [
-    "term.lock()"
+    "term.lock()",
+    "input_modes.load()"
    ],
    "class": "in-worker",
-   "reason": "Command-K: clears history in the parser or encodes the fallback key; the transition runs where the parser runs"
+   "reason": "Command-K: clears history in the parser or encodes the fallback key (from the published InputModes word, page modes.input_word); the transition runs where the parser runs"
   },
   {
    "file": "surface/clipboard_read.rs",
@@ -1017,16 +1010,6 @@
    "reason": "carries host frames"
   },
   {
-   "file": "surface/input.rs",
-   "item": "impl Surface > fn write_paste_with_timeout",
-   "symbols": [
-    "term.lock()"
-   ],
-   "class": "page",
-   "field": "modes.bracketed_paste",
-   "reason": "paste: DECSET 2004 decides the bracketed-paste wrap"
-  },
-  {
    "file": "surface/kitty_pixels.rs",
    "item": "impl Surface > fn write_rendered_output_for_test",
    "symbols": [
@@ -1077,20 +1060,26 @@
    "file": "surface/mouse_input.rs",
    "item": "impl Surface > fn encode_mouse_if_semantics",
    "symbols": [
-    "term.try_lock()"
+    "term.try_lock()",
+    "input_modes.load()"
    ],
    "class": "page",
-   "field": "modes.mouse",
+   "field": [
+    "modes.input_word",
+    "modes.mouse"
+   ],
    "reason": "mouse input guarded by the pointer semantic snapshot the frontend saw"
   },
   {
    "file": "surface/mouse_input.rs",
    "item": "impl Surface > fn encode_mouse_if_snapshot",
    "symbols": [
-    "term.try_lock()"
+    "term.try_lock()",
+    "input_modes.load()"
    ],
    "class": "page",
    "field": [
+    "modes.input_word",
     "modes.mouse",
     "screen.generation"
    ],
@@ -1120,24 +1109,43 @@
    "file": "surface/mouse_input.rs",
    "item": "impl Surface > fn encode_mouse_press_pair_if_semantics",
    "symbols": [
-    "term.try_lock()"
+    "term.try_lock()",
+    "input_modes.load()"
    ],
    "class": "page",
-   "field": "modes.mouse",
+   "field": [
+    "modes.input_word",
+    "modes.mouse"
+   ],
    "reason": "mouse input guarded by the pointer semantic snapshot the frontend saw"
   },
   {
    "file": "surface/mouse_input.rs",
    "item": "impl Surface > fn encode_mouse_press_pair_if_snapshot",
    "symbols": [
-    "term.try_lock()"
+    "term.try_lock()",
+    "input_modes.load()"
    ],
    "class": "page",
    "field": [
+    "modes.input_word",
     "modes.mouse",
     "screen.generation"
    ],
    "reason": "mouse input guarded by the pointer semantics and content generation the frontend saw"
+  },
+  {
+   "file": "surface/mouse_input.rs",
+   "item": "impl PtySurface > fn synced_mouse_encoders",
+   "symbols": [
+    "input_modes.load()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.input_word",
+    "modes.mouse"
+   ],
+   "reason": "mouse input: the MouseEncoders set from the published InputModes word (task 209)"
   },
   {
    "file": "surface/pty_surface.rs",
@@ -1788,7 +1796,8 @@
    "file": "terminal_host_runtime/shared/host_shared.rs",
    "item": "impl HostShared > fn apply_parser_clear_history",
    "symbols": [
-    "term.lock()"
+    "term.lock()",
+    "input_modes()"
    ],
    "class": "in-worker",
    "reason": "runs in the __terminal-host process beside that host's own parser, not in the daemon; holder terminals retire the host (task 120) and cmux-vt-worker takes over its parser loop"
@@ -1874,6 +1883,70 @@
    ],
    "class": "dead",
    "reason": "test code"
+  },
+  {
+   "file": "surface/input.rs",
+   "item": "impl Surface > fn write_paste_in",
+   "symbols": [
+    "input_modes.load()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.input_word",
+    "modes.bracketed_paste"
+   ],
+   "reason": "paste: DECSET 2004 from the published InputModes word decides the bracketed-paste wrap (task 209)"
+  },
+  {
+   "file": "surface/input_modes.rs",
+   "item": "use",
+   "symbols": [
+    "{InputModes,KeyEncoder,MouseEncoders,Terminal}"
+   ],
+   "class": "in-worker",
+   "reason": "Terminal for sync_input_modes and new_input_encoders, which run where the parser runs; InputModes, KeyEncoder and MouseEncoders are the page side (page modes.input_word)"
+  },
+  {
+   "file": "surface/input_modes.rs",
+   "item": "impl PtySurface > fn sync_input_modes",
+   "symbols": [
+    "input_modes()"
+   ],
+   "class": "in-worker",
+   "reason": "publishes the parser's modes into the word after each change, under the terminal lock; with process workers the worker writes them into its page header"
+  },
+  {
+   "file": "surface/input_modes.rs",
+   "item": "fn new_input_encoders",
+   "symbols": [
+    "Result",
+    "input_modes()"
+   ],
+   "class": "in-worker",
+   "reason": "a terminal being built: its first modes and mouse encoders from the parser that is constructing it"
+  },
+  {
+   "file": "surface/input_modes.rs",
+   "item": "impl Surface > fn input_modes",
+   "symbols": [
+    "input_modes.load()"
+   ],
+   "class": "page",
+   "field": "modes.input_word",
+   "reason": "the published InputModes word: one atomic load, no terminal lock (task 209)"
+  },
+  {
+   "file": "surface/input_modes.rs",
+   "item": "impl Surface > fn key_encoder",
+   "symbols": [
+    "input_modes()"
+   ],
+   "class": "page",
+   "field": [
+    "modes.input_word",
+    "modes.keyboard"
+   ],
+   "reason": "a KeyEncoder set from the published InputModes word (task 209)"
   }
  ]
 }

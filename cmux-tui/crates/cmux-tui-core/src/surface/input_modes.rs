@@ -2,10 +2,13 @@
 //!
 //! Key, mouse, paste and focus encoders read the modes from one atomic word
 //! and never take the terminal lock or ask a parser (p01-process-209). The
-//! parser that owns the terminal publishes after every change: the daemon's
-//! own parser under its terminal lock ([`Surface`]'s `sync_input_modes`), or,
-//! with `CMUX_TUI_VT_WORKERS=process`, the screen page a VT worker writes
-//! ([`TerminalInputModes::publish_from_page`], read with seqlock retry).
+//! parser that owns the terminal publishes after every change: today the
+//! daemon's own parser under its terminal lock ([`Surface`]'s
+//! `sync_input_modes`). The VT worker broker (p01-process-134, not built yet)
+//! will publish the screen page a worker writes through
+//! [`TerminalInputModes::publish_from_page`] (read with seqlock retry); that
+//! task owns the `debug.vt` counter `worker_requests_on_key` and the key and
+//! mouse suites with `CMUX_TUI_VT_WORKERS=process`.
 //! Chromium keeps the same split: the browser routes and encodes input from
 //! state it already has and never waits on a renderer
 //! (`content/browser/renderer_host/input/input_router_impl.cc`).
@@ -48,7 +51,7 @@ impl TerminalInputModes {
         not(test),
         expect(
             dead_code,
-            reason = "the VT worker broker calls it once it maps pages (p01-process-135)"
+            reason = "the VT worker broker calls it once it maps pages (p01-process-134)"
         )
     )]
     pub(crate) fn publish_from_page(&self, page: &PageReader) -> Result<InputModes, PageError> {
@@ -71,12 +74,12 @@ impl PtySurface {
 
 impl Surface {
     /// The terminal's published input modes; `None` for a browser surface.
-    pub(crate) fn input_modes(&self) -> Option<InputModes> {
+    pub fn input_modes(&self) -> Option<InputModes> {
         Some(self.as_pty()?.input_modes.load())
     }
 
     /// A key encoder set from the published modes (no terminal lock).
-    pub(crate) fn key_encoder(&self) -> anyhow::Result<KeyEncoder> {
+    pub fn key_encoder(&self) -> anyhow::Result<KeyEncoder> {
         let modes =
             self.input_modes().ok_or_else(|| anyhow::anyhow!("surface is not a terminal"))?;
         let mut encoder = KeyEncoder::new()?;

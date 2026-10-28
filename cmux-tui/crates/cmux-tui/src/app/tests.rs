@@ -6,6 +6,7 @@
 mod deferred_input;
 mod graphics_pointer;
 mod host_input;
+mod key_encoding;
 mod machine_sidebar;
 mod menus_browser;
 mod mux_recovery;
