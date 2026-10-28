@@ -186,7 +186,9 @@ class Stress:
         params = {"action": name, "args": args or {}, "focus": focus, "origin": "script"}
         if target:
             params["target"] = target
+        t0 = time.monotonic()
         reply = self.rpc("action.run", params, timeout=timeout)
+        self.diag_replies = (getattr(self, "diag_replies", []) + [{"action": name, "target": target, "secs": round(time.monotonic() - t0, 2), "reply": str(reply)[:400]}])[-8:]
         if isinstance(reply, dict) and reply.get("error"):
             self.refusals.append(f"{name}: {str(reply['error'])[:160]}")
         if settle:
@@ -280,6 +282,12 @@ class Stress:
                 fallback = True
                 self.action("newTab.page", target=target)
         appeared = wait(lambda: len(self.tabs(workspace_id, pane_id)) > count, 20, step=0.1)
+        if not appeared or kind == "chat":
+            self.diag(f"after {kind} (appeared={bool(appeared)})", workspace_id, pane_id, tab_target)
+        if not appeared and kind == "terminal":
+            later = wait(lambda: len(self.tabs(workspace_id, pane_id)) > count, 40, step=0.5)
+            self.diag(f"terminal 40 s later (appeared={bool(later)})", workspace_id, pane_id, tab_target)
+            return
         if not appeared and kind in ("terminal", "chromium", "webkit"):
             # No silent go-on: a run that measures a pane without the tab it asked for measures the wrong
             # pane (the Command-pan bench over Chromium measured a terminal, 2026-10-24). A chat may still
@@ -287,6 +295,17 @@ class Stress:
             raise RuntimeError(f"{kind} tab did not appear in {pane_id} in 20 s (refusals: {self.refusals[-3:]})")
         new = [t.get("id") for t in self.tabs(workspace_id, pane_id) if t.get("id") not in before]
         self.made.setdefault(pane_id, []).append((kind, new[0] if len(new) == 1 else None, fallback))
+
+    def diag(self, label, workspace_id, pane_id, tab_target):
+        topology = self.topology()
+        tabs_of = lambda w: [(p.get("id", "")[:13], [(t.get("kind"), (t.get("id") or "")[:12], bool(t.get("selected"))) for t in p.get("tabs") or []]) for s in (w or {}).get("screens") or [] for p in s.get("panes") or []]
+        ws = next((w for w in topology.get("workspaces") or [] if w.get("id") == workspace_id), None)
+        all_terms = sum(1 for w in topology.get("workspaces") or [] for s in w.get("screens") or [] for p in s.get("panes") or [] for t in p.get("tabs") or [] if t.get("kind") == "terminal")
+        record = {"label": label, "pane": pane_id, "tab_target": tab_target, "replies": getattr(self, "diag_replies", []),
+                  "pane_tabs": [(t.get("kind"), (t.get("id") or "")[:12], bool(t.get("selected"))) for t in self.tabs(workspace_id, pane_id)],
+                  "workspace_panes": tabs_of(ws), "workspaces": len(topology.get("workspaces") or []), "terminal_tabs_everywhere": all_terms,
+                  "focus": topology.get("focus"), "windows": [(w.get("key"), w.get("workspace"), w.get("focused_pane")) for w in topology.get("windows") or []]}
+        self.log("STRESS-DIAG " + json.dumps(record, default=str)[:6000])
 
     def send(self, tab_id, text):
         self.action("terminal.sendText", {"text": text}, target=f"tab:{tab_id}", focus=False)
