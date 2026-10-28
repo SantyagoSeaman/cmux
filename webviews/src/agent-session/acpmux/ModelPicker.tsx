@@ -39,6 +39,7 @@ import {
 } from "../../ui/PickerPrimitives";
 import { ScrollArea } from "../../ui/ScrollArea";
 import { FastToggle } from "./FastToggle";
+import { quantizePickerRail } from "./pickerRailGeometry";
 
 type HarnessChoice = {
   id: string;
@@ -572,6 +573,32 @@ export function ModelPicker(props: ModelPickerProps) {
     const node = menu.current;
     if (node) setOpenHeight(Math.ceil(node.getBoundingClientRect().height));
   }, [menuStyle.visibility, open, openHeight]);
+  // Quantize the narrow horizontal harness rail to complete cells. A fractional viewport
+  // leaves the browser's maximum scroll position between snap points, which would expose a
+  // clipped mark at the far edge. Measure the stable menu container, never the width we set,
+  // and leave fitting rails untouched.
+  useLayoutEffect(() => {
+    if (!open || menuStyle.visibility !== "visible") return;
+    const rail = menu.current?.querySelector<HTMLElement>(".acpmux-mp-rail-scroll");
+    const container = rail?.parentElement;
+    const viewport = rail?.querySelector<HTMLElement>(".acpmux-mp-rail-viewport");
+    const list = rail?.querySelector<HTMLElement>(".acpmux-mp-rail-list");
+    if (!rail || !container || !viewport || !list) return;
+    const quantize = () => {
+      quantizePickerRail(rail, container, viewport, globalThis.matchMedia("(max-width: 407px)").matches);
+    };
+    quantize();
+    const observer = new ResizeObserver(quantize);
+    observer.observe(container);
+    observer.observe(list);
+    const media = globalThis.matchMedia("(max-width: 407px)");
+    media.addEventListener("change", quantize);
+    return () => {
+      observer.disconnect();
+      media.removeEventListener("change", quantize);
+      rail.style.removeProperty("width");
+    };
+  }, [menuStyle.visibility, open, harnessFixed, railHarnesses.length]);
   const close = useCallback(
     (focus = true) => {
       restoreFocus.current = focus;
