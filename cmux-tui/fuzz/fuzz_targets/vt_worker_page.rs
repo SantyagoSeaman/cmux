@@ -80,12 +80,13 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(&again, screen, "a screen changes when re-encoded");
     }
 
-    // The writer stores whole words and owns the sequence word.
+    // The writer owns the sequence word. The image fills the whole page, so
+    // no byte of an earlier input stays in the mapping and the mapped read
+    // must decode exactly as `decode` does.
     let mut image = data.to_vec();
-    image.resize(image.len().next_multiple_of(8), 0);
-    if let Some(seq) = image.get_mut(8..16) {
-        seq.fill(0);
-    }
+    image.truncate(PAGE_BYTES);
+    image.resize(PAGE_BYTES, 0);
+    image[8..16].fill(0);
     let mut page = page().lock().expect("page");
     let Page { writer, reader, guard } = &mut *page;
     writer.publish(&image);
