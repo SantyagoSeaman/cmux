@@ -78,7 +78,37 @@ test("New Tab exposes the chat composer attachment menu", async () => {
   const add = container.querySelector<HTMLButtonElement>(".nt-pickers .acpmux-newtab-plus .acpmux-picker-button");
   expect(add).toBeTruthy();
   await act(async () => add!.click());
-  expect(container.querySelector('.acpmux-newtab-plus [data-value="attach"]')).toBeTruthy();
+  expect(container.querySelector('.acpmux-newtab-plus [data-value="add.files"]')).toBeTruthy();
+});
+
+test("New Tab uses the native catalog row and the same action dispatcher as chat", async () => {
+  const actions: string[] = [];
+  await act(async () => {
+    root!.render(
+      <NewTabScreen
+        snapshot={noChat()}
+        onAsk={() => {}}
+        onOpen={() => {}}
+        onSearch={() => {}}
+        onShell={() => {}}
+        onJump={() => {}}
+        onOpenSession={() => {}}
+        onShowAll={() => {}}
+        plusExtensions={[{
+          id: "openBrowser", section: "tools", name: "New Browser Tab",
+          description: "Open a browser tab", icon: "browser", keywords: ["browser"],
+          action: { kind: "command", id: "openBrowser" },
+        }]}
+        onPaletteAction={(id) => actions.push(id)}
+      />,
+    );
+  });
+  const add = container.querySelector<HTMLButtonElement>(".nt-pickers .acpmux-newtab-plus .acpmux-picker-button")!;
+  await act(async () => add.click());
+  const row = container.querySelector<HTMLElement>('.acpmux-newtab-plus [data-value="openBrowser"]')!;
+  expect(row.textContent).toContain("New Browser Tab");
+  await act(async () => row.dispatchEvent(new dom!.window.MouseEvent("mousedown", { bubbles: true, cancelable: true })));
+  expect(actions).toEqual(["openBrowser"]);
 });
 
 test("a chosen document uses the New Tab upload path and becomes sendable", async () => {

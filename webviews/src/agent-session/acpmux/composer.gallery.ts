@@ -1552,13 +1552,23 @@ export default agentPaneEntry({
       },
     },
     "add-menu": {
+      native: {
+        "action.composerList": { actions: [
+          { id: "openBrowser", section: "tools", name: "New Browser Tab", description: "Open a browser tab", icon: "globe" },
+          { id: "newSurface", section: "tools", name: "New Terminal", description: "Open a terminal tab", icon: "terminal" },
+          { id: "app.command.run", section: "apps", name: "Run App Command", description: "Choose an app command", icon: "square.grid.2x2" },
+          { id: "search.chats", section: "sessions", name: "Search Chats", description: "Find a recent conversation", icon: "bubble.left" },
+          { id: "tab.search", section: "tabs", name: "Search Tabs", description: "Find an open tab", icon: "square.on.square" },
+        ] },
+      },
+
       note: "Play: open +; Attach files or images comes first and opens the file chooser, and the menu rises out of +.",
       snapshot: chat(finished, {
         commands: [{ name: "compact", description: "Clear conversation history but keep a summary in context" }],
       }),
       play: async (ctx) => {
         await ctx.click({ selector: ".acpmux-composer-plus .acpmux-picker-button" });
-        await ctx.waitFor(() => ctx.document.querySelector('.acpmux-composer-plus [data-value="add.files"]'));
+        await ctx.waitFor(() => ctx.document.querySelector('.acpmux-composer-plus [data-value="search.chats"]'));
       },
     },
     // cx-ncc.71 (Codex parity): + > Attach Screenshot… and Attach Window… take a capture through the

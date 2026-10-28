@@ -456,6 +456,21 @@ final class AgentTabStore {
         model.onEditNewTab = { [weak self] edit in self?.pageHandler(provisional)?.edit(edit) }
         model.onJump = { [weak self] target, id in self?.newTabPage(provisional)?.handler.jump(target, id) }
         model.onEditShortcut = { [weak self] kind in self?.newTabPage(provisional)?.handler.editShortcut(kind) }
+        model.onListComposerActions = { [weak self] in
+            guard let registry = self?.actionRegistry else { return [] }
+            let rows: [(String, String)] = [
+                ("openBrowser", "tools"), ("computerUseFocus", "tools"),
+                ("palette.openCloudPane", "tools"), ("newSurface", "tools"),
+                ("app.command.run", "apps"), ("openSettings", "apps"),
+                ("search.chats", "sessions"), ("tab.search", "tabs"),
+            ]
+            return rows.compactMap { id, section in
+                let action = ActionID(rawValue: id)
+                guard registry.canPerform(action), let descriptor = registry.descriptor(for: action) else { return nil }
+                return ["id": id, "section": section, "name": descriptor.title,
+                        "description": descriptor.description ?? descriptor.title, "icon": descriptor.symbol]
+            }
+        }
         model.onRunAction = { [weak self] id, arguments in
             guard let self else { return false }
             // On this tab's pane: the New Tab page opens beside the tab that asked.
