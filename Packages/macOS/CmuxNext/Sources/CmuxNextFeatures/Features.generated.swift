@@ -69,7 +69,7 @@ nonisolated extension Feature {
         kind: .perfPath,
         process: .app,
         chromiumFeature: nil,
-        defaults: FeatureDefaults(dev: false, nightly: false, release: false),
+        defaults: FeatureDefaults(dev: true, nightly: true, release: false),
         expires: "2026-12-20",
         params: [],
         stories: ["terminal-resize", "terminal-resize-stress"],
