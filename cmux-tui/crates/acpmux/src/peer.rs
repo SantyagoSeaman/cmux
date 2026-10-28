@@ -113,6 +113,8 @@ pub struct Peer {
     prompt_uploads: AtomicBool,
     /// The peer lists `uploadResume` (`hub/file_uploads.rs`).
     upload_resume: AtomicBool,
+    /// The peer lists `sessionAuth` (`hub/session_auth.rs`).
+    session_auth: AtomicBool,
     /// The peer token was held back: the transport is plain `ws://` to a
     /// host that is not loopback (`carries_peer_token`). Logged once.
     withheld: AtomicBool,
@@ -182,6 +184,7 @@ impl Peer {
             send_attach: AtomicBool::new(false),
             prompt_uploads: AtomicBool::new(false),
             upload_resume: AtomicBool::new(false),
+            session_auth: AtomicBool::new(false),
             withheld: AtomicBool::new(false),
             presented: StdMutex::new(None),
             admitting: AtomicBool::new(false),
@@ -476,6 +479,11 @@ impl Peer {
     /// finish's `sha256` (`hub/file_uploads.rs`).
     pub fn supports_upload_resume(&self) -> bool {
         self.upload_resume.load(Ordering::SeqCst)
+    }
+
+    /// Whether the peer said at its last handshake that it answers `_acpmux/session/auth`.
+    pub fn supports_session_auth(&self) -> bool {
+        self.session_auth.load(Ordering::SeqCst)
     }
 
     pub fn summary(&self) -> Value {
@@ -796,6 +804,8 @@ impl Peer {
             me.prompt_uploads.store(lists(crate::prompt_uploads::FEATURE), Ordering::SeqCst);
             let resume = lists(crate::hub::file_uploads::RESUME_FEATURE);
             me.upload_resume.store(resume, Ordering::SeqCst);
+            let auth = lists(crate::hub::session_auth::FEATURE);
+            me.session_auth.store(auth, Ordering::SeqCst);
             // The reader published the reply's list (`watch_key`), so Connected follows it.
             me.request(method::MUX_WATCH, json!({"enabled": true})).await?;
             me.with_link(|l| l.ready(crate::store::now_ms()));
