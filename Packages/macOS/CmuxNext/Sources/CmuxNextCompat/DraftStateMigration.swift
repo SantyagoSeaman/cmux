@@ -8,6 +8,7 @@ public enum DraftStateMigration {
         "agent-pane-wake-attachments",
         "agent-unsent-drafts.json",
         "agent-composer-drafts.json",
+        "agent-queued-edits.json",
     ]
 
     /// Copies each draft artifact from the newest prior build root. Existing destination
