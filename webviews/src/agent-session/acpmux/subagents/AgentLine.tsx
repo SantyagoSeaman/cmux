@@ -101,6 +101,7 @@ export function AgentLine({
       <span
         className={shimmer.className ? `acpmux-lineage__icon ${shimmer.className}` : "acpmux-lineage__icon"}
         style={shimmer.style}
+        data-alignment-column="left-icon"
         data-state={status}
       >
         {working ? (
@@ -119,7 +120,7 @@ export function AgentLine({
       {time !== undefined && <span className="acpmux-summary-meta acpmux-agent-line__time">{time}</span>}
       <span className="acpmux-summary-meta acpmux-summary-agent__state">{state}</span>
       {chevron && onOpen && (
-        <span className="acpmux-agent-line__chevron" aria-hidden="true">
+        <span className="acpmux-agent-line__chevron" data-alignment-column="right-action" aria-hidden="true">
           <Icon name="disclosure.collapsed" size={12} />
         </span>
       )}

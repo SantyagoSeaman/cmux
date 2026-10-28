@@ -167,6 +167,8 @@ export const SubagentTray = memo(function SubagentTray({
       data-open={open || undefined}
       data-placement={placement}
       data-look={look}
+      data-alignment-surface="tray"
+      data-alignment-inset="surface"
     >
       {headed && (
         <button
@@ -176,7 +178,7 @@ export const SubagentTray = memo(function SubagentTray({
           aria-controls={open ? listId : undefined}
           onClick={() => setOpened(!open)}
         >
-          <span className="acpmux-lineage__icon" data-state="running">
+          <span className="acpmux-lineage__icon" data-alignment-column="left-icon" data-state="running">
             <Icon name="agent.session" size={14} />
           </span>
           <span className="acpmux-summary-text acpmux-running-tray__title">{title}</span>
@@ -185,7 +187,7 @@ export const SubagentTray = memo(function SubagentTray({
               {formatDuration(Math.max(0, now - Math.min(...starts)))}
             </span>
           )}
-          <Icon name={open ? "disclosure.expanded" : "disclosure.collapsed"} size={12} />
+          <span className="acpmux-running-tray__right-action" data-alignment-column="right-action" aria-hidden="true"><Icon name={open ? "disclosure.expanded" : "disclosure.collapsed"} size={12} /></span>
         </button>
       )}
       {open && (
