@@ -364,7 +364,7 @@ public final class AgentPageProvider: PageProvider {
             return .object(["ok": .bool(true)])
         }
         if method.hasPrefix("chat.draftAttachments") { return try await Self.draftAttachments(method, params: params, op: op) }
-        if method.hasPrefix("chat.queuedEditDrafts") { return try await Self.queuedEdits(method, params: params, op: op) }
+        if AgentPaneQueuedEdits.methods.contains(method) { return try await Self.queuedEdits(method, params: params, op: op) }
         if method.hasPrefix("chat.draftText") { return try Self.draftText(method, params: params, op: op) }
         let request = AgentPaneRequest(body: ["method": method, "params": params.foundationObject])
         if case .unsupported = request { throw PageError.invalidParams(op) }

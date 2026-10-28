@@ -8,6 +8,7 @@ public import Foundation
 @MainActor
 public final class AgentPaneQueuedEdits {
     public static let fileName = "agent-queued-edits.json"
+    static let methods: Set<String> = ["chat.queuedEditDrafts.get", "chat.queuedEditDrafts.set", "chat.queuedEditDrafts.clear"]
     private let file: URL?
     private let background: BackgroundWork
     private var tail: Task<Void, Never>?

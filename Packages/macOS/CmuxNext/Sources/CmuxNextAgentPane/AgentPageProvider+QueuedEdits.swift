@@ -18,3 +18,15 @@ extension AgentPageProvider {
         return .null
     }
 }
+
+
+extension AgentPaneBridge {
+    static func queuedEditReply(_ method: String, params: JSONValue) async -> [String: Any] {
+        do {
+            let value = try await AgentPageProvider.queuedEdits(method, params: params, op: method)
+            return AgentPaneReply.success(value.foundationObject)
+        } catch {
+            return AgentPaneReply.failure(code: "draft.storage_failed", message: "Could not save queued edit draft")
+        }
+    }
+}
