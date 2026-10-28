@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use cmux_threads::ThreadQos;
 use cmux_vt_worker::wire::{Command, Event, FrameReader, decode_event, send_command};
 
+use super::bad_message::{BAD_MESSAGE_REASON, BadMessage};
 use super::broker::BrokerMsg;
 
 /// Why a link ended.
@@ -22,14 +23,28 @@ use super::broker::BrokerMsg;
 pub enum LinkEnd {
     /// The worker closed its end: it exited or was killed.
     Closed,
-    /// The worker sent a frame the wire refuses, or an event out of turn.
-    BadFrame(String),
+    /// The worker sent a frame or an event that breaks a rule (task 141):
+    /// the broker ended it.
+    BadMessage(BadMessage),
     /// A read or write failed.
     Io(io::ErrorKind),
     /// The worker did not read its queue: the broker ended it.
     Hung,
     /// The worker sent no HELLO in time: the broker ended it.
     NoHello,
+}
+
+impl LinkEnd {
+    /// The reason the census and `debug.vt` give for the end.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::BadMessage(_) => BAD_MESSAGE_REASON,
+            Self::Io(_) => "io",
+            Self::Hung => "hung",
+            Self::NoHello => "no_hello",
+        }
+    }
 }
 
 /// What a link's threads tell the broker.
@@ -117,7 +132,9 @@ fn read_events(stream: &UnixStream, mut emit: impl FnMut(LinkEvent)) {
             match reader.next_frame().and_then(|frame| frame.map(decode_event).transpose()) {
                 Ok(Some(event)) => emit(LinkEvent::Event(event)),
                 Ok(None) => break,
-                Err(error) => return emit(LinkEvent::Ended(LinkEnd::BadFrame(error.to_string()))),
+                Err(error) => {
+                    return emit(LinkEvent::Ended(LinkEnd::BadMessage(BadMessage::Wire(error))));
+                }
             }
         }
         match reader.fill(fd) {

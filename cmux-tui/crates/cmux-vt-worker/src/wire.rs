@@ -44,7 +44,7 @@ pub const MAX_MEDIA_NAME: usize = 8 << 10;
 pub const MAX_MEDIA_BYTES: u64 = DEFAULT_MAX_FILE_BYTES;
 
 /// A frame that broke the wire's rules.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WireError {
     UnknownKind(u8),
     PayloadTooLarge(usize),

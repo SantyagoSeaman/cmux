@@ -4,6 +4,13 @@
 //! links' events and the host's media answers arrive on one queue and are
 //! handled in order. Relaunch backoffs and HELLO deadlines are the queue
 //! wait's deadline (the injected clock decides when one is due).
+//!
+//! Every event goes through its worker's [`WorkerOutputGuard`] before the
+//! broker acts on it, and every command the broker queues is recorded in
+//! it ([`WorkerOutputGuard::sent`]), so the guard judges the worker by
+//! exactly what it was told. A bad message, from an event or from a page
+//! read ([`PageChecker`]), ends the worker like a crash, with the cause
+//! [`LinkEnd::BadMessage`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -14,15 +21,18 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use cmux_threads::ThreadQos;
+use cmux_vt_worker::ring_view::RingView;
 use cmux_vt_worker::sandbox::SandboxMechanism;
-use cmux_vt_worker::screen_page::{MAX_PAGE_BYTES, create_page, page_len_for};
+use cmux_vt_worker::screen_page::{MAX_PAGE_BYTES, PageReader, create_page, page_len_for};
 use cmux_vt_worker::wire::{
     Attach, AttachFailure, Colors, Command, Event, Geometry, MAX_PROLOGUE, MediaAnswer,
-    WIRE_VERSION,
 };
 use ghostty_vt::KittyGraphicsLimits;
 
 use super::answers::{AnswerRejected, QueryAnswer};
+use super::bad_message::{
+    BadMessage, Checked, HelloExpectation, RingOffsets, WorkerOutputGuard, event_terminal,
+};
 use super::host::{
     BrokerClock, BrokerConfig, HandBack, ScreenPage, VtTerminalKey, VtTerminalSpec, VtWorkerHost,
     WorkerLifecycle, WorkerSandbox,
@@ -40,18 +50,32 @@ pub struct MediaReply {
     shard: usize,
     generation: u64,
     terminal: VtTerminalKey,
+    /// The attachment that asked: an answer for an earlier one is dropped.
+    wire: u64,
 }
 
 impl MediaReply {
     pub fn send(self, answer: MediaAnswer) {
-        let Self { events, shard, generation, terminal } = self;
-        let _ = events.send(BrokerMsg::KittyMedia { shard, generation, terminal, answer });
+        let Self { events, shard, generation, terminal, wire } = self;
+        let _ = events.send(BrokerMsg::KittyMedia { shard, generation, terminal, wire, answer });
     }
 }
 
-/// Pending answer bytes of one terminal past which its worker is a bad
-/// message: a parse slice of queries answers with far less.
-const MAX_PENDING_ANSWER_BYTES: usize = 1 << 20;
+/// Reports, from any thread, a terminal whose screen page broke a rule when
+/// it was read (task 135's screen reads). The broker reads the page again
+/// under the terminal's current attachment and ends its worker with a bad
+/// message when it is still bad, so a report that crossed a reseed never
+/// ends the successor.
+#[derive(Clone)]
+pub struct PageChecker {
+    events: Sender<BrokerMsg>,
+}
+
+impl PageChecker {
+    pub fn check(&self, terminal: VtTerminalKey) {
+        let _ = self.events.send(BrokerMsg::CheckPage(terminal));
+    }
+}
 
 pub(super) enum BrokerMsg {
     Attach(Box<VtTerminalSpec>),
@@ -60,8 +84,19 @@ pub(super) enum BrokerMsg {
     Colors(VtTerminalKey, Box<Colors>),
     KittyLimits(VtTerminalKey, KittyGraphicsLimits),
     Detach(VtTerminalKey),
-    KittyMedia { shard: usize, generation: u64, terminal: VtTerminalKey, answer: MediaAnswer },
-    Link { shard: usize, generation: u64, event: LinkEvent },
+    CheckPage(VtTerminalKey),
+    KittyMedia {
+        shard: usize,
+        generation: u64,
+        terminal: VtTerminalKey,
+        wire: u64,
+        answer: MediaAnswer,
+    },
+    Link {
+        shard: usize,
+        generation: u64,
+        event: LinkEvent,
+    },
     Shutdown,
 }
 
@@ -112,6 +147,11 @@ impl VtWorkerBroker {
     pub fn detach(&self, terminal: VtTerminalKey) {
         let _ = self.events.send(BrokerMsg::Detach(terminal));
     }
+
+    /// A handle for the threads that read screen pages.
+    pub fn page_checker(&self) -> PageChecker {
+        PageChecker { events: self.events.clone() }
+    }
 }
 
 impl Drop for VtWorkerBroker {
@@ -129,6 +169,9 @@ struct Terminal {
     shard: usize,
     geometry: Geometry,
     ring: Arc<OwnedFd>,
+    /// The ring mapped read-only: the daemon's own reading of its header
+    /// bounds the worker's laps and screens (`None` when it does not map).
+    ring_view: Option<RingView>,
     ring_capacity: u64,
     scrollback: u64,
     kitty_limits: KittyGraphicsLimits,
@@ -145,6 +188,9 @@ struct Terminal {
     confirmed: u64,
     /// The current worker has the terminal's ATTACH.
     attached: bool,
+    /// The wire id of that ATTACH ([`WorkerOutputGuard::attach`]): every
+    /// command for the attachment carries it, and its events name it.
+    wire: u64,
     /// The current worker reported a parse since the ATTACH (its prologue
     /// is parsed).
     first_parsed: bool,
@@ -154,7 +200,6 @@ struct Terminal {
     /// Validated answers waiting for the PARSED that says which output
     /// made them (a worker sends a slice's answers before its PARSED).
     answers: Vec<Vec<u8>>,
-    answer_bytes: usize,
     /// Worker deaths while this terminal's parse was in flight.
     strikes: StrikeLog,
     /// How the next worker seeds it.
@@ -172,6 +217,10 @@ impl Terminal {
 struct Worker {
     link: Link,
     process: Box<dyn WorkerProcess>,
+    /// Checks every event against the commands sent (task 141).
+    guard: WorkerOutputGuard,
+    /// The live attachments: wire id to terminal.
+    wires: BTreeMap<u64, VtTerminalKey>,
     /// HELLO arrived and passed: commands other than BOOTSTRAP may go.
     ready: bool,
     hello_by: Instant,
@@ -271,8 +320,9 @@ impl Broker {
             BrokerMsg::Colors(key, colors) => self.set_colors(key, *colors),
             BrokerMsg::KittyLimits(key, limits) => self.set_kitty_limits(key, limits),
             BrokerMsg::Detach(key) => self.detach(key),
-            BrokerMsg::KittyMedia { shard, generation, terminal, answer } => {
-                self.media_answer(shard, generation, terminal, answer);
+            BrokerMsg::CheckPage(key) => self.check_page(key),
+            BrokerMsg::KittyMedia { shard, generation, terminal, wire, answer } => {
+                self.media_answer(shard, generation, (terminal, wire), answer);
             }
             BrokerMsg::Link { shard, generation, event } => {
                 self.link_event(shard, generation, event);
@@ -335,10 +385,16 @@ impl Broker {
             }
         };
         self.host.screen_page(key, &page);
+        let ring_view = spec
+            .ring
+            .try_clone()
+            .ok()
+            .and_then(|ring| RingView::open(ring, spec.ring_capacity).ok());
         let terminal = Terminal {
             shard,
             geometry: spec.geometry,
             ring: Arc::new(spec.ring),
+            ring_view,
             ring_capacity: spec.ring_capacity,
             scrollback: spec.scrollback,
             kitty_limits: spec.kitty_limits,
@@ -349,10 +405,10 @@ impl Broker {
             parsed: 0,
             confirmed: spec.answered,
             attached: false,
+            wire: 0,
             first_parsed: false,
             answer_floor: spec.answered,
             answers: Vec::new(),
-            answer_bytes: 0,
             strikes: StrikeLog::default(),
             next_seed: ReseedMode::Full,
         };
@@ -394,31 +450,31 @@ impl Broker {
             return;
         }
         terminal.sent = terminal.end;
-        let (shard, end) = (terminal.shard, terminal.end);
-        self.send(shard, Command::Advance { id: key.0, end });
+        let (shard, id, end) = (terminal.shard, terminal.wire, terminal.end);
+        self.send(shard, Command::Advance { id, end });
     }
 
     fn resize(&mut self, key: VtTerminalKey, geometry: Geometry) {
         let Some(terminal) = self.terminals.get_mut(&key) else { return };
         terminal.geometry = geometry;
-        let (shard, attached) = (terminal.shard, terminal.attached);
+        let (shard, attached, id) = (terminal.shard, terminal.attached, terminal.wire);
         let needed = page_len_for(geometry.cols, geometry.rows);
         let page = match self.grow_page(key, needed) {
             Ok(page) => page,
             Err(()) => return,
         };
         if attached {
-            self.send(shard, Command::Resize { id: key.0, geometry, page });
+            self.send(shard, Command::Resize { id, geometry, page });
         }
     }
 
     /// A worker's page is too small for its screen: give it a bigger one.
     fn page_too_small(&mut self, key: VtTerminalKey, needed: u64) {
         let Some(terminal) = self.terminals.get(&key) else { return };
-        let (shard, geometry) = (terminal.shard, terminal.geometry);
+        let (shard, geometry, id) = (terminal.shard, terminal.geometry, terminal.wire);
         let Ok(needed) = usize::try_from(needed) else { return };
         if let Ok(Some(page)) = self.grow_page(key, needed) {
-            self.send(shard, Command::Resize { id: key.0, geometry, page: Some(page) });
+            self.send(shard, Command::Resize { id, geometry, page: Some(page) });
         }
     }
 
@@ -455,8 +511,8 @@ impl Broker {
         let Some(terminal) = self.terminals.get_mut(&key) else { return };
         terminal.colors = Some(colors.clone());
         if terminal.attached {
-            let shard = terminal.shard;
-            self.send(shard, Command::Colors { id: key.0, colors });
+            let (shard, id) = (terminal.shard, terminal.wire);
+            self.send(shard, Command::Colors { id, colors });
         }
     }
 
@@ -464,8 +520,8 @@ impl Broker {
         let Some(terminal) = self.terminals.get_mut(&key) else { return };
         terminal.kitty_limits = limits;
         if terminal.attached {
-            let shard = terminal.shard;
-            self.send(shard, Command::KittyLimits { id: key.0, limits });
+            let (shard, id) = (terminal.shard, terminal.wire);
+            self.send(shard, Command::KittyLimits { id, limits });
         }
     }
 
@@ -474,7 +530,7 @@ impl Broker {
         let shard = terminal.shard;
         self.shards[shard].members.remove(&key);
         if terminal.attached {
-            self.send(shard, Command::Detach { id: key.0 });
+            self.send(shard, Command::Detach { id: terminal.wire });
         }
         self.settle_restore(shard, Some((key, u64::MAX)));
     }
@@ -520,8 +576,13 @@ impl Broker {
         };
         let pid = process.pid();
         let hello_by = now + self.config.hello_timeout;
+        // A test's stand-in has no pid to check.
+        let expect =
+            HelloExpectation { sandbox: self.sandbox.required(), pid: (pid != 0).then_some(pid) };
+        let guard = WorkerOutputGuard::new(expect);
         let slot = &mut self.shards[shard];
-        slot.worker = Some(Worker { link, process, ready: false, hello_by });
+        slot.worker =
+            Some(Worker { link, process, guard, wires: BTreeMap::new(), ready: false, hello_by });
         slot.restore = Some(Restore { started, mode: ReseedMode::Full, pending: BTreeMap::new() });
         self.host.lifecycle(WorkerLifecycle::Started { shard, generation, pid });
         // Chrome's SeatbeltExecClient: the policy is the first thing the
@@ -542,23 +603,9 @@ impl Broker {
         }
     }
 
-    fn hello(&mut self, shard: usize, generation: u64, event: (u16, SandboxMechanism, u32)) {
-        let (version, mechanism, pid) = event;
-        let Some(worker) = &self.shards[shard].worker else { return };
-        if worker.ready {
-            return self.lost(shard, LinkEnd::BadFrame("a second HELLO".to_owned()));
-        }
-        if version != WIRE_VERSION {
-            return self.hand_back_shard(shard, HandBack::WireVersion(version));
-        }
-        if mechanism != self.sandbox.required() {
-            return self.hand_back_shard(shard, HandBack::Sandbox(mechanism));
-        }
-        let launched = worker.process.pid();
-        if launched != 0 && pid != launched {
-            let cause = format!("HELLO from pid {pid}, launched pid {launched}");
-            return self.lost(shard, LinkEnd::BadFrame(cause));
-        }
+    /// The worker's HELLO passed its guard (this wire, the platform's
+    /// sandbox, the pid launched): it gets its shard's rings.
+    fn ready(&mut self, shard: usize, generation: u64, mechanism: SandboxMechanism) {
         if let Some(worker) = &mut self.shards[shard].worker {
             worker.ready = true;
         }
@@ -610,20 +657,23 @@ impl Broker {
                 return self.hand_back(shard, vec![key], HandBack::Resources(error.kind()));
             }
         };
+        let Some(worker) = self.shards[shard].worker.as_mut() else { return };
+        let wire = worker.guard.attach(key.0, replay_from, terminal.geometry);
+        worker.wires.insert(wire, key);
+        terminal.wire = wire;
         terminal.end = terminal.end.max(end);
         terminal.parsed = replay_from;
         terminal.sent = replay_from;
         terminal.attached = true;
         terminal.first_parsed = false;
         terminal.answers.clear();
-        terminal.answer_bytes = 0;
         // Answers to output an earlier worker parsed were written then. The
         // first advance stops at that offset, so no parse slice holds both
         // answered and unanswered output.
         terminal.answer_floor = terminal.confirmed.max(replay_from);
         let first_stop = terminal.confirmed.clamp(replay_from, end);
         let attach = Attach {
-            id: key.0,
+            id: wire,
             start: replay_from,
             prologue,
             gap: skipped,
@@ -645,10 +695,10 @@ impl Broker {
         }
         self.send(shard, Command::Attach(attach));
         if let Some(colors) = colors {
-            self.send(shard, Command::Colors { id: key.0, colors });
+            self.send(shard, Command::Colors { id: wire, colors });
         }
         if first_stop > replay_from {
-            self.send(shard, Command::Advance { id: key.0, end: first_stop });
+            self.send(shard, Command::Advance { id: wire, end: first_stop });
         } else {
             self.send_advance(key);
         }
@@ -692,65 +742,81 @@ impl Broker {
         }
     }
 
+    /// Check `event` with the worker's guard, then act on it. A bad message
+    /// ends the worker; a HELLO of another wire or sandbox hands the shard
+    /// back (an update swapped the binary, or the platform's sandbox did not
+    /// apply), as no worker of it can be used.
     fn event(&mut self, shard: usize, generation: u64, event: Event) {
-        let ready = self.shards[shard].worker.as_ref().is_some_and(|worker| worker.ready);
-        match event {
-            Event::Hello { version, sandbox, pid } => {
-                self.hello(shard, generation, (version, sandbox, pid));
+        let Broker { shards, terminals, .. } = self;
+        let Some(Worker { guard, wires, .. }) = shards[shard].worker.as_mut() else { return };
+        let checked = guard.check(event, &WorkerRings { wires, terminals });
+        match checked {
+            Err(BadMessage::Version(version)) => {
+                self.hand_back_shard(shard, HandBack::WireVersion(version));
             }
-            event if !ready => {
-                let cause = format!("{} before HELLO", event_name(&event));
-                self.lost(shard, LinkEnd::BadFrame(cause));
+            Err(BadMessage::Sandbox { got, .. }) => {
+                self.hand_back_shard(shard, HandBack::Sandbox(got));
             }
-            Event::Parsed { id, offset, .. } => self.parsed(shard, VtTerminalKey(id), offset),
-            Event::PtyWrite { id, bytes } => self.answer(shard, VtTerminalKey(id), &bytes),
-            Event::PageTooSmall { id, needed } => {
-                if self.attached_in(shard, VtTerminalKey(id)) {
-                    self.page_too_small(VtTerminalKey(id), needed);
+            Err(bad) => self.lost(shard, LinkEnd::BadMessage(bad)),
+            Ok(Checked::Stale) => {}
+            Ok(Checked::Event(Event::Hello { sandbox, .. })) => {
+                self.ready(shard, generation, sandbox);
+            }
+            Ok(Checked::Answers { id, answers, refused }) => {
+                if let Some(key) = self.attachment(shard, id) {
+                    self.answers(shard, key, &answers, refused);
                 }
             }
-            Event::AttachFailed { id, reason } => {
-                self.attach_failed(shard, VtTerminalKey(id), reason);
-            }
-            Event::KittyMediaRequest { id, request } => {
-                let terminal = VtTerminalKey(id);
-                if self.attached_in(shard, terminal) {
-                    let events = self.events.clone();
-                    let reply = MediaReply { events, shard, generation, terminal };
-                    self.host.kitty_media(terminal, request, reply);
-                }
-            }
-            event @ (Event::Title { id, .. }
-            | Event::Pwd { id, .. }
-            | Event::Bell { id, .. }
-            | Event::Lapped { id, .. }
-            | Event::ProgramStatus { id, .. }) => {
-                if self.attached_in(shard, VtTerminalKey(id)) {
-                    self.host.terminal_event(VtTerminalKey(id), event);
+            Ok(Checked::Event(event)) => {
+                if let Some(key) = self.attachment(shard, event_terminal(&event)) {
+                    self.terminal_event(shard, generation, key, event);
                 }
             }
         }
     }
 
-    /// The terminal is `shard`'s and its worker has its ATTACH. Events for
-    /// others are a released terminal's last words (or another shard's,
-    /// which task 141 makes a bad message).
-    fn attached_in(&self, shard: usize, key: VtTerminalKey) -> bool {
-        self.terminals
-            .get(&key)
-            .is_some_and(|terminal| terminal.shard == shard && terminal.attached)
+    /// The terminal of `shard`'s live attachment `wire`. The guard passes
+    /// events of live attachments only, so this finds it.
+    fn attachment(&self, shard: usize, wire: u64) -> Option<VtTerminalKey> {
+        self.shards[shard].worker.as_ref()?.wires.get(&wire).copied()
+    }
+
+    /// A checked event of `key`'s current attachment.
+    fn terminal_event(
+        &mut self,
+        shard: usize,
+        generation: u64,
+        key: VtTerminalKey,
+        mut event: Event,
+    ) {
+        match event {
+            Event::Hello { .. } | Event::PtyWrite { .. } => {}
+            Event::Parsed { offset, .. } => self.parsed(shard, key, offset),
+            Event::PageTooSmall { needed, .. } => self.page_too_small(key, needed),
+            Event::AttachFailed { reason, .. } => self.attach_failed(shard, key, reason),
+            Event::KittyMediaRequest { id, request } => {
+                let events = self.events.clone();
+                let reply = MediaReply { events, shard, generation, terminal: key, wire: id };
+                self.host.kitty_media(key, request, reply);
+            }
+            Event::Title { ref mut id, .. }
+            | Event::Pwd { ref mut id, .. }
+            | Event::Bell { ref mut id, .. }
+            | Event::Lapped { ref mut id, .. }
+            | Event::ProgramStatus { ref mut id, .. } => {
+                // The host names terminals by key, not by attachment.
+                *id = key.0;
+                self.host.terminal_event(key, event);
+            }
+        }
     }
 
     fn parsed(&mut self, shard: usize, key: VtTerminalKey, offset: u64) {
-        if !self.attached_in(shard, key) {
-            return;
-        }
         let Some(terminal) = self.terminals.get_mut(&key) else { return };
         // Never past what the ring holds: the holder trims by this offset.
         let offset = offset.min(terminal.end);
         terminal.first_parsed = true;
         terminal.parsed = terminal.parsed.max(offset);
-        terminal.answer_bytes = 0;
         let answers = std::mem::take(&mut terminal.answers);
         // The answers came from the output this PARSED covers: written only
         // when it is output no earlier worker answered.
@@ -768,43 +834,46 @@ impl Broker {
         self.send_advance(key);
     }
 
-    fn answer(&mut self, shard: usize, key: VtTerminalKey, bytes: &[u8]) {
-        let Some(terminal) = self.terminals.get(&key).filter(|terminal| terminal.shard == shard)
-        else {
-            let reason = AnswerRejected::NotInShard;
-            return self.host.lifecycle(WorkerLifecycle::AnswerRejected {
-                shard,
-                terminal: key,
-                reason,
-            });
-        };
-        if !terminal.attached {
+    /// The whole answers of a PTY_WRITE: the fixed set's own encodings wait
+    /// for the PARSED of their output; replies outside it are reported.
+    fn answers(
+        &mut self,
+        shard: usize,
+        key: VtTerminalKey,
+        answers: &[QueryAnswer],
+        refused: Vec<AnswerRejected>,
+    ) {
+        for reason in refused {
+            self.host.lifecycle(WorkerLifecycle::AnswerRejected { shard, terminal: key, reason });
+        }
+        if let Some(terminal) = self.terminals.get_mut(&key) {
+            terminal.answers.extend(answers.iter().map(QueryAnswer::encode));
+        }
+    }
+
+    /// A screen-page reader saw a bad page of `key`: read it again under the
+    /// current attachment, and end the worker when it is bad. Only once the
+    /// attachment reported a parse: the worker publishes before it reports,
+    /// so the page is its own and not a predecessor's.
+    fn check_page(&mut self, key: VtTerminalKey) {
+        let current = |terminal: &&Terminal| terminal.attached && terminal.first_parsed;
+        let Some(terminal) = self.terminals.get(&key).filter(current) else {
             return;
-        }
-        let (cols, rows) = (terminal.geometry.cols, terminal.geometry.rows);
-        let mut accepted = Vec::new();
-        for checked in QueryAnswer::parse_all(bytes, cols, rows) {
-            match checked {
-                Ok(answer) => accepted.push(answer.encode()),
-                Err(reason) => self.host.lifecycle(WorkerLifecycle::AnswerRejected {
-                    shard,
-                    terminal: key,
-                    reason,
-                }),
-            }
-        }
-        let Some(terminal) = self.terminals.get_mut(&key) else { return };
-        terminal.answer_bytes += accepted.iter().map(Vec::len).sum::<usize>();
-        terminal.answers.extend(accepted);
-        if terminal.answer_bytes > MAX_PENDING_ANSWER_BYTES {
-            self.lost(shard, LinkEnd::BadFrame("answers without a PARSED".to_owned()));
+        };
+        let shard = terminal.shard;
+        let Some(worker) = self.shards[shard].worker.as_ref().filter(|worker| worker.ready) else {
+            return;
+        };
+        let Ok(len) = usize::try_from(terminal.page.len) else { return };
+        let Ok(mut reader) = PageReader::open(&terminal.page.fd, len) else { return };
+        let rings = WorkerRings { wires: &worker.wires, terminals: &self.terminals };
+        let checked = worker.guard.read_page(terminal.wire, &mut reader, &rings);
+        if let Err(bad) = checked {
+            self.lost(shard, LinkEnd::BadMessage(bad));
         }
     }
 
     fn attach_failed(&mut self, shard: usize, key: VtTerminalKey, reason: AttachFailure) {
-        if !self.attached_in(shard, key) {
-            return;
-        }
         match reason {
             // A resize or limits change that crossed the terminal's ATTACH,
             // or a repeat: the worker keeps parsing it.
@@ -815,25 +884,35 @@ impl Broker {
         }
     }
 
+    /// The host's answer to the media request of attachment `wire` of
+    /// `key`: sent only to that attachment, on the worker that asked.
     fn media_answer(
         &mut self,
         shard: usize,
         generation: u64,
-        key: VtTerminalKey,
+        (key, wire): (VtTerminalKey, u64),
         answer: MediaAnswer,
     ) {
         let current = self.shards.get(shard).is_some_and(|slot| {
             slot.generation == generation && slot.worker.as_ref().is_some_and(|w| w.ready)
         });
-        if current && self.attached_in(shard, key) {
-            self.send(shard, Command::KittyMedia { id: key.0, answer });
+        let asked = self.terminals.get(&key).is_some_and(|terminal| {
+            terminal.shard == shard && terminal.attached && terminal.wire == wire
+        });
+        if current && asked {
+            self.send(shard, Command::KittyMedia { id: wire, answer });
         }
     }
 
-    /// Queue a command for `shard`'s worker; a full queue marks it hung.
+    /// Queue a command for `shard`'s worker, after its guard records it; a
+    /// full queue marks it hung.
     fn send(&mut self, shard: usize, command: Command) {
         let slot = &mut self.shards[shard];
-        let Some(worker) = &slot.worker else { return };
+        let Some(worker) = &mut slot.worker else { return };
+        worker.guard.sent(&command);
+        if let Command::Detach { id } = command {
+            worker.wires.remove(&id);
+        }
         if let Err(SendRefused::Full) = worker.link.send(command) {
             slot.hung = true;
         }
@@ -866,7 +945,6 @@ impl Broker {
             let suspect = terminal.in_flight();
             terminal.attached = false;
             terminal.answers.clear();
-            terminal.answer_bytes = 0;
             terminal.next_seed = if suspect {
                 match ReseedMode::after(terminal.strikes.strike(now)) {
                     Some(mode) => mode,
@@ -907,8 +985,9 @@ impl Broker {
             if let Some(restore) = &mut self.shards[shard].restore {
                 restore.pending.remove(key);
             }
-            if self.terminals.remove(key).is_some_and(|terminal| terminal.attached) {
-                self.send(shard, Command::Detach { id: key.0 });
+            if let Some(terminal) = self.terminals.remove(key).filter(|terminal| terminal.attached)
+            {
+                self.send(shard, Command::Detach { id: terminal.wire });
             }
         }
         self.host.lifecycle(WorkerLifecycle::HandedBack {
@@ -948,19 +1027,26 @@ fn new_page(len: usize) -> io::Result<ScreenPage> {
     Ok(ScreenPage { fd: Arc::new(create_page(len)?), len: len as u64 })
 }
 
-fn event_name(event: &Event) -> &'static str {
-    match event {
-        Event::Hello { .. } => "HELLO",
-        Event::Parsed { .. } => "PARSED",
-        Event::PtyWrite { .. } => "PTY_WRITE",
-        Event::Title { .. } => "TITLE",
-        Event::Pwd { .. } => "PWD",
-        Event::Bell { .. } => "BELL",
-        Event::Lapped { .. } => "LAPPED",
-        Event::PageTooSmall { .. } => "PAGE_TOO_SMALL",
-        Event::AttachFailed { .. } => "ATTACH_FAILED",
-        Event::ProgramStatus { .. } => "PROGRAM_STATUS",
-        Event::KittyMediaRequest { .. } => "KITTY_MEDIA_REQUEST",
+/// The ring headers of one worker's live attachments, as the daemon maps
+/// them.
+struct WorkerRings<'a> {
+    wires: &'a BTreeMap<u64, VtTerminalKey>,
+    terminals: &'a BTreeMap<VtTerminalKey, Terminal>,
+}
+
+impl WorkerRings<'_> {
+    fn view(&self, wire: u64) -> Option<&RingView> {
+        self.terminals.get(self.wires.get(&wire)?)?.ring_view.as_ref()
+    }
+}
+
+impl RingOffsets for WorkerRings<'_> {
+    fn oldest(&self, id: u64) -> Option<u64> {
+        self.view(id).map(RingView::oldest)
+    }
+
+    fn end(&self, id: u64) -> Option<u64> {
+        self.view(id).map(RingView::end)
     }
 }
 

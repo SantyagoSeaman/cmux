@@ -15,7 +15,9 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use cmux_tui_core::vt_worker_runtime::{HelloExpectation, PageRead, WorkerOutputGuard};
+use cmux_tui_core::vt_worker_runtime::{
+    HelloExpectation, PageRead, RingOffsets, WorkerOutputGuard,
+};
 use cmux_vt_worker::sandbox::SandboxMechanism;
 use cmux_vt_worker::screen_page::{
     self, PageEncoder, PageMeta, PageReader, PageWriter, Screen, decode,
@@ -41,10 +43,24 @@ fn page() -> &'static Mutex<Page> {
         let mut guard =
             WorkerOutputGuard::new(HelloExpectation { sandbox: SandboxMechanism::None, pid: None });
         let grid = screen_page::MAX_GRID;
-        guard.attached(1, 0, Geometry { cols: grid, rows: grid, cell_width: 1, cell_height: 1 });
+        guard.attach(1, 0, Geometry { cols: grid, rows: grid, cell_width: 1, cell_height: 1 });
         guard.advanced(1, u64::MAX);
         Mutex::new(Page { writer, reader, guard })
     })
+}
+
+/// Every ring keeps all its bytes and is published to the end: the read's
+/// only bound is the page itself.
+struct WholeRing;
+
+impl RingOffsets for WholeRing {
+    fn oldest(&self, _id: u64) -> Option<u64> {
+        Some(0)
+    }
+
+    fn end(&self, _id: u64) -> Option<u64> {
+        Some(u64::MAX)
+    }
 }
 
 fn reencode(screen: &Screen) -> Vec<u8> {
@@ -90,11 +106,17 @@ fuzz_target!(|data: &[u8]| {
     let mut page = page().lock().expect("page");
     let Page { writer, reader, guard } = &mut *page;
     writer.publish(&image);
-    match guard.read_page(1, reader) {
+    match guard.read_page(1, reader, &WholeRing) {
         Ok(PageRead::Screen(screen)) => {
             check_shape(&screen);
             assert_eq!(decode(&image).as_ref(), Ok(&screen), "the mapped read differs");
         }
-        Ok(PageRead::NotPublished | PageRead::Busy | PageRead::TooSmall { .. }) | Err(_) => {}
+        Ok(
+            PageRead::NotPublished
+            | PageRead::Busy
+            | PageRead::TooSmall { .. }
+            | PageRead::Unconfirmed,
+        )
+        | Err(_) => {}
     }
 });

@@ -1,6 +1,6 @@
 //! The daemon's broker for sandboxed `cmux-vt-worker` processes (phase B of
 //! the VT pool, behind `CMUX_TUI_VT_WORKERS=process`;
-//! plans/cmux-next/chrome-parity/p01-process.md, task 134).
+//! plans/cmux-next/chrome-parity/p01-process.md, tasks 134 and 141).
 //!
 //! A worker parses the output of one shard of holder terminals from the
 //! terminals' rings, which it maps read-only, and publishes each screen in
@@ -19,11 +19,20 @@
 //! - **Ring advances.** The broker relays each terminal's ring end to its
 //!   worker with at most one advance in flight per terminal, so a slow
 //!   worker never makes the link queue grow with the output rate.
-//! - **Query answers.** A DA or DSR answer a worker sends is checked against
-//!   the fixed answer set ([`QueryAnswer`]) and against the shard's own
-//!   terminals before it reaches a PTY: a worker never writes input. An
-//!   answer to output an earlier worker already answered is not written
-//!   again after a reseed.
+//! - **Untrusted output** ([`WorkerOutputGuard`], task 141). Every event a
+//!   worker sends and every page the daemon reads is checked against what
+//!   the broker told that worker: a terminal of its shard, offsets inside
+//!   the announced ring, newer frames, text without controls, page needs
+//!   bounded by the terminal's grids. The first violation is a
+//!   [`BadMessage`]: the worker is killed and its shard reseeded, with the
+//!   link's end [`LinkEnd::BadMessage`] (reason `bad_message`). This is
+//!   Chrome's rule for a renderer or utility process
+//!   (content/browser/bad_message.h, `bad_message::ReceivedBadMessage`): a
+//!   malformed message ends the sender, it is never repaired or skipped.
+//! - **Query answers.** A worker never writes input: the broker parses its
+//!   PTY answers into the fixed answer set ([`QueryAnswer`]) and writes
+//!   their own encoding. An answer to output an earlier worker already
+//!   answered is not written again after a reseed.
 //! - **Restart and reseed.** A worker whose link ends is replaced, and each
 //!   terminal of its shard is reseeded from the holder's prologue plus the
 //!   ring tail after it ([`VtWorkerHost::reseed`]).
@@ -62,23 +71,24 @@ mod broker;
 mod host;
 mod launcher;
 mod link;
-mod pty_answers;
 mod reseed;
 mod strikes;
 
 #[cfg(test)]
 mod tests;
 
-pub use answers::{AnswerRejected, MAX_ANSWER, QueryAnswer};
-pub use bad_message::{
-    BAD_MESSAGE_REASON, BadMessage, HelloExpectation, PageRead, RingOffsets, WorkerEnd,
-    WorkerOutputGuard, WorkerProcess as GuardedProcess, drain_frames,
+pub use answers::{
+    AnswerError, AnswerGrid, AnswerRejected, AnswerScanner, ColorTarget, KittyStatus, MAX_ANSWER,
+    QueryAnswer, Scanned, StringEnd,
 };
-pub use broker::{MediaReply, VtWorkerBroker};
+pub use bad_message::{
+    BAD_MESSAGE_REASON, BadMessage, Checked, HelloExpectation, MAX_PENDING_ANSWER_BYTES, PageRead,
+    RingOffsets, WorkerOutputGuard,
+};
+pub use broker::{MediaReply, PageChecker, VtWorkerBroker};
+pub use cmux_kitty_media::{FileMedium, MediaRequest};
 /// The worker crate: its wire, page reader and sandbox types.
 pub use cmux_vt_worker as worker;
-pub use pty_answers::{AnswerError, AnswerScanner, MAX_ANSWER_BYTES};
-pub use cmux_kitty_media::MediaRequest;
 pub use cmux_vt_worker::sandbox::{SandboxMechanism, SandboxPolicy};
 pub use cmux_vt_worker::wire::{
     AttachFailure, Colors, Event as WorkerEvent, Geometry, MediaAnswer,

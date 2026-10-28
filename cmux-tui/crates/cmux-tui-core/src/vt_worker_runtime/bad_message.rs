@@ -6,26 +6,42 @@
 //! when the worker could have produced it from those commands: a terminal
 //! of its shard, offsets that move forward inside the ring the daemon
 //! announced, a newer frame, text without control characters, PTY answers
-//! from the fixed answer set ([`super::pty_answers`]) and a page need no
-//! larger than the biggest grid the terminal had. Everything else is a
+//! of the fixed answer set ([`super::answers`]) and a page need no larger
+//! than the biggest grid the terminal had. Everything else is a
 //! [`BadMessage`]: the broker kills the worker and reseeds its terminals
-//! from the holder prologue and ring tail ([`WorkerEnd::reseed`]).
+//! from the holder prologue and ring tail.
+//!
+//! Each ATTACH gets a wire id this worker never had before
+//! ([`WorkerOutputGuard::attach`]), as Chromium gives each frame host its
+//! own routing id (content/browser/renderer_host/render_frame_host_impl.cc):
+//! events a detached attachment sent before the worker read its DETACH name
+//! an id that is no longer attached and are dropped, so a terminal that
+//! detaches and comes back to the same worker never has the old
+//! attachment's frames, offsets or media requests checked against the new
+//! one's.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 
 use cmux_vt_worker::sandbox::SandboxMechanism;
 use cmux_vt_worker::screen_page::{self, PageError, PageReader, Screen};
-use cmux_vt_worker::wire::{self, Event, Frame, FrameReader, Geometry, WIRE_VERSION, WireError};
+use cmux_vt_worker::wire::{self, Command, Event, Frame, Geometry, WIRE_VERSION, WireError};
 
-use super::pty_answers::{AnswerError, AnswerScanner};
+use super::answers::{AnswerError, AnswerGrid, AnswerRejected, AnswerScanner, QueryAnswer};
 
 /// The reason a worker ended for its output, as `debug.vt`, the strike rule
 /// and the process census name it.
 pub const BAD_MESSAGE_REASON: &str = "bad_message";
 
+/// Answer bytes of one terminal that may wait for the PARSED that says
+/// which output made them: a parse slice of queries answers with far less.
+pub const MAX_PENDING_ANSWER_BYTES: usize = 1 << 20;
+
+/// Where the wire ids of re-attached terminals start (a terminal's first
+/// attachment to a worker uses its own key).
+const FRESH_IDS: u64 = 1 << 63;
+
 /// One rule a worker's output broke.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BadMessage {
     /// The frame did not decode (kind, length, descriptors, UTF-8).
     Wire(WireError),
@@ -45,8 +61,10 @@ pub enum BadMessage {
     Frame { id: u64, frame: u64, last: u64 },
     /// A lap that does not move forward or claims bytes the ring kept.
     Lapped { id: u64, from: u64, oldest: u64 },
-    /// PTY bytes outside the answer set.
+    /// PTY bytes outside the answer grammar.
     PtyAnswer { id: u64, error: AnswerError },
+    /// More than [`MAX_PENDING_ANSWER_BYTES`] of answers without a PARSED.
+    Answers(u64),
     /// A title or working directory with a control character, or empty.
     Text { id: u64, what: &'static str },
     /// A bell event with no bell.
@@ -85,6 +103,7 @@ impl std::fmt::Display for BadMessage {
                 write!(f, "terminal {id} lapped from {from} to {oldest}")
             }
             Self::PtyAnswer { id, error } => write!(f, "terminal {id}: {error}"),
+            Self::Answers(id) => write!(f, "terminal {id}: answers without a PARSED"),
             Self::Text { id, what } => write!(f, "terminal {id}: bad {what}"),
             Self::Bell(id) => write!(f, "terminal {id}: empty bell"),
             Self::PageNeed { id, needed, bound } => {
@@ -107,10 +126,31 @@ pub struct HelloExpectation {
 }
 
 /// The ring offsets the daemon reads from the holder's own ring headers
-/// (trusted: the holder writes them, the worker maps rings read-only).
+/// (trusted: the holder writes them, the worker maps rings read-only), by
+/// wire id. Both only grow, and the worker read them before the daemon
+/// does, so a worker's honest offset is never past them.
 pub trait RingOffsets {
     /// The oldest offset terminal `id`'s ring keeps now, if the daemon maps it.
     fn oldest(&self, id: u64) -> Option<u64>;
+    /// The end the holder published in terminal `id`'s ring, if the daemon
+    /// maps it.
+    fn end(&self, id: u64) -> Option<u64>;
+}
+
+/// A checked event, as the broker acts on it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Checked {
+    Event(Event),
+    /// The whole answers a PTY_WRITE finished: those of the fixed set (the
+    /// broker writes their own encoding) and the replies outside it.
+    Answers {
+        id: u64,
+        answers: Vec<QueryAnswer>,
+        refused: Vec<AnswerRejected>,
+    },
+    /// An event of a detached attachment, sent before the worker read the
+    /// DETACH: nothing to act on.
+    Stale,
 }
 
 /// A page read the daemon may act on.
@@ -126,6 +166,9 @@ pub enum PageRead {
     TooSmall {
         needed: u64,
     },
+    /// The screen is past the announced ring end and the daemon does not map
+    /// the ring to confirm it: read again after the next event.
+    Unconfirmed,
 }
 
 /// One terminal as the daemon told the worker about it.
@@ -140,6 +183,8 @@ struct TerminalLedger {
     peak_cols: u16,
     peak_rows: u16,
     answers: AnswerScanner,
+    /// Answer bytes since the last PARSED.
+    answer_bytes: usize,
     /// A KITTY_MEDIA_REQUEST the broker has not answered yet.
     media_pending: bool,
 }
@@ -161,20 +206,38 @@ pub struct WorkerOutputGuard {
     hello: HelloExpectation,
     greeted: bool,
     terminals: BTreeMap<u64, TerminalLedger>,
-    /// Terminals detached from this worker: events the worker sent before
-    /// it read the DETACH are dropped, not bad. Terminal ids are never
-    /// reused, and the set lives only as long as this worker.
-    retired: BTreeSet<u64>,
+    /// Every wire id this worker was given. An event for one of them that
+    /// is not attached is a detached attachment's; any other is not the
+    /// shard's. The set lives as long as the worker.
+    issued: BTreeSet<u64>,
+    next_fresh: u64,
 }
 
 impl WorkerOutputGuard {
     pub fn new(hello: HelloExpectation) -> Self {
-        Self { hello, greeted: false, terminals: BTreeMap::new(), retired: BTreeSet::new() }
+        Self {
+            hello,
+            greeted: false,
+            terminals: BTreeMap::new(),
+            issued: BTreeSet::new(),
+            next_fresh: FRESH_IDS,
+        }
     }
 
-    /// The broker sent ATTACH: `id` parses from `start` on a `geometry` grid.
-    pub fn attached(&mut self, id: u64, start: u64, geometry: Geometry) {
-        self.retired.remove(&id);
+    /// The broker sends ATTACH: the terminal parses from `start` on a
+    /// `geometry` grid. Returns the wire id the ATTACH and every later
+    /// command for this attachment carry: `preferred` (the terminal's key)
+    /// when this worker never had it, else an id it never had.
+    pub fn attach(&mut self, preferred: u64, start: u64, geometry: Geometry) -> u64 {
+        let id = if self.issued.contains(&preferred) {
+            while self.issued.contains(&self.next_fresh) {
+                self.next_fresh = self.next_fresh.wrapping_add(1).max(FRESH_IDS);
+            }
+            self.next_fresh
+        } else {
+            preferred
+        };
+        self.issued.insert(id);
         let mut ledger = TerminalLedger {
             floor: start,
             ceiling: start,
@@ -182,10 +245,27 @@ impl WorkerOutputGuard {
             peak_cols: 0,
             peak_rows: 0,
             answers: AnswerScanner::default(),
+            answer_bytes: 0,
             media_pending: false,
         };
         ledger.grow(geometry);
         self.terminals.insert(id, ledger);
+        id
+    }
+
+    /// Record a command the broker queues for the worker (an ATTACH's
+    /// attachment comes from [`Self::attach`]).
+    pub fn sent(&mut self, command: &Command) {
+        match command {
+            Command::Advance { id, end } => self.advanced(*id, *end),
+            Command::Resize { id, geometry, .. } => self.resized(*id, *geometry),
+            Command::Detach { id } => self.detached(*id),
+            Command::KittyMedia { id, .. } => self.media_answered(*id),
+            Command::Bootstrap(_)
+            | Command::Attach(_)
+            | Command::Colors { .. }
+            | Command::KittyLimits { .. } => {}
+        }
     }
 
     /// The broker sent ADVANCE for `id` up to `end`.
@@ -204,45 +284,34 @@ impl WorkerOutputGuard {
 
     /// The broker sent DETACH for `id`.
     pub fn detached(&mut self, id: u64) {
-        if self.terminals.remove(&id).is_some() {
-            self.retired.insert(id);
+        self.terminals.remove(&id);
+    }
+
+    /// The broker sent KITTY_MEDIA, the answer to `id`'s open request.
+    pub fn media_answered(&mut self, id: u64) {
+        if let Some(ledger) = self.terminals.get_mut(&id) {
+            ledger.media_pending = false;
         }
     }
 
-    /// The terminals attached to this worker, in id order: what the broker
-    /// reseeds when the worker ends.
-    pub fn terminals(&self) -> impl Iterator<Item = u64> + '_ {
-        self.terminals.keys().copied()
-    }
-
-    /// Decode and check one frame. `Ok(None)` is an event with nothing to
-    /// act on (a retired terminal's, or PTY bytes inside an unfinished
-    /// answer).
-    pub fn accept(
-        &mut self,
-        frame: Frame,
-        rings: &dyn RingOffsets,
-    ) -> Result<Option<Event>, BadMessage> {
+    /// Decode and check one frame.
+    pub fn accept(&mut self, frame: Frame, rings: &dyn RingOffsets) -> Result<Checked, BadMessage> {
         let event = wire::decode_event(frame).map_err(BadMessage::Wire)?;
         self.check(event, rings)
     }
 
     /// Check one decoded event.
-    pub fn check(
-        &mut self,
-        event: Event,
-        rings: &dyn RingOffsets,
-    ) -> Result<Option<Event>, BadMessage> {
+    pub fn check(&mut self, event: Event, rings: &dyn RingOffsets) -> Result<Checked, BadMessage> {
         if let Event::Hello { version, sandbox, pid } = event {
-            return self.hello(version, sandbox, pid).map(|()| Some(event));
+            return self.hello(version, sandbox, pid).map(|()| Checked::Event(event));
         }
         if !self.greeted {
             return Err(BadMessage::HelloOrder);
         }
         let id = event_terminal(&event);
         let Some(ledger) = self.terminals.get_mut(&id) else {
-            return if self.retired.contains(&id) {
-                Ok(None)
+            return if self.issued.contains(&id) {
+                Ok(Checked::Stale)
             } else {
                 Err(BadMessage::NotInShard(id))
             };
@@ -263,18 +332,21 @@ impl WorkerOutputGuard {
                 }
                 ledger.floor = offset;
                 ledger.frame = frame;
-                Ok(Some(event))
+                ledger.answer_bytes = 0;
+                Ok(Checked::Event(event))
             }
             Event::Lapped { from, oldest, .. } => {
                 // The worker read `oldest` from the ring header before this
-                // check reads it, and a ring's oldest only grows.
+                // check reads it, and a ring's oldest only grows. The
+                // announced end bounds it only when the daemon cannot read
+                // the header.
                 let kept = rings.oldest(id).unwrap_or(ledger.ceiling);
-                if from < ledger.floor || from >= oldest || oldest > kept.max(ledger.ceiling) {
+                if from < ledger.floor || from >= oldest || oldest > kept {
                     return Err(BadMessage::Lapped { id, from, oldest });
                 }
                 ledger.floor = oldest;
                 ledger.ceiling = ledger.ceiling.max(oldest);
-                Ok(Some(event))
+                Ok(Checked::Event(event))
             }
             Event::PtyWrite { bytes, .. } => {
                 if bytes.is_empty() {
@@ -283,68 +355,84 @@ impl WorkerOutputGuard {
                         error: AnswerError::NotAnAnswer("empty write"),
                     });
                 }
-                let mut answers = Vec::new();
+                let grid = AnswerGrid { cols: ledger.peak_cols, rows: ledger.peak_rows };
+                let mut scanned = Vec::new();
                 ledger
                     .answers
-                    .feed(&bytes, &mut answers)
+                    .feed(&bytes, grid, &mut scanned)
                     .map_err(|error| BadMessage::PtyAnswer { id, error })?;
-                Ok((!answers.is_empty()).then_some(Event::PtyWrite { id, bytes: answers }))
+                let (mut answers, mut refused) = (Vec::new(), Vec::new());
+                for answer in scanned {
+                    match answer {
+                        Ok(answer) => answers.push(answer),
+                        Err(rejected) => refused.push(rejected),
+                    }
+                }
+                ledger.answer_bytes += bytes.len();
+                if ledger.answer_bytes > MAX_PENDING_ANSWER_BYTES {
+                    return Err(BadMessage::Answers(id));
+                }
+                Ok(Checked::Answers { id, answers, refused })
             }
             Event::Title { ref title, .. } => {
                 check_text(id, title, "title")?;
-                Ok(Some(event))
+                Ok(Checked::Event(event))
             }
             Event::Pwd { ref pwd, .. } => {
                 if pwd.is_empty() {
                     return Err(BadMessage::Text { id, what: "working directory" });
                 }
                 check_text(id, pwd, "working directory")?;
-                Ok(Some(event))
+                Ok(Checked::Event(event))
             }
             Event::Bell { count, .. } => {
                 if count == 0 {
                     return Err(BadMessage::Bell(id));
                 }
-                Ok(Some(event))
+                Ok(Checked::Event(event))
             }
             Event::PageTooSmall { needed, .. } => {
                 check_need(id, ledger, needed)?;
-                Ok(Some(event))
+                Ok(Checked::Event(event))
             }
             // Bounded and checked field by field on decode (wire.rs); the
             // records take them as from the daemon's own parser.
-            Event::AttachFailed { .. } | Event::ProgramStatus { .. } => Ok(Some(event)),
+            Event::AttachFailed { .. } | Event::ProgramStatus { .. } => Ok(Checked::Event(event)),
             Event::KittyMediaRequest { .. } => {
                 // The terminal's parse waits for the answer, so a worker
-                // never has two requests open for one terminal.
+                // never has two requests open for one attachment.
                 if ledger.media_pending {
                     return Err(BadMessage::MediaRequest(id));
                 }
                 ledger.media_pending = true;
-                Ok(Some(event))
+                Ok(Checked::Event(event))
             }
-        }
-    }
-
-    /// The broker sent KITTY_MEDIA, the answer to `id`'s open request.
-    pub fn media_answered(&mut self, id: u64) {
-        if let Some(ledger) = self.terminals.get_mut(&id) {
-            ledger.media_pending = false;
         }
     }
 
     /// Read terminal `id`'s page through `reader` and check it: a page that
-    /// breaks its layout, or a screen parsed past the ring the daemon
-    /// announced, is a bad message.
-    pub fn read_page(&self, id: u64, reader: &mut PageReader) -> Result<PageRead, BadMessage> {
+    /// breaks its layout, or a screen parsed past the ring's published end,
+    /// is a bad message.
+    ///
+    /// A worker publishes a lapped screen before the LAPPED event that moves
+    /// the announced end reaches the daemon, so the bound is the end the
+    /// holder published in the ring header, which the worker read first.
+    pub fn read_page(
+        &self,
+        id: u64,
+        reader: &mut PageReader,
+        rings: &dyn RingOffsets,
+    ) -> Result<PageRead, BadMessage> {
         let Some(ledger) = self.terminals.get(&id) else {
             return Err(BadMessage::NotInShard(id));
         };
         match reader.read() {
-            Ok(screen) if screen.parsed > ledger.ceiling => {
-                Err(BadMessage::Page { id, what: "screen parsed past the ring" })
-            }
-            Ok(screen) => Ok(PageRead::Screen(screen)),
+            Ok(screen) if screen.parsed <= ledger.ceiling => Ok(PageRead::Screen(screen)),
+            Ok(screen) => match rings.end(id) {
+                Some(end) if screen.parsed <= end => Ok(PageRead::Screen(screen)),
+                Some(_) => Err(BadMessage::Page { id, what: "screen parsed past the ring" }),
+                None => Ok(PageRead::Unconfirmed),
+            },
             Err(PageError::NotPublished) => Ok(PageRead::NotPublished),
             Err(PageError::Busy) => Ok(PageRead::Busy),
             Err(PageError::TooSmall { needed }) => {
@@ -378,7 +466,8 @@ impl WorkerOutputGuard {
     }
 }
 
-fn event_terminal(event: &Event) -> u64 {
+/// The terminal (wire id) an event is for; 0 for HELLO.
+pub(super) fn event_terminal(event: &Event) -> u64 {
     match event {
         Event::Hello { .. } => 0,
         Event::Parsed { id, .. }
@@ -410,68 +499,6 @@ fn check_need(id: u64, ledger: &TerminalLedger, needed: u64) -> Result<(), BadMe
         return Err(BadMessage::PageNeed { id, needed, bound });
     }
     Ok(())
-}
-
-/// The process the broker started for a worker.
-pub trait WorkerProcess {
-    /// End it now (SIGKILL); the broker reaps it.
-    fn kill(&mut self) -> io::Result<()>;
-}
-
-impl WorkerProcess for std::process::Child {
-    fn kill(&mut self) -> io::Result<()> {
-        std::process::Child::kill(self)
-    }
-}
-
-/// A worker ended for a bad message.
-#[derive(Debug, PartialEq, Eq)]
-pub struct WorkerEnd {
-    pub bad: BadMessage,
-    /// The terminals the broker reseeds (holder prologue plus ring tail).
-    pub reseed: Vec<u64>,
-    /// Set when the kill failed (the process had already exited).
-    pub kill_error: Option<io::ErrorKind>,
-}
-
-impl WorkerEnd {
-    /// [`BAD_MESSAGE_REASON`].
-    pub fn reason(&self) -> &'static str {
-        self.bad.reason()
-    }
-}
-
-/// Check every whole frame `reader` holds and push the events to act on to
-/// `accepted`. On the first bad frame the worker is killed before anything
-/// after it is looked at, and the end names the terminals to reseed.
-pub fn drain_frames(
-    reader: &mut FrameReader,
-    guard: &mut WorkerOutputGuard,
-    rings: &dyn RingOffsets,
-    process: &mut dyn WorkerProcess,
-    accepted: &mut Vec<Event>,
-) -> Result<(), WorkerEnd> {
-    loop {
-        let checked = match reader.next_frame() {
-            Ok(None) => return Ok(()),
-            Ok(Some(frame)) => guard.accept(frame, rings),
-            Err(error) => Err(BadMessage::Wire(error)),
-        };
-        match checked {
-            Ok(Some(event)) => accepted.push(event),
-            Ok(None) => {}
-            Err(bad) => return Err(end_worker(guard, process, bad)),
-        }
-    }
-}
-
-fn end_worker(
-    guard: &WorkerOutputGuard,
-    process: &mut dyn WorkerProcess,
-    bad: BadMessage,
-) -> WorkerEnd {
-    let kill_error = process.kill().err().map(|error| error.kind());
-    WorkerEnd { bad, reseed: guard.terminals().collect(), kill_error }
 }
 
 #[cfg(test)]

@@ -75,6 +75,8 @@ fn serve_fake(socket: &OwnedFd, poison: Option<u64>) -> std::io::Result<()> {
     let fd = socket.as_raw_fd();
     let mut reader = FrameReader::default();
     let mut parsed: HashMap<u64, u64> = HashMap::new();
+    // Each publish is newer than the last (the bad_message rule).
+    let mut publishes = 0;
     let crashes = |from: u64, to: u64| poison.is_some_and(|poison| (from..to).contains(&poison));
     let bad = |error: WireError| std::io::Error::other(error.to_string());
     let mut bootstrapped = false;
@@ -92,7 +94,9 @@ fn serve_fake(socket: &OwnedFd, poison: Option<u64>) -> std::io::Result<()> {
                 _ if !bootstrapped => return Err(std::io::Error::other("no BOOTSTRAP first")),
                 Command::Attach(attach) => {
                     parsed.insert(attach.id, attach.start);
-                    let event = Event::Parsed { id: attach.id, offset: attach.start, frame: 1 };
+                    publishes += 1;
+                    let event =
+                        Event::Parsed { id: attach.id, offset: attach.start, frame: publishes };
                     send_event(fd, &event)?;
                 }
                 Command::Advance { id, end } => {
@@ -101,7 +105,8 @@ fn serve_fake(socket: &OwnedFd, poison: Option<u64>) -> std::io::Result<()> {
                         return Err(std::io::Error::other("poison"));
                     }
                     parsed.insert(id, end);
-                    send_event(fd, &Event::Parsed { id, offset: end, frame: 2 })?;
+                    publishes += 1;
+                    send_event(fd, &Event::Parsed { id, offset: end, frame: publishes })?;
                 }
                 _ => {}
             }
