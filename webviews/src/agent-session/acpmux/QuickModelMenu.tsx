@@ -30,6 +30,8 @@ export type QuickMenu = {
   models: readonly Omit<QuickModel, "family">[];
   current?: string;
   onModel(id: string): void;
+  /// Cached machine auth health for the selected harness, independent of live-session model picks.
+  auth?: { note: string; logIn?(): void };
   /// The reasoning levels; absent when the model offers no choice.
   effort?: {
     levels: Choice[];
@@ -138,7 +140,13 @@ const runsOffers = (model: Pick<QuickModel, "id" | "offers">, current: string | 
 /// One row of any tab, for the width probe: its label, its secondary value, and whether it opens a
 /// submenu (a chevron), shows a number key, or shows the chosen model's check (wider: it has its own
 /// leading padding).
-export type ProbeRow = { label: string; value?: string; sub?: boolean; shortcut?: boolean; check?: boolean };
+export type ProbeRow = {
+  label: string;
+  value?: string;
+  sub?: boolean;
+  shortcut?: boolean;
+  check?: boolean;
+};
 
 /// Invisible width probes keep tab changes from resizing the surface horizontally. They never
 /// reserve height: the visible models and controls alone determine how tall the menu is.
@@ -575,6 +583,18 @@ export function QuickModelMenu({
           {inlineMore && families.onAddHarness && (moreShown || !shown?.more.length) && (
             <MenuItem className="acpmux-quick-item" onSelect={() => families.onAddHarness?.()}>
               <span className="acpmux-menu-label">{t("modelPicker.addHarness")}</span>
+            </MenuItem>
+          )}
+        </>
+      )}
+      {!query && onChatTab && menu.auth && !shown?.note && (
+        <>
+          <MenuItem disabled className="acpmux-quick-item acpmux-quick-note">
+            {menu.auth.note}
+          </MenuItem>
+          {menu.auth.logIn && (
+            <MenuItem className="acpmux-quick-item acpmux-quick-login" onSelect={menu.auth.logIn}>
+              <span className="acpmux-menu-label">{t("harness.logIn")}</span>
             </MenuItem>
           )}
         </>
