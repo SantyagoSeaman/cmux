@@ -65,6 +65,7 @@ cmux-tui-image-paste.workspace = true
 cmux-tui-remote-access.workspace = true
 cmux-tui-util.workspace = true
 cmux-kitty-media.workspace = true
+cmux-vt-stream.workspace = true
 cmux-api-compat.workspace = true
 cmux-terminal-iface.workspace = true
 cmux-terminal-sizing.workspace = true
@@ -120,6 +121,8 @@ backtrace = "0.3"
 reqwest.workspace = true
 rustls.workspace = true
 tokio.workspace = true
+# The VT worker's wire, sandbox policy and screen pages (vt_worker_runtime).
+cmux-vt-worker.workspace = true
 
 # Low Power Mode and the thermal state for the daemon's own Energy Saver
 # reading (mux/power_source.rs); the version cmux-motion's AppKit links.

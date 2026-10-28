@@ -173,3 +173,8 @@ cmux-trace.workspace = true
 cmux-unix-socket = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 rusqlite.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+# vt_worker_restart.rs reads the real worker's screen pages, and its
+# stand-in speaks the worker's wire; in the graph already via cmux-tui-core.
+cmux-vt-worker.workspace = true
