@@ -162,6 +162,26 @@ test.serial("with harnesses installed, the full picker's harness strip ends with
   expect(menu).not.toBeNull();
   const add = menu.querySelector<HTMLButtonElement>(".acpmux-mp-rail-list .acpmux-mp-add-harness")!;
   expect(add.getAttribute("aria-label")).toBe("Add harness…");
+  const lastHarness = [...menu.querySelectorAll<HTMLButtonElement>("[data-harness-index]:not(:disabled)")].at(-1)!;
+  const selected = menu.querySelector('[data-harness-index][aria-selected="true"]');
+  await act(async () => {
+    lastHarness.focus();
+    lastHarness.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  expect(window.document.activeElement).toBe(add);
+  expect(menu.querySelector('[data-harness-index][aria-selected="true"]')).toBe(selected);
+  expect(opened.count).toBe(0);
+  await act(async () => add.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+  const starred = menu.querySelector<HTMLButtonElement>('.acpmux-mp-rail-tab[aria-label="Starred"]')!;
+  expect(window.document.activeElement).toBe(starred);
+  await act(async () => starred.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })));
+  expect(window.document.activeElement).toBe(add);
+  for (const key of ["Enter", " "]) {
+    const event = new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    await act(async () => add.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(false);
+  }
+  // JSDOM does not synthesize the browser's native button click from a keyboard event.
   await act(async () => add.click());
   expect(opened.count).toBe(1);
 });
