@@ -118,8 +118,8 @@ backtrace = "0.3"
 # The app supervisor's net.fetch egress (same versions the cmux-tui binary
 # already links).
 [target.'cfg(unix)'.dependencies]
-# The VT worker's wire and screen pages, which the daemon checks
-# (vt_worker_runtime; p01-process-134, -141).
+# The VT worker's wire, sandbox policy and screen pages, which the daemon
+# brokers and checks (vt_worker_runtime; p01-process-134, -141).
 cmux-vt-worker.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

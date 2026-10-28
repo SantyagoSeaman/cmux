@@ -22,12 +22,16 @@ use ghostty_vt::{
 use crate::sandbox::{SandboxMechanism, SandboxPolicy};
 use crate::shm::{self, Mapping};
 
-/// The wire version a worker's HELLO names.
-pub const WIRE_VERSION: u16 = 1;
+/// The wire version a worker's HELLO names. 2: ATTACH carries the
+/// terminal's prologue (the daemon broker's reseed, p01-process-134).
+pub const WIRE_VERSION: u16 = 2;
 /// Frame header bytes.
 pub const FRAME_HEADER: usize = 8;
 /// The largest payload either side sends.
 pub const MAX_PAYLOAD: usize = 1 << 20;
+/// The largest prologue an ATTACH carries: the holder keeps one of at most
+/// 128 KiB (p01-process-210), with room.
+pub const MAX_PROLOGUE: usize = 256 << 10;
 /// The most bytes one PTY_WRITE, TITLE or PWD event carries.
 pub const MAX_EVENT_TEXT: usize = 64 << 10;
 /// The most bytes of one OSC 7501 text field: libghostty refuses a longer
@@ -109,6 +113,15 @@ pub struct Attach {
     pub id: u64,
     /// The ring offset the parser starts at.
     pub start: u64,
+    /// A VT replay of the screen the parser starts from (the holder's
+    /// prologue; empty for a blank screen). The worker parses it before
+    /// its first PARSED and writes no PTY answer for it: it is the screen
+    /// at an offset whose queries were answered already.
+    pub prologue: Vec<u8>,
+    /// Output between the prologue and `start` is not replayed: the worker
+    /// cancels a sequence the prologue left open (CAN), as the daemon's
+    /// sink does at a gap.
+    pub gap: bool,
     pub ring: OwnedFd,
     pub ring_capacity: u64,
     pub page: OwnedFd,
@@ -224,7 +237,11 @@ pub enum Event {
         frame: u64,
     },
     /// Bytes the parser answers to the PTY (DA, DSR...); the daemon
-    /// validates them before it writes.
+    /// validates them before it writes. Sent before the PARSED of the slice
+    /// whose output made them, so that PARSED says which output they
+    /// answer: the daemon writes them only when it covers output no earlier
+    /// worker answered (a reseed replays answered output). A prologue's
+    /// queries make none (see [`Attach::prologue`]).
     PtyWrite {
         id: u64,
         bytes: Vec<u8>,
@@ -356,6 +373,11 @@ pub fn send_command(socket: RawFd, command: &Command) -> io::Result<()> {
             }
             put_geometry(&mut out, attach.geometry);
             put_kitty_limits(&mut out, attach.kitty_limits);
+            if attach.prologue.len() > MAX_PROLOGUE {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "prologue too large"));
+            }
+            out.push(u8::from(attach.gap));
+            out.extend_from_slice(&attach.prologue);
             send(socket, kind::ATTACH, &out, &[attach.ring.as_raw_fd(), attach.page.as_raw_fd()])
         }
         Command::KittyLimits { id, limits } => {
@@ -768,7 +790,16 @@ pub fn decode_command(frame: Frame) -> Result<Command, WireError> {
                 (p.u64()?, p.u64()?, p.u64()?, p.u64()?, p.u64()?);
             let geometry = p.geometry()?;
             let kitty_limits = p.kitty_limits()?;
-            p.end()?;
+            let gap = match p.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(WireError::BadValue("attach gap")),
+            };
+            let prologue = p.rest();
+            if prologue.len() > MAX_PROLOGUE {
+                return Err(WireError::BadValue("prologue length"));
+            }
+            let prologue = prologue.to_vec();
             let mut fds = frame.fds.into_iter();
             let (Some(ring), Some(page)) = (fds.next(), fds.next()) else {
                 return Err(WireError::Descriptors { kind, expected: 2, got: 0 });
@@ -776,6 +807,8 @@ pub fn decode_command(frame: Frame) -> Result<Command, WireError> {
             return Ok(Command::Attach(Attach {
                 id,
                 start,
+                prologue,
+                gap,
                 ring,
                 ring_capacity,
                 page,

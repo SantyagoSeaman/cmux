@@ -215,7 +215,7 @@ impl Fuzz {
 #[derive(Debug)]
 struct NoProcess;
 
-impl cmux_tui_core::vt_worker_runtime::WorkerProcess for NoProcess {
+impl cmux_tui_core::vt_worker_runtime::GuardedProcess for NoProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         Ok(())
     }
