@@ -98,6 +98,8 @@ pub struct Conn {
     /// The media files of peers' chats it opened, closed on the peer when it closes
     /// (`media_forward.rs`).
     pub(super) remote_media: media_forward::RemoteMedia,
+    /// Requests this daemon sent the client, waiting on its answer (`client_request.rs`).
+    client_requests: client_request::ClientRequests,
 }
 
 // Bound only request handlers that do finite work on behalf of the connection.
@@ -281,7 +283,8 @@ impl Conn {
     }
 
     fn send(&self, msg: &Message) {
-        let control = matches!(msg, Message::Response { .. });
+        // A request to the client waits on its answer, so it is never dropped as lossy.
+        let control = matches!(msg, Message::Response { .. } | Message::Request { .. });
         let masked = (!self.raw_text).then(|| peer_text::masked(msg)).flatten();
         let msg = masked.as_ref().unwrap_or(msg);
         // No message larger than one frame (`rpc::MAX_MESSAGE_BYTES`): a reply goes as its error,
@@ -1146,6 +1149,7 @@ async fn serve_connection_from(
             crate::hub::media_handles::Handles::default()
         },
         remote_media: media_forward::RemoteMedia::default(),
+        client_requests: Default::default(),
     });
     tracing::debug!(conn = %conn.id, "client connected");
 
@@ -1251,9 +1255,9 @@ async fn serve_connection_from(
                     }
                 }
             }
-            Message::Response { .. } => {
-                // acpmux sends no requests to clients today (permission goes
-                // through _acpmux/permission_pending + permission_respond).
+            // An answer to a request this daemon sent the client (`client_request.rs`).
+            Message::Response { id, result, error } => {
+                conn.settle_client_request(&id, result, error);
             }
         }
     }
@@ -1463,6 +1467,7 @@ fn mux_meta(params: &Value) -> Option<&Value> {
 
 mod agent_messages;
 mod app_reply;
+mod client_request;
 mod clock_text;
 pub(crate) use clock_text::iso;
 mod change_kind;
