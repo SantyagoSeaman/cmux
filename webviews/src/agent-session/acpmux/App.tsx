@@ -51,6 +51,7 @@ import {
   type QueuedMessageActionsValue,
 } from "./conversation/QueuedMessageCard";
 import { AcpmuxDirectClient, type AcpmuxHostConfig, harnessBlock, type HarnessBlock, isTrustRefusal } from "./direct";
+import { authBlocksSend, authText, readSessionAuth, type SessionAuth } from "./sessionAuth";
 import { postNative } from "./native";
 import { NativeError } from "./nativeError";
 import { errorMessage } from "./transportErrors";
@@ -4782,9 +4783,65 @@ function AcpmuxPane() {
       live = false;
     };
   }, [connected, rulesLocal, snapshot.sessionId, turnWorking]);
+  // This verdict belongs to this chat or the exact prospective New Tab harness/host/route.
+  // Host-wide harness health is never authority for a routed or running chat.
+  const [authRoute, setAuthRoute] = useState<string | null | undefined>();
+  const [routeChanging, setRouteChanging] = useState(false);
+  const [authRead, setAuthRead] = useState<{ key: string; value: SessionAuth }>();
+  const authHarness = snapshot.summary?.harness ?? heldPick(snapshot).harness;
+  const authSession = snapshot.sessionId;
+  const authHost = snapshot.summary?.peer;
+  const authKey = JSON.stringify([authSession, authHarness, authHost, authRoute]);
+  useEffect(() => {
+    setAuthRoute(undefined);
+    setRouteChanging(false);
+    setAuthRead(undefined);
+  }, [authSession]);
+  useEffect(() => {
+    const client = directClient.current;
+    if (!connected || !client || (!authSession && !authHarness)) {
+      setAuthRead(undefined);
+      return;
+    }
+    let live = true;
+    const query = authSession
+      ? { sessionId: authSession }
+      : { target: { harness: authHarness!, ...(authHost ? { host: authHost } : {}),
+          ...(authRoute ? { routeId: authRoute } : {}) } };
+    void client.sessionAuth(query, healthRecheck > 0 || authRoute !== undefined)
+      .then((reply) => {
+        if (!live) return;
+        const value = readSessionAuth(reply);
+        // The response may be from a prior selected chat despite the transport resolving now.
+        if (authSession && value.fromSessionId && value.fromSessionId !== authSession) return;
+        setAuthRead({ key: authKey, value });
+        setRouteChanging(false);
+      })
+      // Older daemons lack sessionAuth: unknown is nonblocking, never a guessed sign-out.
+      .catch(() => {
+        if (!live) return;
+        setAuthRead({ key: authKey, value: readSessionAuth(undefined) });
+        setRouteChanging(false);
+      });
+    return () => { live = false; };
+  }, [connected, authSession, authHarness, authHost, authRoute, authKey, healthRecheck, snapshot.isWorking]);
+  const sessionAuth = authRead?.key === authKey ? authRead.value : undefined;
+  const authBlock = routeChanging ? "Checking account…" : authBlocksSend(sessionAuth) ? authText(sessionAuth) : undefined;
   const signIn = useMemo<SignIn>(
     () => ({
       signedOut,
+      sessionAuth,
+      recheckSession: recheckHealth,
+      loginSession: () => {
+        const command = sessionAuth?.login?.command;
+        if (sessionAuth?.login?.kind !== "terminal" || !command) return;
+        healthStale.current = true;
+        void callNative("tab.open", {
+          kind: "terminal", text: command,
+          ...(snapshot.summary?.cwd ? { cwd: snapshot.summary.cwd } : {}),
+          run: true,
+        }).catch(() => undefined);
+      },
       logIn: (_harness, login) => {
         healthStale.current = true;
         void callNative("tab.open", {
@@ -4795,7 +4852,7 @@ function AcpmuxPane() {
         }).catch(() => undefined);
       },
     }),
-    [signedOut, snapshot.summary?.cwd],
+    [signedOut, sessionAuth, recheckHealth, snapshot.summary?.cwd],
   );
   // The composer's Account menu: this Mac's acpmux routes for the chat (acpmux refuses them to Web
   // and peer connections), read when the menu opens.
@@ -4811,7 +4868,15 @@ function AcpmuxPane() {
             set: async (sessionId, routeId) => {
               const client = directClient.current;
               if (!client) throw new Error("acpmux.notConnected");
-              await client.setChatRoute(sessionId, routeId);
+              setRouteChanging(true);
+              setAuthRead(undefined);
+              try {
+                await client.setChatRoute(sessionId, routeId);
+                setAuthRoute(routeId);
+              } catch (error) {
+                setRouteChanging(false);
+                throw error;
+              }
             },
           }
         : undefined,
@@ -9247,6 +9312,8 @@ function AcpmuxPane() {
               // host, and the chat shows its receipt; no acpmux chat starts.
               // While the tab's run holds the chat nothing else sends as Sandboxed (the composer keeps
               // the prompt); a composer kept for a refused draft sends as Persistent once picked.
+              // The Trust continuation uses ComposerHandle.send(force), but never bypasses auth.
+              if (authBlock) return false;
               if (sandboxHoldsChat && !sandboxDraftMoved) return false;
               if (sandboxPickedNotOffered) {
                 sandbox.refuse(text, sandboxNotNow);
@@ -9497,6 +9564,7 @@ function AcpmuxPane() {
             // No prompt goes while a picked folder waits for the user's answer, or while the chat only
             // shows a session another app runs (WatchBanner).
             blocked={pendingFolder ? {} : trustAsk.blocked}
+            authBlock={authBlock}
             accessory={<DictationMic dictation={dictation} />}
             dictating={isWaitingForWords(dictation.state)}
             onImportFile={importFile}
