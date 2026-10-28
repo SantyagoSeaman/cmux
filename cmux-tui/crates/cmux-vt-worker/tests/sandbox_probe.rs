@@ -1,11 +1,12 @@
 //! The worker's sandbox, applied as the worker applies it, denies what a
 //! compromised parser would reach for: `open()`, `fork()` and
 //! `socket(AF_INET)` everywhere; `bootstrap_look_up("com.apple.pasteboard.1")`
-//! on macOS (Seatbelt); `execve`, signals to other processes and, with
-//! landlock, any path at all (here: `mkdir`) on Linux (seccomp-bpf and
-//! landlock). It still allows what the worker needs: mapping a segment it
-//! was given read-only, writing to the socket it holds and, on Linux, a new
-//! thread. Every check also runs before the sandbox and must succeed there,
+//! on macOS (Seatbelt); `execve`, signals to other processes, reading the
+//! parent's limits, and `mkdir`, `unlink`, `rename`, `truncate` and `chmod`
+//! on Linux (seccomp-bpf, with and without landlock: a kernel without
+//! landlock gets seccomp alone, so the probe applies both). It still allows
+//! what the worker needs: mapping a segment it was given read-only, writing
+//! to the socket it holds and, on Linux, a new thread. Every check also runs before the sandbox and must succeed there,
 //! so a denial is the sandbox's; on macOS notifyd's lookup is the Mach
 //! control where an SSH session cannot reach the pasteboard at all.
 //!
@@ -29,7 +30,7 @@ use cmux_vt_worker::ring_view::RingView;
 use cmux_vt_worker::sandbox::{self, SandboxMechanism, SandboxPolicy};
 
 const PROBE_ENV: &str = "CMUX_VT_WORKER_SANDBOX_PROBE";
-/// A private directory the parent made, where the Linux probe tries `mkdir`.
+/// A private directory the parent made, where the Linux probe changes files.
 const SCRATCH_ENV: &str = "CMUX_VT_WORKER_SANDBOX_SCRATCH";
 
 /// `open("/etc/hosts")` succeeded.
@@ -87,7 +88,9 @@ fn checks(stdout: &str, prefix: &str) -> BTreeMap<String, bool> {
 mod platform {
     use std::ffi::{CStr, c_char, c_int};
 
-    use super::{BTreeMap, SandboxMechanism, can_fork, can_open, can_open_inet_socket};
+    use super::{
+        BTreeMap, SandboxMechanism, SandboxPolicy, can_fork, can_open, can_open_inet_socket,
+    };
 
     unsafe extern "C" {
         static bootstrap_port: u32;
@@ -111,7 +114,17 @@ mod platform {
     /// `mach-lookup` even where the pasteboard check proves nothing.
     const NOTIFYD: &CStr = c"com.apple.system.notification_center";
 
-    pub fn probe() -> String {
+    pub fn cases() -> Vec<(&'static str, Vec<SandboxMechanism>)> {
+        vec![("compiled", vec![SandboxMechanism::Seatbelt])]
+    }
+
+    pub fn policy(_case: &str) -> SandboxPolicy {
+        cmux_vt_worker::sandbox::compile_policy().expect("compile")
+    }
+
+    pub fn prepare() {}
+
+    pub fn probe(_phase: &str) -> String {
         format!(
             "open={} fork={} socket={} pasteboard={} notifyd={}",
             can_open(),
@@ -120,10 +133,6 @@ mod platform {
             can_look_up(PASTEBOARD),
             can_look_up(NOTIFYD)
         )
-    }
-
-    pub fn expected_mechanisms() -> Vec<SandboxMechanism> {
-        vec![SandboxMechanism::Seatbelt]
     }
 
     pub fn judge(before: &BTreeMap<String, bool>, after: &BTreeMap<String, bool>, stdout: &str) {
@@ -147,11 +156,53 @@ mod platform {
 mod platform {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::path::{Path, PathBuf};
 
     use super::{
-        BTreeMap, SCRATCH_ENV, SandboxMechanism, can_fork, can_open, can_open_inet_socket,
+        BTreeMap, SCRATCH_ENV, SandboxMechanism, SandboxPolicy, can_fork, can_open,
+        can_open_inet_socket,
     };
+
+    /// The policies the probe applies: the daemon's own choice, and seccomp
+    /// alone, which is what a kernel without landlock gets.
+    pub fn cases() -> Vec<(&'static str, Vec<SandboxMechanism>)> {
+        vec![
+            ("compiled", vec![SandboxMechanism::Seccomp, SandboxMechanism::SeccompLandlock]),
+            ("seccomp", vec![SandboxMechanism::Seccomp]),
+        ]
+    }
+
+    pub fn policy(case: &str) -> SandboxPolicy {
+        match case {
+            "seccomp" => SandboxPolicy::Seccomp { landlock: false },
+            _ => cmux_vt_worker::sandbox::compile_policy().expect("compile"),
+        }
+    }
+
+    /// A file of the parent's scratch directory, named for the phase.
+    fn scratch(phase: &str, name: &str) -> Option<PathBuf> {
+        let scratch = std::env::var_os(SCRATCH_ENV)?;
+        Some(Path::new(&scratch).join(format!("{phase}-{name}")))
+    }
+
+    fn c_path(path: &Path) -> Option<CString> {
+        CString::new(path.as_os_str().as_bytes()).ok()
+    }
+
+    /// The files each phase's checks change, made before the sandbox.
+    pub fn prepare() {
+        for phase in ["before", "after"] {
+            for name in ["unlink", "rename", "truncate", "chmod"] {
+                let path = scratch(phase, name).expect("scratch directory");
+                std::fs::write(path, b"cmux").expect("scratch file");
+            }
+        }
+    }
+
+    /// The path call `call` on the phase's file `name` succeeded.
+    fn can_change(phase: &str, name: &str, call: impl FnOnce(&CString) -> libc::c_int) -> bool {
+        scratch(phase, name).as_deref().and_then(c_path).is_some_and(|path| call(&path) == 0)
+    }
 
     /// `execve` reached the path lookup (anything but `EPERM` from the
     /// filter): the path does not exist, so nothing runs either way.
@@ -176,15 +227,13 @@ mod platform {
         unsafe { libc::kill(libc::getppid(), 0) == 0 }
     }
 
-    /// A `mkdir` in the parent's scratch directory succeeded.
-    fn can_make_dir() -> bool {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let Some(scratch) = std::env::var_os(SCRATCH_ENV) else { return false };
-        let dir = std::path::Path::new(&scratch)
-            .join(format!("d{}", NEXT.fetch_add(1, Ordering::Relaxed)));
-        let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else { return false };
-        // SAFETY: a NUL-terminated path.
-        unsafe { libc::mkdir(path.as_ptr(), 0o700) == 0 }
+    /// `prlimit64` read the parent's descriptor limit (it sets nothing).
+    fn can_read_parent_limit() -> bool {
+        let mut limit = libc::rlimit64 { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: no new limit (null) and a writable out-parameter.
+        unsafe {
+            libc::prlimit64(libc::getppid(), libc::RLIMIT_NOFILE, std::ptr::null(), &mut limit) == 0
+        }
     }
 
     /// A new thread (`clone` with `CLONE_THREAD`) started and ran.
@@ -192,63 +241,71 @@ mod platform {
         std::thread::Builder::new().spawn(|| 7).is_ok_and(|thread| thread.join().ok() == Some(7))
     }
 
-    pub fn probe() -> String {
+    pub fn probe(phase: &str) -> String {
+        // SAFETY (each call below): NUL-terminated paths in the parent's
+        // scratch directory.
+        let mkdir = can_change(phase, "dir", |path| unsafe { libc::mkdir(path.as_ptr(), 0o700) });
+        let unlink = can_change(phase, "unlink", |path| unsafe { libc::unlink(path.as_ptr()) });
+        let renamed = scratch(phase, "renamed").as_deref().and_then(c_path);
+        let rename = can_change(phase, "rename", |path| match &renamed {
+            Some(to) => unsafe { libc::rename(path.as_ptr(), to.as_ptr()) },
+            None => -1,
+        });
+        let truncate =
+            can_change(phase, "truncate", |path| unsafe { libc::truncate(path.as_ptr(), 0) });
+        let chmod = can_change(phase, "chmod", |path| unsafe { libc::chmod(path.as_ptr(), 0o600) });
         format!(
-            "open={} fork={} socket={} exec={} signal={} mkdir={} thread={}",
+            "open={} fork={} socket={} exec={} signal={} prlimit={} mkdir={mkdir} \
+             unlink={unlink} rename={rename} truncate={truncate} chmod={chmod} thread={}",
             can_open(),
             can_fork(),
             can_open_inet_socket(),
             can_exec(),
             can_signal_parent(),
-            can_make_dir(),
+            can_read_parent_limit(),
             can_spawn_thread()
         )
     }
 
-    pub fn expected_mechanisms() -> Vec<SandboxMechanism> {
-        vec![SandboxMechanism::Seccomp, SandboxMechanism::SeccompLandlock]
-    }
+    /// Denied with seccomp alone, landlock or not: Chrome's baseline
+    /// denies the file-system set by syscall, and landlock never covers
+    /// chmod.
+    const DENIED: [&str; 11] = [
+        "open", "fork", "socket", "exec", "signal", "prlimit", "mkdir", "unlink", "rename",
+        "truncate", "chmod",
+    ];
 
     pub fn judge(before: &BTreeMap<String, bool>, after: &BTreeMap<String, bool>, stdout: &str) {
-        for check in ["open", "fork", "socket", "exec", "signal", "mkdir", "thread"] {
-            assert_eq!(before.get(check), Some(&true), "{check} before the sandbox: {stdout}");
+        for check in DENIED.iter().chain(&["thread"]) {
+            assert_eq!(before.get(*check), Some(&true), "{check} before the sandbox: {stdout}");
         }
-        for check in ["open", "fork", "socket", "exec", "signal"] {
+        for check in DENIED {
             assert_eq!(after.get(check), Some(&false), "{check} after the sandbox: {stdout}");
         }
         assert_eq!(after.get("thread"), Some(&true), "a thread after the sandbox: {stdout}");
-        let landlock = stdout.contains("mechanism=SeccompLandlock");
-        assert_eq!(
-            after.get("mkdir"),
-            Some(&!landlock),
-            "landlock denies every path, seccomp alone does not: {stdout}"
-        );
-        if !landlock {
-            eprintln!("this kernel has no landlock; seccomp alone was checked");
-        }
     }
 }
 
 #[test]
 fn probe_child() {
-    if std::env::var_os(PROBE_ENV).is_none() {
-        return;
-    }
+    let Some(case) = std::env::var_os(PROBE_ENV) else { return };
+    let case = case.to_string_lossy().into_owned();
     // What the worker gets before its sandbox: a ring and its socket.
     let ring = cmux_holder::ring::Ring::new(0, 4096);
     let segment = ring.segment().expect("shared ring").try_clone().expect("dup ring");
     let (socket, peer) = UnixStream::pair().expect("socketpair");
+    platform::prepare();
     // The same checks before the sandbox: each "after" denial below means
     // something only where the call works without it.
-    println!("before {}", platform::probe());
+    println!("before {}", platform::probe("before"));
 
-    let policy = sandbox::compile_policy().expect("compile");
+    let policy = platform::policy(&case);
     assert!(matches!(policy, SandboxPolicy::Seatbelt(_) | SandboxPolicy::Seccomp { .. }));
     let mechanism = sandbox::apply(&policy).expect("apply");
     assert_eq!(mechanism, policy.mechanism());
     println!("mechanism={mechanism:?}");
 
-    println!("after {}", platform::probe());
+    println!("after {}", platform::probe("after"));
     let mapped = RingView::open(segment, 4096).is_ok();
     // SAFETY: writes one byte from a live local to a live socket.
     let sent = unsafe { libc::write(socket.as_raw_fd(), b"x".as_ptr().cast(), 1) } == 1;
@@ -258,26 +315,29 @@ fn probe_child() {
 
 #[test]
 fn the_worker_sandbox_denies_files_processes_network_and_services() {
-    let scratch = std::env::temp_dir().join(format!("cmux-vt-worker-probe-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).expect("scratch directory");
-    let output = Command::new(std::env::current_exe().expect("test binary"))
-        .args(["--exact", "probe_child", "--nocapture", "--test-threads=1"])
-        .env(PROBE_ENV, "1")
-        .env(SCRATCH_ENV, &scratch)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run the probe");
-    let _ = std::fs::remove_dir_all(&scratch);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "probe failed: {stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mechanism = platform::expected_mechanisms()
-        .into_iter()
-        .find(|mechanism| stdout.contains(&format!("mechanism={mechanism:?}")));
-    assert!(mechanism.is_some(), "the platform's sandbox applied: {stdout}");
-    platform::judge(&checks(&stdout, "before "), &checks(&stdout, "after "), &stdout);
-    assert!(stdout.contains("needs map=true socket_write=true"), "{stdout}");
+    for (case, mechanisms) in platform::cases() {
+        let scratch = std::env::temp_dir()
+            .join(format!("cmux-vt-worker-probe-{}-{case}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch directory");
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "probe_child", "--nocapture", "--test-threads=1"])
+            .env(PROBE_ENV, case)
+            .env(SCRATCH_ENV, &scratch)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run the probe");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{case} probe failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            mechanisms.iter().any(|mechanism| stdout.contains(&format!("mechanism={mechanism:?}"))),
+            "{case}: one of {mechanisms:?} applied: {stdout}"
+        );
+        platform::judge(&checks(&stdout, "before "), &checks(&stdout, "after "), &stdout);
+        assert!(stdout.contains("needs map=true socket_write=true"), "{case}: {stdout}");
+    }
 }

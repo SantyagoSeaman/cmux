@@ -91,7 +91,7 @@ pub use strikes::{
 };
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cmux_vt_worker::sandbox::SandboxError;
@@ -137,9 +137,18 @@ impl std::error::Error for StartError {}
 /// with its VT pool threads. Blocking (hash, copy and one exec): call it off
 /// any request path, where the broker starts.
 pub fn worker_executable() -> Option<PathBuf> {
-    crate::host_exe::vt_worker_executable(&|answer| {
-        cmux_vt_worker::wire::parse_version_line(answer) == Some(cmux_vt_worker::wire::WIRE_VERSION)
-    })
+    crate::host_exe::vt_worker_executable(&speaks_this_wire)
+}
+
+/// [`worker_executable`] for the worker file `source`, its macOS copy made
+/// under `root` (a test that swaps a bundle of its own).
+pub fn worker_executable_in(root: &Path, source: &Path) -> Option<PathBuf> {
+    crate::host_exe::vt_worker_executable_in(root, source, &speaks_this_wire)
+}
+
+/// A worker's `--version` answer names this daemon's wire.
+fn speaks_this_wire(answer: &str) -> bool {
+    cmux_vt_worker::wire::parse_version_line(answer) == Some(cmux_vt_worker::wire::WIRE_VERSION)
 }
 
 /// [`start_process_workers`] with the bundled worker ([`worker_executable`]);

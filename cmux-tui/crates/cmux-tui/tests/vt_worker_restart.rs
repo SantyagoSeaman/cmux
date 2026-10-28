@@ -14,6 +14,13 @@
 //!   the worker does, and aborts when it is asked to parse the poisoned
 //!   offset.
 //!
+//! - The app update (task 211): the broker runs the worker the platform
+//!   resolves from a bundle (`worker_executable_in`: a content-addressed
+//!   copy on macOS, the bundle's own file on Linux). After an update swaps
+//!   the bundle, a SIGKILLed worker's successor restores every terminal to
+//!   the same screens; a successor of another wire hands every terminal
+//!   back to the pool threads with its screen and ring intact.
+//!
 //! The real worker is the `cmux-vt-worker` cargo builds beside `cmux-tui`
 //! (a `--workspace` run, as CI's, or `cargo build -p cmux-vt-worker` first),
 //! or the file `CMUX_VT_WORKER_EXE` names. A missing one fails the tests.
@@ -30,10 +37,10 @@ use std::time::{Duration, Instant};
 use cmux_holder::ring::Ring;
 
 use cmux_tui_core::vt_worker_runtime::{
-    BrokerConfig, Geometry, MediaAnswer, MediaReply, MediaRequest, ProcessLauncher, Prologue,
-    Reseed, ReseedMode, RingSpan, SandboxMechanism, ScreenPage, VT_WORKERS_ENV, VtTerminalKey,
-    VtTerminalSpec, VtWorkerBroker, VtWorkerHost, WORKER_FD, WorkerEvent, WorkerLauncher,
-    WorkerLifecycle, WorkerSandbox, start_process_workers,
+    BrokerConfig, Geometry, HandBack, MediaAnswer, MediaReply, MediaRequest, ProcessLauncher,
+    Prologue, Reseed, ReseedMode, RingSpan, SandboxMechanism, ScreenPage, VT_WORKERS_ENV,
+    VtTerminalKey, VtTerminalSpec, VtWorkerBroker, VtWorkerHost, WORKER_FD, WorkerEvent,
+    WorkerLauncher, WorkerLifecycle, WorkerSandbox, start_process_workers, worker_executable_in,
 };
 use cmux_vt_worker::screen_page::{PageReader, Screen};
 use cmux_vt_worker::wire::{
@@ -44,6 +51,8 @@ use ghostty_vt::KittyGraphicsLimits;
 /// The env entry that makes this binary a stand-in worker; its value is
 /// the poisoned output offset.
 const FAKE_WORKER_ENV: &str = "CMUX_VT_FAKE_WORKER";
+/// The wire version the stand-in worker's HELLO reports (default: this one).
+const FAKE_WIRE_ENV: &str = "CMUX_VT_FAKE_WIRE";
 /// The env entry that names the real worker instead of the one beside
 /// `cmux-tui`.
 const WORKER_EXE_ENV: &str = "CMUX_VT_WORKER_EXE";
@@ -60,19 +69,23 @@ const RING_CAPACITY: usize = 1 << 20;
 fn fake_worker_process() {
     let Some(poison) = std::env::var_os(FAKE_WORKER_ENV) else { return };
     let poison: Option<u64> = poison.to_str().and_then(|value| value.parse().ok());
+    let wire = std::env::var(FAKE_WIRE_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(WIRE_VERSION);
     // SAFETY: the broker's launcher gives this process its link at WORKER_FD,
     // and nothing else here owns that descriptor.
     let socket = unsafe { OwnedFd::from_raw_fd(WORKER_FD) };
-    if serve_fake(&socket, poison).is_err() {
+    if serve_fake(&socket, poison, wire).is_err() {
         // What a parser crash looks like to the broker: the process ends.
         std::process::abort();
     }
     std::process::exit(0);
 }
 
-/// Answers the broker as the worker does, parsing nothing; `Err` when it
-/// reaches `poison`.
-fn serve_fake(socket: &OwnedFd, poison: Option<u64>) -> std::io::Result<()> {
+/// Answers the broker as the worker does, parsing nothing, with a HELLO of
+/// `wire`; `Err` when it reaches `poison`.
+fn serve_fake(socket: &OwnedFd, poison: Option<u64>, wire: u16) -> std::io::Result<()> {
     let fd = socket.as_raw_fd();
     let mut reader = FrameReader::default();
     let mut parsed: HashMap<u64, u64> = HashMap::new();
@@ -88,7 +101,7 @@ fn serve_fake(socket: &OwnedFd, poison: Option<u64>) -> std::io::Result<()> {
                         .map_err(|error| std::io::Error::other(error.to_string()))?;
                     bootstrapped = true;
                     let pid = std::process::id();
-                    send_event(fd, &Event::Hello { version: WIRE_VERSION, sandbox, pid })?;
+                    send_event(fd, &Event::Hello { version: wire, sandbox, pid })?;
                 }
                 _ if !bootstrapped => return Err(std::io::Error::other("no BOOTSTRAP first")),
                 Command::Attach(attach) => {
@@ -414,4 +427,171 @@ fn a_poison_pill_crashing_twice_in_10_s_restores_from_the_prologue_only() {
         }
     }
     drop(broker);
+}
+
+/// An app bundle (a package install on Linux) of the test's own:
+/// `bin/cmux-vt-worker`, the platform's copy root, and the files an update
+/// moves in, all written before any worker runs from them.
+struct Bundle {
+    base: PathBuf,
+    root: PathBuf,
+    worker: PathBuf,
+}
+
+impl Bundle {
+    fn new(name: &str) -> Self {
+        let base =
+            std::env::temp_dir().join(format!("cmux-vt-worker-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let worker = base.join("cmux.app/Contents/Resources/bin/cmux-vt-worker");
+        std::fs::create_dir_all(worker.parent().expect("bin")).expect("the bundle");
+        std::fs::create_dir_all(base.join("staged")).expect("the update's files");
+        std::fs::copy(real_worker(), &worker).expect("the bundle's worker");
+        Self { root: base.join("host-exe"), worker, base }
+    }
+
+    /// The next build's worker, of this wire.
+    fn stage_this_wire(&self) -> PathBuf {
+        let staged = self.base.join("staged/this-wire");
+        std::fs::copy(real_worker(), &staged).expect("stage the next worker");
+        staged
+    }
+
+    /// The next build's worker, of wire `wire`: it answers `--version`
+    /// with that wire and, run as a worker, is the stand-in whose HELLO
+    /// names it.
+    fn stage_other_wire(&self, wire: u16) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = std::env::current_exe().expect("this test binary");
+        let exe = exe.to_str().filter(|exe| !exe.contains('\'')).expect("a plain test path");
+        let staged = self.base.join("staged/other-wire");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = --version ]; then echo 'cmux-vt-worker wire {wire}'; exit 0; fi\n\
+             {FAKE_WORKER_ENV}=none {FAKE_WIRE_ENV}={wire} \
+             exec '{exe}' --exact fake_worker_process --test-threads=1\n"
+        );
+        std::fs::write(&staged, script).expect("stage the other wire's worker");
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .expect("make it executable");
+        staged
+    }
+
+    /// The update: the old bundle is deleted and a new one, with `next` as
+    /// its worker, takes its place.
+    fn update(&self, next: &Path) {
+        std::fs::remove_dir_all(self.base.join("cmux.app")).expect("delete the old bundle");
+        std::fs::create_dir_all(self.worker.parent().expect("bin")).expect("the new bundle");
+        std::fs::rename(next, &self.worker).expect("the new bundle's worker");
+    }
+}
+
+impl Drop for Bundle {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// One shard running the worker the platform resolves from a bundle, with
+/// 16 terminals parsed.
+struct Parsed {
+    broker: VtWorkerBroker,
+    terminals: Shared,
+    events: Receiver<Seen>,
+    exe: PathBuf,
+    pid: u32,
+    screens: Vec<Screen>,
+}
+
+fn sixteen_parsed_terminals(bundle: &Bundle) -> Parsed {
+    let exe = worker_executable_in(&bundle.root, &bundle.worker)
+        .expect("the bundle's worker speaks this wire");
+    if cfg!(target_os = "macos") {
+        assert!(exe.starts_with(&bundle.root), "macOS runs workers from a copy: {}", exe.display());
+    }
+    let (broker, terminals, events) = one_shard(ProcessLauncher::new(&exe));
+    let mut ends = HashMap::new();
+    for key in 1..=16u64 {
+        let bytes = output(key);
+        ends.insert(VtTerminalKey(key), bytes.len() as u64);
+        broker.attach(add_terminal(&terminals, key, (0, b""), &bytes));
+    }
+    let pid = started(&events);
+    all_parsed(&events, &ends);
+    let screens = (1..=16).map(|key| screen(&terminals, key)).collect();
+    Parsed { broker, terminals, events, exe, pid, screens }
+}
+
+/// SIGKILL `pid`, the shard's worker, and wait for its loss.
+fn kill_worker(events: &Receiver<Seen>, pid: u32) {
+    // SAFETY: kill(2) with a pid the broker started and has not reaped.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let lost = life(events, |event| matches!(event, WorkerLifecycle::Lost { .. }));
+    assert!(
+        matches!(&lost, WorkerLifecycle::Lost { deaths: 1, degraded, .. } if degraded.is_empty()),
+        "{lost:?}"
+    );
+}
+
+#[test]
+fn after_an_app_update_a_restarted_worker_restores_every_terminal_on_the_daemons_build() {
+    let bundle = Bundle::new("update");
+    // macOS runs workers from the copy, so the new bundle's worker may speak
+    // another wire; Linux runs the bundle's file, which a package update
+    // replaces with the next build's (another wire is the hand-back below).
+    let next = if cfg!(target_os = "macos") {
+        bundle.stage_other_wire(WIRE_VERSION + 1)
+    } else {
+        bundle.stage_this_wire()
+    };
+    let parsed = sixteen_parsed_terminals(&bundle);
+    bundle.update(&next);
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            worker_executable_in(&bundle.root, &bundle.worker).as_deref(),
+            Some(parsed.exe.as_path()),
+            "the daemon keeps its own build's copy after the swap"
+        );
+    }
+    kill_worker(&parsed.events, parsed.pid);
+    let second = started(&parsed.events);
+    assert_eq!(restored(&parsed.events, 16), ReseedMode::Full);
+    let after: Vec<_> = (1..=16).map(|key| screen(&parsed.terminals, key)).collect();
+    assert_eq!(after, parsed.screens, "no terminal lost its screen across the update");
+    drop(parsed.broker);
+    assert!(!alive(second), "dropping the broker ends its worker");
+}
+
+#[test]
+fn a_restarted_worker_of_another_wire_hands_every_terminal_back_with_its_screen() {
+    let bundle = Bundle::new("wire");
+    let other = WIRE_VERSION + 1;
+    let next = bundle.stage_other_wire(other);
+    let parsed = sixteen_parsed_terminals(&bundle);
+    // The file the next worker starts from now speaks another wire: on Linux
+    // the update replaced the bundle's file, which the daemon runs; on macOS
+    // it stands for a launch path that no longer holds the daemon's build.
+    std::fs::rename(&next, &parsed.exe).expect("the next worker's file");
+    kill_worker(&parsed.events, parsed.pid);
+    started(&parsed.events);
+    let handed = life(&parsed.events, |event| matches!(event, WorkerLifecycle::HandedBack { .. }));
+    let WorkerLifecycle::HandedBack { shard, reason, terminals: mut keys } = handed else {
+        unreachable!()
+    };
+    assert_eq!((shard, reason), (Some(0), HandBack::WireVersion(other)));
+    keys.sort();
+    assert_eq!(keys, (1..=16).map(VtTerminalKey).collect::<Vec<_>>(), "every terminal comes back");
+    // The pool threads take over from the last screen and the whole ring.
+    for key in 1..=16u64 {
+        let index = usize::try_from(key - 1).expect("index");
+        assert_eq!(
+            screen(&parsed.terminals, key),
+            parsed.screens[index],
+            "terminal {key}'s screen"
+        );
+        let shared = parsed.terminals.lock().expect("terminals");
+        let (ring, _) = &shared.rings[&VtTerminalKey(key)];
+        assert_eq!((ring.oldest(), ring.end()), (0, output(key).len() as u64), "terminal {key}");
+    }
+    drop(parsed.broker);
 }

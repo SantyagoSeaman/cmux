@@ -17,6 +17,9 @@
 # cmux-tui-holder-<target> (the terminal holder, std and libc only) goes beside
 # bin/cmux as bin/cmux-holder: the daemon starts every terminal holder from a
 # content-addressed copy of it, else runs the holder built into cmux-tui-host.
+# cmux-tui-vt-worker-<target> (the sandboxed VT parser) goes beside bin/cmux as
+# bin/cmux-vt-worker by the same rules: VT worker processes start from a
+# content-addressed copy of it, else the daemon parses with its pool threads.
 #
 # The build comes from the artifacts manifest the cmux-tui-artifacts workflow publishes
 # (rolling `latest` by default; a commit-addressed manifest pins one build). Both
@@ -55,7 +58,7 @@
 # and still checked with remote-probe and any required capabilities.
 set -euo pipefail
 
-usage() { sed -n '2,23p' "$0"; }
+usage() { sed -n '2,26p' "$0"; }
 
 APP_PATH=""
 MANIFEST_URL="${CMUX_TUI_CLIENT_MANIFEST_URL:-https://files.cmux.com/cmux-tui/latest/manifest.json}"
@@ -207,7 +210,7 @@ check_acpmux() {
 
 # The companions this bundle may carry: the browser host only once its license
 # notices are mapped (see the header).
-COMPANIONS=(cmux-app-host cmux-cloud cmux-tui-host cmux-holder)
+COMPANIONS=(cmux-app-host cmux-cloud cmux-tui-host cmux-holder cmux-vt-worker)
 BUNDLE_MAP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cmux-next/notices/bundle-map.json"
 if python3 -c 'import json,sys; sys.exit(0 if any(e.get("path") == "Contents/Resources/bin/cmux-browser-host" for e in json.load(open(sys.argv[1]))["entries"]) else 1)' "$BUNDLE_MAP" 2>/dev/null; then
   COMPANIONS+=(cmux-browser-host)
@@ -411,6 +414,7 @@ install_companion cmux-tui-app-host cmux-app-host
 install_companion cmux-tui-cloud-server cmux-cloud
 install_companion cmux-tui-host cmux-tui-host
 install_companion cmux-tui-holder cmux-holder
+install_companion cmux-tui-vt-worker cmux-vt-worker
 if [[ "$SHIP_BROWSER_HOST" == 1 ]]; then
   install_companion cmux-tui-browser-host cmux-browser-host
 else

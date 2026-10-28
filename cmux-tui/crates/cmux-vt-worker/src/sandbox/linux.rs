@@ -7,18 +7,30 @@
 //! filter first kills a call from another architecture (and an x32 call on
 //! x86-64), answers `clone3` with `ENOSYS` so libc falls back to `clone`,
 //! whose flags it can read, and lets signals reach only the worker itself.
-//! It denies with `EPERM`:
+//! `prlimit64`, the pid-taking `sched_*` calls and `get`/`setpriority`
+//! reach only the caller or the worker's pid (Chrome's `RestrictPrlimit`,
+//! `RestrictSchedTarget`, `RestrictGetSetpriority`). It denies with `EPERM`:
 //!
 //! - opening a file by path (`open`, `openat`, `openat2`, `creat`,
 //!   `open_by_handle_at`): the worker only uses descriptors it was given;
+//! - changing the file system (Chrome's `IsFileSystem` and
+//!   `IsCurrentDirectory` sets): unlink, rename, mkdir, rmdir, link,
+//!   symlink, truncate, mknod, chmod, chown, utime, the xattr writes, the
+//!   current directory and root, `inotify_add_watch`, `name_to_handle_at`,
+//!   and the descriptor forms `fchmod`, `fchown`, `fsetxattr`,
+//!   `fremovexattr`. Seccomp alone carries these where landlock is off, and
+//!   landlock never covers chmod, chown, utime or xattrs. `ftruncate` stays
+//!   for the worker's own segments; path `stat` and `readlink` stay (they
+//!   change nothing; Rust's `fstat` goes through `statx`/`newfstatat`);
 //! - sockets (`socket`, `socketpair`): it only speaks on the one it holds;
 //! - running programs and making processes (`execve`, `execveat`, `fork`,
 //!   `vfork`, a `clone` without `CLONE_THREAD`);
 //! - reaching other processes (`ptrace`, `process_vm_readv`/`writev`,
-//!   `pidfd_open`, `pidfd_send_signal`);
+//!   `pidfd_open`, `pidfd_send_signal`, `kcmp`, `move_pages`,
+//!   `migrate_pages`, `ioprio_set`);
 //! - kernel surfaces a parser never needs: io_uring (its operations would
 //!   open files past the filter), `bpf`, `perf_event_open`, `userfaultfd`,
-//!   the key rings, namespaces and `mount`.
+//!   the key rings, namespaces, `mount`, `umount2` and the new mount API.
 //!
 //! Landlock (`Documentation/userspace-api/landlock.rst`), where the kernel
 //! has it, adds a domain that handles every file-system right of the
@@ -47,6 +59,49 @@ mod arch {
         257, // openat
         437, // openat2
         304, // open_by_handle_at
+        // Changing the file system by path (Chrome's IsFileSystem), which
+        // landlock covers only in part and not at all where it is off.
+        87,  // unlink
+        263, // unlinkat
+        82,  // rename
+        264, // renameat
+        316, // renameat2
+        83,  // mkdir
+        258, // mkdirat
+        84,  // rmdir
+        86,  // link
+        265, // linkat
+        88,  // symlink
+        266, // symlinkat
+        76,  // truncate
+        133, // mknod
+        259, // mknodat
+        90,  // chmod
+        268, // fchmodat
+        452, // fchmodat2
+        92,  // chown
+        94,  // lchown
+        260, // fchownat
+        132, // utime
+        235, // utimes
+        280, // utimensat
+        261, // futimesat
+        188, // setxattr
+        189, // lsetxattr
+        197, // removexattr
+        198, // lremovexattr
+        303, // name_to_handle_at
+        254, // inotify_add_watch
+        // The same changes through a descriptor (the copy's in-use lock is
+        // one); `ftruncate` stays for the worker's own segments.
+        91,  // fchmod
+        93,  // fchown
+        190, // fsetxattr
+        199, // fremovexattr
+        // The current directory and the root (Chrome's IsCurrentDirectory).
+        80,  // chdir
+        81,  // fchdir
+        161, // chroot
         41,  // socket
         53,  // socketpair
         59,  // execve
@@ -58,6 +113,10 @@ mod arch {
         311, // process_vm_writev
         434, // pidfd_open
         424, // pidfd_send_signal
+        312, // kcmp
+        279, // move_pages
+        256, // migrate_pages
+        251, // ioprio_set
         425, // io_uring_setup
         426, // io_uring_enter
         427, // io_uring_register
@@ -70,6 +129,14 @@ mod arch {
         272, // unshare
         308, // setns
         165, // mount
+        166, // umount2
+        428, // open_tree
+        429, // move_mount
+        430, // fsopen
+        431, // fsconfig
+        432, // fsmount
+        433, // fspick
+        442, // mount_setattr
     ];
     pub const CLONE: u32 = 56;
     pub const CLONE3: u32 = 435;
@@ -77,6 +144,13 @@ mod arch {
     /// the worker's own pid (`kill`, `tkill`, `tgkill`, `rt_sigqueueinfo`,
     /// `rt_tgsigqueueinfo`).
     pub const SIGNALS: &[u32] = &[62, 200, 234, 129, 297];
+    /// Calls whose first argument is the target process, 0 meaning the
+    /// caller: `prlimit64` and the `sched_*` calls that take a pid
+    /// (Chrome's `RestrictPrlimit`, `RestrictSchedTarget`).
+    pub const SELF_OR_CALLER: &[u32] = &[302, 142, 144, 203, 314, 143, 145, 204, 315, 148];
+    /// `getpriority`, `setpriority`: `PRIO_PROCESS` and the caller only
+    /// (Chrome's `RestrictGetSetpriority`).
+    pub const PRIORITY: &[u32] = &[140, 141];
     pub const SECCOMP: libc::c_long = 317;
 }
 
@@ -89,6 +163,31 @@ mod arch {
         56,  // openat
         437, // openat2
         265, // open_by_handle_at
+        35,  // unlinkat
+        38,  // renameat
+        276, // renameat2
+        34,  // mkdirat
+        37,  // linkat
+        36,  // symlinkat
+        45,  // truncate
+        33,  // mknodat
+        53,  // fchmodat
+        452, // fchmodat2
+        54,  // fchownat
+        88,  // utimensat
+        5,   // setxattr
+        6,   // lsetxattr
+        14,  // removexattr
+        15,  // lremovexattr
+        264, // name_to_handle_at
+        27,  // inotify_add_watch
+        52,  // fchmod
+        55,  // fchown
+        7,   // fsetxattr
+        16,  // fremovexattr
+        49,  // chdir
+        50,  // fchdir
+        51,  // chroot
         198, // socket
         199, // socketpair
         221, // execve
@@ -98,6 +197,10 @@ mod arch {
         271, // process_vm_writev
         434, // pidfd_open
         424, // pidfd_send_signal
+        272, // kcmp
+        239, // move_pages
+        238, // migrate_pages
+        30,  // ioprio_set
         425, // io_uring_setup
         426, // io_uring_enter
         427, // io_uring_register
@@ -110,11 +213,23 @@ mod arch {
         97,  // unshare
         268, // setns
         40,  // mount
+        39,  // umount2
+        428, // open_tree
+        429, // move_mount
+        430, // fsopen
+        431, // fsconfig
+        432, // fsmount
+        433, // fspick
+        442, // mount_setattr
     ];
     pub const CLONE: u32 = 220;
     pub const CLONE3: u32 = 435;
     /// `kill`, `tkill`, `tgkill`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo`.
     pub const SIGNALS: &[u32] = &[129, 130, 131, 138, 240];
+    /// `prlimit64` and the `sched_*` calls that take a pid.
+    pub const SELF_OR_CALLER: &[u32] = &[261, 118, 119, 122, 274, 121, 120, 123, 275, 127];
+    /// `getpriority`, `setpriority`.
+    pub const PRIORITY: &[u32] = &[141, 140];
     pub const SECCOMP: libc::c_long = 277;
 }
 
@@ -133,8 +248,7 @@ const RET_K: u16 = 0x06; // BPF_RET | BPF_K
 // both architectures are little-endian, so an argument's low word comes first.
 const NR: u32 = 0;
 const ARCH: u32 = 4;
-const ARG0_LOW: u32 = 16;
-const ARG0_HIGH: u32 = 20;
+const ARGS: u32 = 16;
 
 const RET_ALLOW: u32 = 0x7fff_0000; // SECCOMP_RET_ALLOW
 const RET_KILL_PROCESS: u32 = 0x8000_0000; // SECCOMP_RET_KILL_PROCESS
@@ -142,6 +256,7 @@ const RET_ERRNO: u32 = 0x0005_0000; // SECCOMP_RET_ERRNO
 const SECCOMP_SET_MODE_FILTER: libc::c_ulong = 1;
 const SECCOMP_FILTER_FLAG_TSYNC: libc::c_ulong = 1;
 const CLONE_THREAD: u32 = 0x0001_0000;
+const PRIO_PROCESS: u32 = 0;
 
 /// The daemon's choice: seccomp always, landlock when this kernel has it.
 /// `Unsupported` when the kernel has no seccomp filter mode.
@@ -162,7 +277,7 @@ pub(super) fn apply(landlock: bool) -> Result<(), SandboxError> {
     if landlock {
         enter_landlock_domain()?;
     }
-    install_filter(&filter(std::process::id()))
+    install_filter(&filter(std::process::id())?)
 }
 
 /// The landlock ABI version of the running kernel; 0 when it has none or
@@ -265,7 +380,7 @@ fn errno_ret(errno: libc::c_int) -> Insn {
 
 /// The worker's filter for process `pid` (see the module doc). Each check
 /// ends in its own return, so every jump is short and forward.
-pub fn filter(pid: u32) -> Vec<Insn> {
+pub fn filter(pid: u32) -> Result<Vec<Insn>, SandboxError> {
     let mut program = vec![
         stmt(LD_W_ABS, ARCH),
         jump(JEQ_K, arch::AUDIT_ARCH, 1, 0),
@@ -282,25 +397,66 @@ pub fn filter(pid: u32) -> Vec<Insn> {
     // clone: a new thread only.
     program.extend([
         jump(JEQ_K, arch::CLONE, 0, 4),
-        stmt(LD_W_ABS, ARG0_LOW),
+        stmt(LD_W_ABS, ARGS),
         jump(JSET_K, CLONE_THREAD, 0, 1),
         stmt(RET_K, RET_ALLOW),
         errno_ret(libc::EPERM),
     ]);
     // Signals: to this process only (the whole first argument equals `pid`).
     for &nr in arch::SIGNALS {
-        program.extend([
-            jump(JEQ_K, nr, 0, 6),
-            stmt(LD_W_ABS, ARG0_HIGH),
-            jump(JEQ_K, 0, 0, 3),
-            stmt(LD_W_ABS, ARG0_LOW),
-            jump(JEQ_K, pid, 0, 1),
-            stmt(RET_K, RET_ALLOW),
-            errno_ret(libc::EPERM),
-        ]);
+        allow_only_if(&mut program, nr, &[(0, &[pid])])?;
+    }
+    // Limits and scheduling: the caller (0) or this process.
+    for &nr in arch::SELF_OR_CALLER {
+        allow_only_if(&mut program, nr, &[(0, &[0, pid])])?;
+    }
+    for &nr in arch::PRIORITY {
+        allow_only_if(&mut program, nr, &[(0, &[PRIO_PROCESS]), (1, &[0, pid])])?;
     }
     program.push(stmt(RET_K, RET_ALLOW));
-    program
+    Ok(program)
+}
+
+/// Allow call `nr` only when each `(argument, values)` holds, the whole
+/// 64-bit argument being one of `values`; `EPERM` otherwise. Every jump is
+/// forward and inside the block.
+fn allow_only_if(
+    program: &mut Vec<Insn>,
+    nr: u32,
+    conditions: &[(u32, &[u32])],
+) -> Result<(), SandboxError> {
+    let mut block = Vec::new();
+    let mut to_deny = Vec::new();
+    for &(argument, values) in conditions {
+        let low = ARGS + 8 * argument;
+        block.push(stmt(LD_W_ABS, low + 4));
+        to_deny.push(block.len());
+        block.push(jump(JEQ_K, 0, 0, 0));
+        block.push(stmt(LD_W_ABS, low));
+        for (index, &value) in values.iter().enumerate() {
+            let later = values.len() - 1 - index;
+            if later == 0 {
+                to_deny.push(block.len());
+                block.push(jump(JEQ_K, value, 0, 0));
+            } else {
+                block.push(jump(JEQ_K, value, short(later)?, 0));
+            }
+        }
+    }
+    block.push(stmt(RET_K, RET_ALLOW));
+    let deny = block.len();
+    block.push(errno_ret(libc::EPERM));
+    for at in to_deny {
+        block[at].jf = short(deny - at - 1)?;
+    }
+    program.push(jump(JEQ_K, nr, 0, short(block.len())?));
+    program.extend(block);
+    Ok(())
+}
+
+/// A forward jump offset; classic BPF has 8 bits for one.
+fn short(offset: usize) -> Result<u8, SandboxError> {
+    u8::try_from(offset).map_err(|_| SandboxError::Seccomp(libc::E2BIG))
 }
 
 fn install_filter(program: &[Insn]) -> Result<(), SandboxError> {
@@ -336,11 +492,17 @@ mod tests {
     /// Run `program` on one `seccomp_data` the way the kernel does (only
     /// the opcodes the filter uses).
     fn run(program: &[Insn], nr: u32, audit_arch: u32, arg0: u64) -> u32 {
+        run_args(program, nr, audit_arch, [arg0, 0])
+    }
+
+    fn run_args(program: &[Insn], nr: u32, audit_arch: u32, args: [u64; 2]) -> u32 {
         let word = |offset: u32| match offset {
             NR => nr,
             ARCH => audit_arch,
-            ARG0_LOW => arg0 as u32,
-            ARG0_HIGH => (arg0 >> 32) as u32,
+            ARGS..=31 => {
+                let arg = args[((offset - ARGS) / 8) as usize];
+                if (offset - ARGS).is_multiple_of(8) { arg as u32 } else { (arg >> 32) as u32 }
+            }
             other => panic!("the filter loads offset {other}"),
         };
         let (mut pc, mut acc) = (0usize, 0u32);
@@ -362,7 +524,7 @@ mod tests {
 
     #[test]
     fn the_filter_denies_opens_sockets_exec_and_new_processes() {
-        let program = filter(PID);
+        let program = filter(PID).expect("filter");
         for &nr in arch::DENIED {
             assert_eq!(run(&program, nr, arch::AUDIT_ARCH, 0), EPERM, "syscall {nr}");
         }
@@ -378,7 +540,7 @@ mod tests {
 
     #[test]
     fn the_filter_allows_reads_writes_maps_and_polls() {
-        let program = filter(PID);
+        let program = filter(PID).expect("filter");
         for nr in
             [libc::SYS_read, libc::SYS_write, libc::SYS_mmap, libc::SYS_munmap, libc::SYS_ppoll]
         {
@@ -389,7 +551,7 @@ mod tests {
 
     #[test]
     fn signals_reach_only_the_worker_itself() {
-        let program = filter(PID);
+        let program = filter(PID).expect("filter");
         for &nr in arch::SIGNALS {
             assert_eq!(run(&program, nr, arch::AUDIT_ARCH, u64::from(PID)), RET_ALLOW);
             assert_eq!(run(&program, nr, arch::AUDIT_ARCH, 1), EPERM, "init, syscall {nr}");
@@ -405,8 +567,30 @@ mod tests {
     }
 
     #[test]
+    fn limits_scheduling_and_priority_reach_only_the_caller_or_the_worker() {
+        let program = filter(PID).expect("filter");
+        for &nr in arch::SELF_OR_CALLER {
+            for target in [0, u64::from(PID)] {
+                assert_eq!(run(&program, nr, arch::AUDIT_ARCH, target), RET_ALLOW, "{nr}");
+            }
+            for target in [1, u64::from(PID) + 1, u64::from(PID) | (1 << 32)] {
+                assert_eq!(run(&program, nr, arch::AUDIT_ARCH, target), EPERM, "{nr} {target}");
+            }
+        }
+        for &nr in arch::PRIORITY {
+            for who in [0, u64::from(PID)] {
+                assert_eq!(run_args(&program, nr, arch::AUDIT_ARCH, [0, who]), RET_ALLOW);
+            }
+            // Another process, or a process group or user (PRIO_PGRP, PRIO_USER).
+            assert_eq!(run_args(&program, nr, arch::AUDIT_ARCH, [0, 1]), EPERM, "{nr}");
+            assert_eq!(run_args(&program, nr, arch::AUDIT_ARCH, [1, 0]), EPERM, "{nr}");
+            assert_eq!(run_args(&program, nr, arch::AUDIT_ARCH, [2, 0]), EPERM, "{nr}");
+        }
+    }
+
+    #[test]
     fn another_architecture_is_killed() {
-        let program = filter(PID);
+        let program = filter(PID).expect("filter");
         // AUDIT_ARCH_I386: the 32-bit table numbers calls differently.
         assert_eq!(run(&program, 5, 0x4000_0003, 0), RET_KILL_PROCESS);
         if let Some(bit) = arch::X32_SYSCALL_BIT {
@@ -424,6 +608,44 @@ mod tests {
             libc::SYS_openat,
             libc::SYS_openat2,
             libc::SYS_open_by_handle_at,
+            libc::SYS_unlink,
+            libc::SYS_unlinkat,
+            libc::SYS_rename,
+            libc::SYS_renameat,
+            libc::SYS_renameat2,
+            libc::SYS_mkdir,
+            libc::SYS_mkdirat,
+            libc::SYS_rmdir,
+            libc::SYS_link,
+            libc::SYS_linkat,
+            libc::SYS_symlink,
+            libc::SYS_symlinkat,
+            libc::SYS_truncate,
+            libc::SYS_mknod,
+            libc::SYS_mknodat,
+            libc::SYS_chmod,
+            libc::SYS_fchmodat,
+            libc::SYS_fchmodat2,
+            libc::SYS_chown,
+            libc::SYS_lchown,
+            libc::SYS_fchownat,
+            libc::SYS_utime,
+            libc::SYS_utimes,
+            libc::SYS_utimensat,
+            libc::SYS_futimesat,
+            libc::SYS_setxattr,
+            libc::SYS_lsetxattr,
+            libc::SYS_removexattr,
+            libc::SYS_lremovexattr,
+            libc::SYS_name_to_handle_at,
+            libc::SYS_inotify_add_watch,
+            libc::SYS_fchmod,
+            libc::SYS_fchown,
+            libc::SYS_fsetxattr,
+            libc::SYS_fremovexattr,
+            libc::SYS_chdir,
+            libc::SYS_fchdir,
+            libc::SYS_chroot,
             libc::SYS_socket,
             libc::SYS_socketpair,
             libc::SYS_execve,
@@ -435,6 +657,10 @@ mod tests {
             libc::SYS_process_vm_writev,
             libc::SYS_pidfd_open,
             libc::SYS_pidfd_send_signal,
+            libc::SYS_kcmp,
+            libc::SYS_move_pages,
+            libc::SYS_migrate_pages,
+            libc::SYS_ioprio_set,
             libc::SYS_io_uring_setup,
             libc::SYS_io_uring_enter,
             libc::SYS_io_uring_register,
@@ -447,12 +673,45 @@ mod tests {
             libc::SYS_unshare,
             libc::SYS_setns,
             libc::SYS_mount,
+            libc::SYS_umount2,
+            libc::SYS_open_tree,
+            libc::SYS_move_mount,
+            libc::SYS_fsopen,
+            libc::SYS_fsconfig,
+            libc::SYS_fsmount,
+            libc::SYS_fspick,
+            libc::SYS_mount_setattr,
         ];
         #[cfg(target_arch = "aarch64")]
         let named = [
             libc::SYS_openat,
             libc::SYS_openat2,
             libc::SYS_open_by_handle_at,
+            libc::SYS_unlinkat,
+            38, // renameat: not in libc for this target
+            libc::SYS_renameat2,
+            libc::SYS_mkdirat,
+            libc::SYS_linkat,
+            libc::SYS_symlinkat,
+            libc::SYS_truncate,
+            libc::SYS_mknodat,
+            libc::SYS_fchmodat,
+            452, // fchmodat2: not in libc for this target
+            libc::SYS_fchownat,
+            libc::SYS_utimensat,
+            libc::SYS_setxattr,
+            libc::SYS_lsetxattr,
+            libc::SYS_removexattr,
+            libc::SYS_lremovexattr,
+            libc::SYS_name_to_handle_at,
+            libc::SYS_inotify_add_watch,
+            libc::SYS_fchmod,
+            libc::SYS_fchown,
+            libc::SYS_fsetxattr,
+            libc::SYS_fremovexattr,
+            libc::SYS_chdir,
+            libc::SYS_fchdir,
+            libc::SYS_chroot,
             libc::SYS_socket,
             libc::SYS_socketpair,
             libc::SYS_execve,
@@ -462,6 +721,10 @@ mod tests {
             libc::SYS_process_vm_writev,
             libc::SYS_pidfd_open,
             libc::SYS_pidfd_send_signal,
+            libc::SYS_kcmp,
+            libc::SYS_move_pages,
+            libc::SYS_migrate_pages,
+            libc::SYS_ioprio_set,
             libc::SYS_io_uring_setup,
             libc::SYS_io_uring_enter,
             libc::SYS_io_uring_register,
@@ -474,6 +737,14 @@ mod tests {
             libc::SYS_unshare,
             libc::SYS_setns,
             libc::SYS_mount,
+            libc::SYS_umount2,
+            libc::SYS_open_tree,
+            libc::SYS_move_mount,
+            libc::SYS_fsopen,
+            libc::SYS_fsconfig,
+            libc::SYS_fsmount,
+            libc::SYS_fspick,
+            libc::SYS_mount_setattr,
         ];
         let named: Vec<u32> = named.iter().map(|&nr| u32::try_from(nr).expect("nr")).collect();
         assert_eq!(named, arch::DENIED);
@@ -486,6 +757,25 @@ mod tests {
         ];
         let signals: Vec<u32> = signals.iter().map(|&nr| u32::try_from(nr).expect("nr")).collect();
         assert_eq!(signals, arch::SIGNALS);
+        let self_or_caller = [
+            libc::SYS_prlimit64,
+            libc::SYS_sched_setparam,
+            libc::SYS_sched_setscheduler,
+            libc::SYS_sched_setaffinity,
+            libc::SYS_sched_setattr,
+            libc::SYS_sched_getparam,
+            libc::SYS_sched_getscheduler,
+            libc::SYS_sched_getaffinity,
+            libc::SYS_sched_getattr,
+            libc::SYS_sched_rr_get_interval,
+        ];
+        let self_or_caller: Vec<u32> =
+            self_or_caller.iter().map(|&nr| u32::try_from(nr).expect("nr")).collect();
+        assert_eq!(self_or_caller, arch::SELF_OR_CALLER);
+        let priority = [libc::SYS_getpriority, libc::SYS_setpriority];
+        let priority: Vec<u32> =
+            priority.iter().map(|&nr| u32::try_from(nr).expect("nr")).collect();
+        assert_eq!(priority, arch::PRIORITY);
         assert_eq!(i64::from(arch::CLONE), libc::SYS_clone);
         assert_eq!(i64::from(arch::CLONE3), libc::SYS_clone3);
         assert_eq!(arch::SECCOMP, libc::SYS_seccomp);

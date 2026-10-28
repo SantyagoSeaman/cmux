@@ -19,7 +19,8 @@
 #   ref-sdk <mac-binary>           print the SDK version recorded in a Mac binary
 #   hosts <sha> <ghostty-sha> [version]  cmux-app-host, cmux-browser-host, cmux-cloud and the
 #                                  agent screen-detection plugin for both macOS targets
-#   bins <sha> <ghostty-sha> <version>  cmux-tui, cmux-tui-hook, cmux-tui-host, cmux-holder, acpmux, cmux-relay, chatmux-relay
+#   bins <sha> <ghostty-sha> <version>  cmux-tui, cmux-tui-hook, cmux-tui-host, cmux-holder, cmux-vt-worker, acpmux,
+#                                  cmux-relay, chatmux-relay
 #                                  (framework stubs) for both macOS targets
 #   all <sha> <ghostty-sha> <version>   hosts and bins, every cargo invocation at once
 #   parity-bins                    compare the daemon family with the Mac references
@@ -262,6 +263,7 @@ cmd_bins() {
       # of cmd_bins up to the line above for its cmux-tui-only fast path.
       cargo build -p cmux-tui --bin cmux-tui-host --release --locked --target "$t"
       cargo build -p cmux-holder --bin cmux-holder --release --locked --target "$t"
+      cargo build -p cmux-vt-worker --bin cmux-vt-worker --release --locked --target "$t"
       cargo build -p cmux-relay --bin cmux-relay --release --locked --target "$t"
       cargo build -p chatmux-relay --bin chatmux-relay --release --locked --target "$t"
       cargo build -p acpmux --bin acpmux --release --locked --target "$t")
@@ -271,6 +273,7 @@ cmd_bins() {
     cp "$r/cmux-tui-hook" "$out/cmux-tui-hook-$t"
     cp "$r/cmux-tui-host" "$out/cmux-tui-host-$t"
     cp "$r/cmux-holder" "$out/cmux-tui-holder-$t"
+    cp "$r/cmux-vt-worker" "$out/cmux-tui-vt-worker-$t"
     cp "$r/acpmux" "$out/cmux-tui-acpmux-$t"
     cp "$r/cmux-relay" "$out/cmux-relay-$t"
     cp "$r/chatmux-relay" "$out/chatmux-relay-$t"
@@ -302,6 +305,7 @@ cmd_all() {
     "$repo_root/scripts/ci/cargo-groups.sh" "$target_dir" "$t" \
       "cmux-tui cmux-tui-hook cmux-tui-host" "cd $(q "$tui") && $stamps $pgo_env $build -p cmux-tui --bin cmux-tui --bin cmux-tui-hook --bin cmux-tui-host" \
       "cmux-holder" "cd $(q "$tui") && $stamps $build -p cmux-holder --bin cmux-holder" \
+      "cmux-vt-worker" "cd $(q "$tui") && $stamps $build -p cmux-vt-worker --bin cmux-vt-worker" \
       "cmux-app-host" "cd $(q "$tui") && $stamps $build -p cmux-app-host --bin cmux-app-host" \
       "cmux-browser-host" "cd $(q "$tui") && CMUX_BUILD_SHA=$(q "$sha") $build -p cmux-browser-host --bin cmux-browser-host" \
       "cmux-cloud" "cd $(q "$repo_root/first-party-apps/cloud/server") && $build --bin cmux-cloud" \
@@ -321,6 +325,7 @@ cmd_all() {
     cp "$r/cmux-tui-hook" "$out/cmux-tui-hook-$t"
     cp "$r/cmux-tui-host" "$out/cmux-tui-host-$t"
     cp "$r/cmux-holder" "$out/cmux-tui-holder-$t"
+    cp "$r/cmux-vt-worker" "$out/cmux-tui-vt-worker-$t"
     cp "$r/acpmux" "$out/cmux-tui-acpmux-$t"
     cp "$r/cmux-relay" "$out/cmux-relay-$t"
     cp "$r/chatmux-relay" "$out/chatmux-relay-$t"

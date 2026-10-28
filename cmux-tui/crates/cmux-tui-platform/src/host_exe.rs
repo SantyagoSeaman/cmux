@@ -100,6 +100,17 @@ pub fn vt_worker_executable(accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
     imp::vt_worker_copy(&source, accepts)
 }
 
+/// [`vt_worker_executable`] for the worker file `source`, its macOS copy
+/// made under `root` instead of the daemon's host-exe root (a test that
+/// swaps a bundle of its own); elsewhere `source` itself when it answers.
+pub fn vt_worker_executable_in(
+    root: &Path,
+    source: &Path,
+    accepts: &dyn Fn(&str) -> bool,
+) -> Option<PathBuf> {
+    imp::vt_worker_copy_in(root, source, accepts)
+}
+
 /// `name` beside the daemon's canonical executable, a regular file.
 fn sibling(name: &str) -> Option<PathBuf> {
     let own = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
@@ -203,6 +214,14 @@ mod imp {
     /// running workers keep the old one.
     pub(super) fn vt_worker_copy(source: &Path, accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
         super::answers(source, accepts).then(|| source.to_path_buf())
+    }
+
+    pub(super) fn vt_worker_copy_in(
+        _root: &Path,
+        source: &Path,
+        accepts: &dyn Fn(&str) -> bool,
+    ) -> Option<PathBuf> {
+        vt_worker_copy(source, accepts)
     }
 
     pub(super) fn hold_in_use_lock() {}

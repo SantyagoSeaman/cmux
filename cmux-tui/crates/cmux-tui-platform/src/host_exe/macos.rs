@@ -72,6 +72,15 @@ pub(super) fn vt_worker_copy(source: &Path, accepts: &dyn Fn(&str) -> bool) -> O
     helper_copy(super::VT_WORKER_NAME, "a VT worker", source, accepts)
 }
 
+/// [`vt_worker_copy`] with its copy under `root`.
+pub(super) fn vt_worker_copy_in(
+    root: &Path,
+    source: &Path,
+    accepts: &dyn Fn(&str) -> bool,
+) -> Option<PathBuf> {
+    helper_copy_in(root, super::VT_WORKER_NAME, "a VT worker", source, accepts)
+}
+
 fn helper_copy(
     name: &'static str,
     role: &str,
@@ -91,14 +100,14 @@ fn helper_copy_in(
     source: &Path,
     accepts: &dyn Fn(&str) -> bool,
 ) -> Option<PathBuf> {
-    let mut helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
-    let current = helpers.iter().position(|(helper, _)| *helper == name);
-    if let Some(index) = current {
-        let copy = &helpers[index].1;
+    // The table lock never covers the install or the `--version` exec, so
+    // the holder's copy never waits on the worker's; racing installs of one
+    // build write the same copy (`write_copy` renames into place).
+    if let Some(copy) = cached_helper(name) {
         if file_key(&copy.path).ok() == Some(copy.key) {
-            return Some(copy.path.clone());
+            return Some(copy.path);
         }
-        helpers.swap_remove(index);
+        forget_helper(name, &copy.path);
     }
     let copy = match install(root, source, name) {
         Ok(copy) => copy,
@@ -112,8 +121,22 @@ fn helper_copy_in(
         return None;
     }
     let path = copy.path.clone();
+    let mut helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+    helpers.retain(|(helper, _)| *helper != name);
     helpers.push((name, copy));
     Some(path)
+}
+
+fn cached_helper(name: &str) -> Option<Installed> {
+    let helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+    helpers.iter().find(|(helper, _)| *helper == name).map(|(_, copy)| copy.clone())
+}
+
+/// Drop `name`'s cached copy if it is still `path` (another thread may
+/// have stored a newer one meanwhile).
+fn forget_helper(name: &str, path: &Path) {
+    let mut helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+    helpers.retain(|(helper, copy)| *helper != name || copy.path != path);
 }
 
 pub(super) fn use_sibling_host(identity: &'static str) {
@@ -522,6 +545,65 @@ mod tests {
             None,
             "a worker of another wire is never used"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// One helper's install and first `--version` never hold up another's:
+    /// the holder's copy, which a terminal create waits on, is ready while
+    /// the worker's check still runs.
+    #[test]
+    fn a_helpers_copy_does_not_wait_on_another_helpers_check() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        const PATIENCE: Duration = Duration::from_secs(10);
+        let base =
+            std::env::temp_dir().join(format!("cmux-host-exe-parallel-{}", std::process::id()));
+        let root = base.join("host-exe");
+        let bin = base.join("bin");
+        fs::create_dir_all(&bin).expect("bin");
+        let worker = bin.join("cmux-vt-worker");
+        worker_script(&worker, 3);
+        let holder = bin.join("cmux-holder");
+        fs::write(&holder, "#!/bin/sh\necho 'cmux-holder wire 9'\n").expect("write the holder");
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).expect("executable");
+
+        let (checking, worker_checking) = channel();
+        let (release, released) = channel::<()>();
+        let worker_root = root.clone();
+        let worker_thread = std::thread::spawn(move || {
+            let accepts = |answer: &str| {
+                let _ = checking.send(());
+                let _ = released.recv();
+                answer == "cmux-vt-worker wire 3"
+            };
+            helper_copy_in(
+                &worker_root,
+                "cmux-vt-worker-parallel-test",
+                "a VT worker",
+                &worker,
+                &accepts,
+            )
+        });
+        worker_checking.recv_timeout(PATIENCE).expect("the worker's check started");
+
+        let (done, finished) = channel();
+        let holder_thread = std::thread::spawn(move || {
+            let accepts = |answer: &str| answer == "cmux-holder wire 9";
+            let copy = helper_copy_in(
+                &root,
+                "cmux-holder-parallel-test",
+                "a terminal holder",
+                &holder,
+                &accepts,
+            );
+            let _ = done.send(());
+            copy
+        });
+        let in_time = finished.recv_timeout(PATIENCE).is_ok();
+        release.send(()).expect("release the worker's check");
+        assert!(in_time, "the holder's copy waited for the worker's check");
+        assert!(holder_thread.join().expect("the holder's thread").is_some());
+        assert!(worker_thread.join().expect("the worker's thread").is_some());
         let _ = fs::remove_dir_all(&base);
     }
 }

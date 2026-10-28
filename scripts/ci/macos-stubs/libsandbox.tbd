@@ -1,0 +1,16 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos ]
+install-name:    '/usr/lib/libsandbox.1.dylib'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:         [ x86_64-macos, arm64-macos ]
+    symbols:         [
+                       '_sandbox_apply',
+                       '_sandbox_compile_string',
+                       '_sandbox_create_params',
+                       '_sandbox_free_error',
+                       '_sandbox_free_params',
+                       '_sandbox_free_profile' ]
+...
