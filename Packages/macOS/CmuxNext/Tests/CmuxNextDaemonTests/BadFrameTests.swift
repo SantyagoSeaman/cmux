@@ -97,7 +97,6 @@ import Testing
 
     static let fixtures: [Fixture] = {
         let zero = [UInt8](repeating: 0, count: 8)
-        let reply = BadFrameTests.frame(kind: 17, length: 10, payload: Array("{\"ok\":true".utf8))
         func framed(_ name: String, _ bytes: [UInt8], _ reason: String) -> Fixture {
             Fixture(name: name, bytes: bytes, framed: true, reason: reason)
         }
@@ -114,8 +113,8 @@ import Testing
             framed("output on stream 0", BadFrameTests.frame(kind: 1, length: 1, aux: zero, payload: [0x78]), "data_on_control_stream"),
             framed("input on stream 0", BadFrameTests.frame(kind: 9, length: 1, aux: zero, payload: [0x78]), "data_on_control_stream"),
             framed("ring ack on stream 0", BadFrameTests.frame(kind: 11, aux: zero), "data_on_control_stream"),
-            framed("close inside a header", Array(reply.prefix(9)), "truncated"),
-            framed("close inside a payload", Array(reply.prefix(20)), "truncated"),
+            framed("priority 255", BadFrameTests.frame(kind: 18, aux: BadFrameTests.call(priority: 255)), "unknown_priority"),
+            framed("flag 0x80", BadFrameTests.frame(kind: 18, aux: BadFrameTests.call(flags: 0x80)), "unknown_flags"),
             framed("request", BadFrameTests.frame(kind: 16, length: 2, payload: Array("{}".utf8)), "unrouted frame kind 16 on stream 0"),
             framed("typed event", BadFrameTests.frame(kind: 19, length: 2, payload: Array("{}".utf8)), "unrouted frame kind 19 on stream 0"),
             framed("cancel", BadFrameTests.frame(kind: 20), "unrouted frame kind 20 on stream 0"),
@@ -168,8 +167,8 @@ import Testing
         let (transport, closed, events) = try Self.open(daemon, stats: stats, framed: fixture.framed)
         defer { transport.close() }
         daemon.send(Self.goodLine)
-        // A message cut by the close ends the stream; any other is followed by a line that must never route.
-        daemon.send(fixture.reason == "truncated" ? fixture.bytes : fixture.bytes + Self.goodLine)
+        // A line after the bad message must never route.
+        daemon.send(fixture.bytes + Self.goodLine)
         daemon.endWrites()
         let reason = await Self.first(closed)
         #expect(reason == .lost("bad message: \(fixture.reason)"))
@@ -187,7 +186,7 @@ import Testing
         let breaker = DaemonFrameBreaker(clock: clock)
         #expect(breaker.record("unknown_kind", life: "1-a") == .counted)
         clock.advance(by: .seconds(30))
-        #expect(breaker.record("truncated", life: "1-a") == .counted)
+        #expect(breaker.record("unknown_flags", life: "1-a") == .counted)
         #expect(breaker.record("unknown_kind", life: "2-b") == .counted)
         clock.advance(by: .seconds(30))
         #expect(breaker.record("oversize", life: "1-a") == .tripped)
@@ -240,6 +239,33 @@ import Testing
         #expect(fallback.breakerWatch == nil)
         let restarted = DaemonIdentity(capabilities: offers, pid: 4243, generation: DaemonGeneration(rawValue: "boot-b"))
         #expect(negotiation.echo(offered: restarted)?.asksFrames == true)
+    }
+
+    /// The daemon drops a slow reader at its write timeout, or dies, in the middle of a frame: a lost connection,
+    /// not a bad message. Three such closes of one daemon life within the window count nothing and leave its
+    /// frames on.
+    @Test func theDaemonClosingInsideAFrameIsALostConnectionThatNeverTripsTheBreaker() async throws {
+        let breaker = DaemonFrameBreaker()
+        let identity = DaemonIdentity(capabilities: [WireNegotiation.framesCapability], pid: 9,
+                                      generation: DaemonGeneration(rawValue: "boot-d"))
+        let stats = DaemonWireStats()
+        let reply = Self.frame(kind: 17, length: 10, payload: Array("{\"ok\":true".utf8))
+        for cut in [9, 20, 9] {
+            let daemon = try RawDaemon()
+            let (transport, closed, events) = try Self.open(daemon, stats: stats, framed: true, watch: breaker.watch(identity))
+            daemon.send(Self.goodLine + Array(reply.prefix(cut)))
+            daemon.endWrites()
+            let reason = await Self.first(closed)
+            #expect(reason == .lost("EOF inside frame"), "cut at \(cut)")
+            var routed: [String] = []
+            for await name in events { routed.append(name) }
+            #expect(routed == ["first"])
+            transport.close()
+        }
+        let snapshot = stats.snapshot()
+        #expect(snapshot.badMessages == 0)
+        #expect(snapshot.frameBreakerTrips == 0)
+        #expect(!breaker.framesOff(for: identity))
     }
 
     /// Bytes cut short by the app's own close are not the daemon's bad message: nothing counts.

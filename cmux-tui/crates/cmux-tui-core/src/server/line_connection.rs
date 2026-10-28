@@ -20,8 +20,9 @@
 //! bad byte is interpreted. Every such close adds one to `server-stats`
 //! `ipc.bad_message` and logs its reason. A close of a connection that had
 //! negotiated frames also counts toward the crash-loop breaker
-//! ([`frame_breaker`]), which turns frames off for the daemon's life after
-//! the third in 60 s.
+//! ([`frame_breaker`]), which stops offering and granting frames for the
+//! daemon's life after the third in 60 s, unless the peer only closed inside
+//! a frame (`truncated`): that is a lost peer, not a protocol violation.
 //!
 //! REQUEST and CANCEL frames go to [`frame_dispatch`] (p05-ipc-071), and so
 //! do INPUT frames, which queue on the stream they name until its opener is
@@ -178,6 +179,13 @@ impl ConnectionBadMessage {
             ConnectionBadMessage::Call(refusal) => refusal.reason(),
             ConnectionBadMessage::UnexpectedFds => "unexpected_fds",
         }
+    }
+
+    /// Whether the bytes the reader saw broke the protocol. A close inside a
+    /// frame (`truncated`) did not: the peer died, or its writer gave up, in
+    /// the middle of a write, so the crash-loop breaker does not count it.
+    fn is_protocol_violation(&self) -> bool {
+        !matches!(self, ConnectionBadMessage::Wire(BadMessage::Truncated { .. }))
     }
 }
 
@@ -422,8 +430,8 @@ pub(super) fn serve_connection(
 }
 
 /// Counts a bad-message close (`ipc.bad_message`) and logs its reason; a
-/// close of a connection that negotiated frames also counts toward the
-/// crash-loop breaker, and the close that trips it says so.
+/// protocol violation on a connection that negotiated frames also counts
+/// toward the crash-loop breaker, and the close that trips it says so.
 fn report_bad_message(
     mux: &Mux,
     client: u64,
@@ -434,11 +442,12 @@ fn report_bad_message(
     mux.ipc_stats().bad_message();
     eprintln!("cmux-tui: client {client} closed: bad_message {}: {bad}", bad.reason());
     if framed
+        && bad.is_protocol_violation()
         && mux.control_clients.framed_bad_message(at) == frame_breaker::BreakerVerdict::Tripped
     {
         eprintln!(
             "cmux-tui: frames off for this daemon's life: {} framed connections closed with \
-             bad_message within {} s; clients go on with JSON lines",
+             bad_message within {} s; new connections go on with JSON lines",
             frame_breaker::TRIP_CLOSES,
             frame_breaker::TRIP_WINDOW.as_secs()
         );

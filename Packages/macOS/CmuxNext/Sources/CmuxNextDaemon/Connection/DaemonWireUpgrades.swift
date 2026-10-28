@@ -5,28 +5,38 @@ public import CmuxNextIPC
 ///
 /// Off by default: a connection keeps JSON lines until its owner opts in. Every upgrade is also
 /// capability-gated, so a daemon that does not advertise one keeps the connection on lines.
+///
+/// Frames come only with the crash-loop breaker of the daemon the connection reaches: the owner of that daemon
+/// target (`DaemonService.frameBreaker`) passes its one breaker, so every connection to the daemon counts into
+/// it. The value is immutable, so frames are never asked without it.
 public struct DaemonWireUpgrades: Sendable {
     /// Sends typed v12 commands as REQUEST frames once `ipc-frames-v2` is granted, with the method ids and
     /// priorities of this build's schema (the composition root's `MethodTable.schema` and
     /// `WireSchemaIdentity.built`); nil asks for no frames.
-    public var frames: DaemonFrameSchema?
+    public let frames: DaemonFrameSchema?
     /// Asks for `attach-streams-v1` (client-minted streams on this connection).
-    public var streams: Bool
+    public let streams: Bool
     /// Turns frames off for a daemon life whose framed connections keep closing on bad messages
-    /// (``DaemonFrameBreaker``). Shared by every copy of this value, so by every connection configured with it;
-    /// nil when no frames are asked.
+    /// (``DaemonFrameBreaker``); set exactly when `frames` is.
     public let frameBreaker: DaemonFrameBreaker?
 
-    /// - Parameter frameBreaker: The breaker of the daemon these connections reach; with `frames` and none
-    ///   given, a new one.
-    public init(frames: DaemonFrameSchema? = nil, streams: Bool = false, frameBreaker: DaemonFrameBreaker? = nil) {
-        self.frames = frames
+    /// JSON lines, with streams when `streams`; no frames.
+    public init(streams: Bool = false) {
+        frames = nil
         self.streams = streams
-        self.frameBreaker = frameBreaker ?? (frames == nil ? nil : DaemonFrameBreaker())
+        frameBreaker = nil
     }
 
-    /// JSON lines only: what every connection did before framed IPC. A new value each time: it holds no breaker.
-    public static var none: DaemonWireUpgrades { DaemonWireUpgrades() }
+    /// Frames framed with `frames`, counting bad-message closes into `frameBreaker`, the one breaker of the
+    /// daemon these connections reach.
+    public init(frames: DaemonFrameSchema, streams: Bool = false, frameBreaker: DaemonFrameBreaker) {
+        self.frames = frames
+        self.streams = streams
+        self.frameBreaker = frameBreaker
+    }
+
+    /// JSON lines only: what every connection did before framed IPC.
+    public static let none = DaemonWireUpgrades()
 
     var asksAny: Bool { frames != nil || streams }
 }

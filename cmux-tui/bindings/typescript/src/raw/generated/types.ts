@@ -1,5 +1,5 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 8a9866283a47ec9e7be97f2560dca821030bc2dbfa05a573677c94e172d2b72d. */
+/* cmux-tui mux protocol 12, IR 923e120b5d482da370ad9e56f365ee1a92654289bd6f72216538f5912e7dc0b8. */
 
 
 /** JSON accepted by the wire codec. bigint is serialized as an exact JSON integer. */
@@ -1469,12 +1469,18 @@ export type ServerStatsHistogram = {
 
 export type ServerStatsIpc = {
   "bad_message": bigint;
+  "frame_breaker": ServerStatsIpcFrameBreaker;
   "parses": ServerStatsIpcParses;
   "received": Array<ServerStatsIpcKind>;
   "sent": Array<ServerStatsIpcKind>;
   "sequence_depth": ServerStatsHistogram;
   "streams": ServerStatsIpcStreams;
   "writes": ServerStatsIpcWrites;
+};
+
+export type ServerStatsIpcFrameBreaker = {
+  "framed_bad_message": bigint;
+  "tripped": boolean;
 };
 
 export type ServerStatsIpcKind = {

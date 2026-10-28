@@ -2105,12 +2105,20 @@ class ServerStatsHistogram:
 class ServerStatsIpc:
     __cmux_schema_path__: ClassVar[str] = 'types/ServerStatsIpc'
     bad_message: int
+    frame_breaker: ServerStatsIpcFrameBreaker
     parses: ServerStatsIpcParses
     received: List[ServerStatsIpcKind]
     sent: List[ServerStatsIpcKind]
     sequence_depth: ServerStatsHistogram
     streams: ServerStatsIpcStreams
     writes: ServerStatsIpcWrites
+
+
+@dataclass(frozen=True)
+class ServerStatsIpcFrameBreaker:
+    __cmux_schema_path__: ClassVar[str] = 'types/ServerStatsIpcFrameBreaker'
+    framed_bad_message: int
+    tripped: bool
 
 
 @dataclass(frozen=True)
@@ -7944,6 +7952,7 @@ __all__ = [
     'ServerStatsHangs',
     'ServerStatsHistogram',
     'ServerStatsIpc',
+    'ServerStatsIpcFrameBreaker',
     'ServerStatsIpcKind',
     'ServerStatsIpcParse',
     'ServerStatsIpcParses',

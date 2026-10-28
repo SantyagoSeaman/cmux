@@ -163,6 +163,24 @@ struct DaemonSiteSampleTests {
         #expect(launch.collector.snapshot().blocking.count == 2)
     }
 
+    /// A trip of the framed IPC crash-loop breaker (p05-ipc-191) is one non-fatal event, once per 24 h, named by
+    /// the last close's reason; without crash-report consent nothing is sent.
+    @Test func aFrameBreakerTripIsOneNonFatalEventWithinTheDaemonBudget() {
+        let launch = Self.launch(SavedState())
+        launch.sink.record(frameBreakerTripReasons: ["unknown_kind", "oversize", "unknown_kind"])
+        launch.sink.record(frameBreakerTripReasons: ["unknown_flags", "unknown_flags", "unknown_flags"])
+        let sent = launch.sent()
+        #expect(sent.map(\.message) == ["daemon framed IPC off: unknown_kind"])
+        #expect(sent.map(\.type) == ["DaemonFrameBreaker"])
+        #expect(sent.first?.fingerprint == [BlockingReportSink.NonFatalEvent.frameBreakerSite, "unknown_kind"])
+        #expect(sent.first?.extra["reasons"] == "unknown_kind, oversize, unknown_kind")
+        #expect(launch.collector.snapshot().blocking.isEmpty)
+
+        let withoutConsent = Self.launch(SavedState(), consented: false)
+        withoutConsent.sink.record(frameBreakerTripReasons: ["unknown_kind"])
+        #expect(withoutConsent.sent().isEmpty)
+    }
+
     /// The headless daemon outlives the app: a relaunch against the same daemon life gets every site replayed,
     /// and adds no sample and no event; a new daemon life reports its sites again.
     @Test func twoLaunchesAgainstOneDaemonLifeReportEachSiteOnce() throws {

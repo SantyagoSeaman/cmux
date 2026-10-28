@@ -1,10 +1,10 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 8a9866283a47ec9e7be97f2560dca821030bc2dbfa05a573677c94e172d2b72d. */
+/* cmux-tui mux protocol 12, IR 923e120b5d482da370ad9e56f365ee1a92654289bd6f72216538f5912e7dc0b8. */
 
 
 export const SDK_SCHEMA_VERSION = 2 as const;
 export const MUX_PROTOCOL_VERSION = 12 as const;
-export const SDK_IR_SHA256 = "8a9866283a47ec9e7be97f2560dca821030bc2dbfa05a573677c94e172d2b72d" as const;
+export const SDK_IR_SHA256 = "923e120b5d482da370ad9e56f365ee1a92654289bd6f72216538f5912e7dc0b8" as const;
 export const PROTOCOL = {
   "id_type": "uint64",
   "javascript_id_policy": "All protocol identifiers are uint64 JSON numbers. JavaScript and TypeScript SDKs must decode them losslessly as bigint (or validated decimal strings at their public boundary), and must not expose IEEE-754 number ids. Pairing request ids, revisions, timestamps, frame sequences, and reservation ids follow the same rule.",
@@ -13878,7 +13878,8 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
       "streams counts each connection's stream 0 (no connection opens a second stream yet), so open is the open connections.",
       "sequence_depth samples the requests in a connection's sequence as each request arrives at it, itself included, also when the full sequence refuses it.",
       "received and sent list only kinds seen at least once, line first, then frames in wire order.",
-      "bad_message counts connections closed for a malformed message: a JSON line over the size limit or not UTF-8, a bad frame, or a WebSocket message that is oversized, not UTF-8, binary or against the protocol."
+      "bad_message counts connections closed for a malformed message: a JSON line over the size limit or not UTF-8, a bad frame, or a WebSocket message that is oversized, not UTF-8, binary or against the protocol.",
+      "frame_breaker is the crash-loop breaker of framed IPC."
     ],
     "fields": {
       "bad_message": {
@@ -13887,6 +13888,14 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         "type": {
           "kind": "scalar",
           "name": "uint64"
+        }
+      },
+      "frame_breaker": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "ref",
+          "name": "ServerStatsIpcFrameBreaker"
         }
       },
       "parses": {
@@ -13941,6 +13950,32 @@ export const TYPE_SCHEMAS: Readonly<Record<string, TypeSchema>> = {
         "type": {
           "kind": "ref",
           "name": "ServerStatsIpcWrites"
+        }
+      }
+    },
+    "kind": "object"
+  },
+  "ServerStatsIpcFrameBreaker": {
+    "additional_properties": false,
+    "constraints": [
+      "framed_bad_message counts bad_message closes of connections that had negotiated frames and whose bytes broke the protocol; a peer that closed inside a frame is not counted.",
+      "tripped turns true, for the rest of the daemon's life, at the third such close within 60 s: identify stops offering ipc-frames-v2 and the capabilities that require it, and set-client-info stops granting them; a connection that already holds the grant keeps it."
+    ],
+    "fields": {
+      "framed_bad_message": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "scalar",
+          "name": "uint64"
+        }
+      },
+      "tripped": {
+        "nullable": false,
+        "presence": "required",
+        "type": {
+          "kind": "scalar",
+          "name": "boolean"
         }
       }
     },

@@ -1,5 +1,5 @@
 // This file is generated. Do not edit by hand.
-// cmux-tui mux protocol 12, IR 8a9866283a47ec9e7be97f2560dca821030bc2dbfa05a573677c94e172d2b72d.
+// cmux-tui mux protocol 12, IR 923e120b5d482da370ad9e56f365ee1a92654289bd6f72216538f5912e7dc0b8.
 // The emitter owns this layout so generation is independent of the installed rustfmt.
 
 use crate::{Nullable, Optional};
@@ -2460,12 +2460,20 @@ pub struct ServerStatsHistogram {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerStatsIpc {
     pub bad_message: u64,
+    pub frame_breaker: ServerStatsIpcFrameBreaker,
     pub parses: ServerStatsIpcParses,
     pub received: Vec<ServerStatsIpcKind>,
     pub sent: Vec<ServerStatsIpcKind>,
     pub sequence_depth: ServerStatsHistogram,
     pub streams: ServerStatsIpcStreams,
     pub writes: ServerStatsIpcWrites,
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerStatsIpcFrameBreaker {
+    pub framed_bad_message: u64,
+    pub tripped: bool,
 }
 
 #[rustfmt::skip]

@@ -6445,6 +6445,32 @@
     "messages counts messages handed to the connection writers and syscalls their write calls; stalls counts write calls that blocked for at least 1 ms on a full peer receive buffer."
    ]
   },
+  "ServerStatsIpcFrameBreaker": {
+   "kind": "object",
+   "fields": {
+    "tripped": {
+     "type": {
+      "kind": "scalar",
+      "name": "boolean"
+     },
+     "presence": "required",
+     "nullable": false
+    },
+    "framed_bad_message": {
+     "type": {
+      "kind": "scalar",
+      "name": "uint64"
+     },
+     "presence": "required",
+     "nullable": false
+    }
+   },
+   "additional_properties": false,
+   "constraints": [
+    "framed_bad_message counts bad_message closes of connections that had negotiated frames and whose bytes broke the protocol; a peer that closed inside a frame is not counted.",
+    "tripped turns true, for the rest of the daemon's life, at the third such close within 60 s: identify stops offering ipc-frames-v2 and the capabilities that require it, and set-client-info stops granting them; a connection that already holds the grant keeps it."
+   ]
+  },
   "ServerStatsIpc": {
    "kind": "object",
    "fields": {
@@ -6509,6 +6535,14 @@
      },
      "presence": "required",
      "nullable": false
+    },
+    "frame_breaker": {
+     "type": {
+      "kind": "ref",
+      "name": "ServerStatsIpcFrameBreaker"
+     },
+     "presence": "required",
+     "nullable": false
     }
    },
    "additional_properties": false,
@@ -6517,7 +6551,8 @@
     "streams counts each connection's stream 0 (no connection opens a second stream yet), so open is the open connections.",
     "sequence_depth samples the requests in a connection's sequence as each request arrives at it, itself included, also when the full sequence refuses it.",
     "received and sent list only kinds seen at least once, line first, then frames in wire order.",
-    "bad_message counts connections closed for a malformed message: a JSON line over the size limit or not UTF-8, a bad frame, or a WebSocket message that is oversized, not UTF-8, binary or against the protocol."
+    "bad_message counts connections closed for a malformed message: a JSON line over the size limit or not UTF-8, a bad frame, or a WebSocket message that is oversized, not UTF-8, binary or against the protocol.",
+    "frame_breaker is the crash-loop breaker of framed IPC."
    ]
   },
   "ServerStatsResult": {

@@ -18,6 +18,8 @@ public import Foundation
 /// ``HangSample/Source/daemon`` sample (in slots of their own, ``StallAggregate/maxDaemonSamples``) and a
 /// non-fatal event within a budget of its own, so a daemon's replay never takes the app's own sites' room.
 /// The app calls it on a background lane, never on the connection's reader thread.
+/// ``record(frameBreakerTripReasons:)`` takes a trip of the daemon connection's framed IPC crash-loop breaker
+/// (p05-ipc-191, `DaemonService/frameBreaker`) the same way, as one non-fatal event in the daemon sites' budget.
 ///
 /// ```swift
 /// services.blocking.install(sink: BlockingReportSink(collector: collector, nonFatal: .init(
@@ -68,6 +70,21 @@ public final class BlockingReportSink: BlockingViolationSink {
             tags = ["blocking_kind": site.kind, "blocking_context": "daemon"]
             extra = ["site": site.key]
         }
+
+        /// The event of the framed IPC crash-loop breaker turning frames off for a daemon life
+        /// (`DaemonFrameBreaker`): `daemon framed IPC off: unknown_kind`, named by the last close's bad-message
+        /// reason, with every close's reason, oldest first. The reasons are the reader's fixed wire names.
+        public init(frameBreakerTripReasons reasons: [String]) {
+            let last = reasons.last ?? "unknown"
+            message = "daemon framed IPC off: \(last)"
+            type = "DaemonFrameBreaker"
+            fingerprint = [Self.frameBreakerSite, last]
+            tags = ["bad_message": last, "blocking_context": "daemon"]
+            extra = ["reasons": reasons.joined(separator: ", ")]
+        }
+
+        /// The budget site of a breaker trip: one per launch and per 24 h, whatever the reason.
+        public static let frameBreakerSite = "daemon-frame-breaker"
 
         /// The thread's name in the message and fingerprint, and in the type.
         private static func thread(_ context: BlockingContext) -> (label: String, type: String) {
@@ -197,6 +214,14 @@ public final class BlockingReportSink: BlockingViolationSink {
         guard isNew else { return }
         collector?.noteDaemonSite(sighting.site)
         send(site: sighting.site.key, within: daemonBudget) { _ in NonFatalEvent(daemonSite: sighting.site) }
+    }
+
+    /// Takes one trip of the framed IPC crash-loop breaker (a background lane): `reasons` are the bad-message
+    /// reasons of the closes that tripped it, oldest first. One non-fatal event within the daemon sites' budget.
+    public func record(frameBreakerTripReasons reasons: [String]) {
+        send(site: NonFatalEvent.frameBreakerSite, within: daemonBudget) { _ in
+            NonFatalEvent(frameBreakerTripReasons: reasons)
+        }
     }
 
     /// Sends the event of `site` when crash reporting runs and `budget` admits it.

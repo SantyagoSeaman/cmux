@@ -71,7 +71,11 @@ pub(super) fn server_stats(mux: &Mux, include: Option<&[String]>) -> ServerStats
         request_latency_us,
         dispatch_queue_us,
         lock_classes: wants(LOCK_CLASSES).then(|| mux.lock_class_stats()),
-        ipc: wants(IPC).then(|| mux.ipc_stats().snapshot()),
+        ipc: wants(IPC).then(|| {
+            let mut ipc = mux.ipc_stats().snapshot();
+            ipc.frame_breaker = mux.control_clients.frame_breaker.snapshot();
+            ipc
+        }),
         ipc_methods: wants(IPC_METHODS)
             .then(|| mux.request_stats().methods().snapshot(RequestMethod::of_slot)),
         hangs: wants(HANGS).then(|| mux.request_watchdog.hangs()),

@@ -369,10 +369,14 @@ final class LineTransport: Sendable {
             // for the call and nothing else touches meanwhile.
             let count = unsafe chunk.withUnsafeMutableBytes { unsafe Darwin.read(fd, $0.baseAddress, $0.count) }
             if count == 0 {
-                // A close inside a frame is a bad message (`truncated`). A line cut by the close is not routed:
-                // the daemon died while writing it, and a partial reply must not answer its request.
+                // A close inside a frame is a lost connection (the daemon died, or dropped a slow reader mid-write),
+                // not a bad message. A line cut by the close is not routed: a partial reply must not answer.
                 reader.markEndOfStream()
-                if case .failure(let bad) = Self.nextMessage(&reader) { badMessage = bad.reason }
+                switch Self.nextMessage(&reader) {
+                case .failure(.truncated): closeDetail = "EOF inside frame"
+                case .failure(let bad): badMessage = bad.reason
+                case .success: break
+                }
                 break
             }
             if count < 0 {
@@ -422,16 +426,6 @@ final class LineTransport: Sendable {
         closeDescriptor()
         endAttachStreams(reason)
         onClose(reason)
-    }
-
-    /// Counts a bad-message close; once the reader cut frames, it also counts toward the crash-loop breaker of
-    /// the daemon's life (``DaemonFrameBreaker``), whose trip turns frames off for the connections after it.
-    /// Returns whether this close tripped it.
-    private func closedOnBadMessage(_ reason: String, framed: Bool) -> Bool {
-        recorder?.badMessage()
-        guard framed, let watch = breakerWatch, watch.badMessage(reason) == .tripped else { return false }
-        recorder?.frameBreakerTripped()
-        return true
     }
 
     /// Stream-0 events routed so far; a reply captures it as its barrier.

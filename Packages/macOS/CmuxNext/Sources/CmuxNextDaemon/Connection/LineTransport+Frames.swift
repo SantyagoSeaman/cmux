@@ -21,6 +21,16 @@ extension LineTransport {
     /// The breaker a bad-message close counts toward: set once the reader cuts frames.
     var breakerWatch: DaemonFrameBreaker.Watch? { state.withLock { $0.breakerWatch } }
 
+    /// Counts a bad-message close (the daemon's bytes broke the protocol); once the reader cut frames, it also
+    /// counts toward the crash-loop breaker of the daemon's life (``DaemonFrameBreaker``), whose trip turns
+    /// frames off for the connections after it. Returns whether this close tripped it.
+    func closedOnBadMessage(_ reason: String, framed: Bool) -> Bool {
+        recorder?.badMessage()
+        guard framed, let watch = breakerWatch, watch.badMessage(reason) == .tripped else { return false }
+        recorder?.frameBreakerTripped()
+        return true
+    }
+
     /// Whether the reader cuts frames (read by the reader thread once per read until it does).
     var acceptsFrames: Bool { state.withLock { $0.acceptsFrames } }
 

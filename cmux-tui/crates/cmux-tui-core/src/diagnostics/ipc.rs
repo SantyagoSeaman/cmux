@@ -177,6 +177,8 @@ impl IpcStats {
                 stalls: self.write_stalls.load(Ordering::Relaxed),
             },
             bad_message: self.bad_message.load(Ordering::Relaxed),
+            // The breaker lives on the client registry; `server-stats` reads it.
+            frame_breaker: IpcFrameBreakerSnapshot::default(),
         }
     }
 
@@ -377,6 +379,18 @@ pub struct IpcSnapshot {
     pub writes: IpcWritesSnapshot,
     /// Connections closed for a malformed message, on any transport.
     pub bad_message: u64,
+    /// The crash-loop breaker of framed IPC (server/frame_breaker.rs).
+    pub frame_breaker: IpcFrameBreakerSnapshot,
+}
+
+/// The crash-loop breaker of framed IPC read at one moment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct IpcFrameBreakerSnapshot {
+    /// Frames are no longer offered or granted for the rest of this daemon's
+    /// life.
+    pub tripped: bool,
+    /// Bad-message closes of framed connections the breaker counted.
+    pub framed_bad_message: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]

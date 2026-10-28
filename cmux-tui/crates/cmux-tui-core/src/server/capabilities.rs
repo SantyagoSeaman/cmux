@@ -187,7 +187,7 @@ impl IpcCapability {
         }
     }
 
-    /// What `identify` advertises: each bound capability `peer` may be
+    /// What `identify` advertises: each grantable capability `peer` may be
     /// granted. `current_revision` is false once the client declared another
     /// revision than this daemon's.
     pub(super) fn offered(
@@ -198,7 +198,7 @@ impl IpcCapability {
         Self::ALL
             .into_iter()
             .filter(|capability| {
-                transports.bound(*capability) && capability.allowed(peer, current_revision)
+                transports.grantable(*capability) && capability.allowed(peer, current_revision)
             })
             .collect()
     }
@@ -210,26 +210,38 @@ impl IpcCapability {
 /// capability to [`Self::BOUND`]: the frame reader (p05-ipc-061) `Frames`,
 /// streams and `cancel-stream` (p05-ipc-074) `AttachStreams`, attach frames
 /// `AttachFrames`, the ring (p05-ipc-111) `OutputRing`.
-pub(super) struct IpcTransports(AtomicU8);
+///
+/// A bound capability can also be withdrawn from new grants: the crash-loop
+/// breaker (frame_breaker.rs) withdraws frames. A withdrawn capability is no
+/// longer offered or granted, while a connection that holds it keeps it.
+pub(super) struct IpcTransports {
+    bound: AtomicU8,
+    withdrawn: AtomicU8,
+}
 
 impl IpcTransports {
     /// The capabilities whose transport this build serves.
     const BOUND: [IpcCapability; 1] = [IpcCapability::AttachStreams];
 
+    /// Whether `capability` has a transport: a held grant stays usable.
     pub(super) fn bound(&self, capability: IpcCapability) -> bool {
-        self.0.load(Ordering::Acquire) & capability.bit() != 0
+        self.bound.load(Ordering::Acquire) & capability.bit() != 0
     }
 
-    /// Unbinds frames and every capability that requires them, for the rest
-    /// of this daemon's life: the crash-loop breaker tripped
-    /// (frame_breaker.rs). They are no longer offered or granted, and a held
-    /// grant lapses at its next use ([`holds`]).
-    pub(super) fn unbind_frames(&self) {
+    /// Whether `capability` may be offered and newly granted.
+    pub(super) fn grantable(&self, capability: IpcCapability) -> bool {
+        self.bound(capability) && self.withdrawn.load(Ordering::Acquire) & capability.bit() == 0
+    }
+
+    /// Withdraws frames and every capability that requires them from new
+    /// grants for the rest of this daemon's life: the crash-loop breaker
+    /// tripped (frame_breaker.rs). Connections that hold them keep them.
+    pub(super) fn withdraw_frames(&self) {
         let off = IpcCapability::ALL
             .into_iter()
             .filter(|capability| capability.needs(IpcCapability::Frames))
             .fold(0, |bits, capability| bits | capability.bit());
-        self.0.fetch_and(!off, Ordering::AcqRel);
+        self.withdrawn.fetch_or(off, Ordering::AcqRel);
     }
 
     /// Binds every transport, so tests can check the grant rule before the
@@ -237,7 +249,7 @@ impl IpcTransports {
     #[cfg(test)]
     pub(super) fn bind_all_for_test(&self) {
         for capability in IpcCapability::ALL {
-            self.0.fetch_or(capability.bit(), Ordering::AcqRel);
+            self.bound.fetch_or(capability.bit(), Ordering::AcqRel);
         }
     }
 }
@@ -245,7 +257,7 @@ impl IpcTransports {
 impl Default for IpcTransports {
     fn default() -> Self {
         let bits = Self::BOUND.iter().fold(0, |bits, capability| bits | capability.bit());
-        Self(AtomicU8::new(bits))
+        Self { bound: AtomicU8::new(bits), withdrawn: AtomicU8::new(0) }
     }
 }
 
@@ -300,9 +312,10 @@ fn still_allowed(record: &ClientRecord, transports: &IpcTransports, ipc: IpcCapa
         && ipc.allowed(IpcPeer::of(record), record.writer.api_revision.is_current())
 }
 
-/// The framed IPC capabilities one `set-client-info` grants: each one asked
-/// for (now or held from before), bound, allowed for the connection, and
-/// with what it [requires](IpcCapability::requires) granted too.
+/// The framed IPC capabilities one `set-client-info` grants: each one held
+/// from before or asked for now and [grantable](IpcTransports::grantable),
+/// bound, allowed for the connection, and with what it
+/// [requires](IpcCapability::requires) granted too.
 pub(super) struct IpcGrant(Vec<IpcCapability>);
 
 impl IpcGrant {
@@ -314,8 +327,10 @@ impl IpcGrant {
         let mut granted = Vec::new();
         for capability in IpcCapability::ALL {
             let name = capability.name();
-            let asked = requested.iter().any(|requested| requested == name)
-                || record.capabilities.contains(name);
+            let held = record.capabilities.contains(name);
+            let asked = held
+                || (requested.iter().any(|requested| requested == name)
+                    && transports.grantable(capability));
             if asked
                 && still_allowed(record, transports, capability)
                 && capability.requires().iter().all(|required| granted.contains(required))

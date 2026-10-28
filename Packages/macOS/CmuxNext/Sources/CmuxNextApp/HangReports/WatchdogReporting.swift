@@ -16,7 +16,8 @@ import CmuxNextWakeups
 /// (``HangReportsController``), whose sink does nothing while they are off, as each committed key's `key.frame`
 /// time (`AppServices.inputFrameSignposts`); with the main thread's phase (`main_thread_phase`, `cef_pump`)
 /// and `hang.cef` in the CEF pump. The blocking detector's new call sites go to ``BlockingReportSink``, and so
-/// do the local daemon's (`server-diagnostic-site`, ``DaemonService/diagnosticSites``), each on a best-effort lane.
+/// do the local daemon's (`server-diagnostic-site`, ``DaemonService/diagnosticSites``) and the trips of its framed
+/// IPC crash-loop breaker (``DaemonService/frameBreaker``), each on a best-effort lane.
 @MainActor
 enum WatchdogReporting {
     /// Wires `watchdog` and returns this launch's hang report controller (held by `AppProcessRoot`).
@@ -57,6 +58,10 @@ enum WatchdogReporting {
         // Replays the daemon sites read before this point; each goes off the reader thread (the sink may save).
         services.daemon.diagnosticSites.install { [work = services.work] sighting in
             work.post(.bestEffort, mayBlock: .files) { blockingSink.record(daemonSite: sighting) }
+        }
+        // A trip of the local daemon's framed IPC crash-loop breaker, before this point or later, on the same lane.
+        services.daemon.frameBreaker.trips.install { [work = services.work] trip in
+            work.post(.bestEffort, mayBlock: .files) { blockingSink.record(frameBreakerTripReasons: trip.reasons) }
         }
         // Replaces the crash-reporting-only sink set before Sentry started (WatchdogHangSinks), adding hang reports.
         watchdog.onHang = { hang in

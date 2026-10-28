@@ -2,8 +2,11 @@
 //! socket pair. Each of 20 malformed inputs closes its connection with its
 //! reason and `ipc.bad_message` + 1, and nothing panics. Three framed
 //! connections closed as bad messages within 60 s turn frames off for the
-//! daemon's life: `identify` stops offering them, `set-client-info` stops
-//! granting them, a held grant lapses at its next frame, and lines go on.
+//! daemon's life: `identify` stops offering them and `set-client-info` stops
+//! granting them, a connection that holds the grant keeps using it, and
+//! lines go on. A peer that closes inside a frame is not counted.
+
+use std::io::Read;
 
 use super::*;
 use crate::server::line_connection::IPC_FRAMES_CAPABILITY;
@@ -276,15 +279,55 @@ fn bad_message_breaker_turns_frames_off_after_the_third_framed_close() {
         ConnectionEnd::BadMessage(ConnectionBadMessage::Wire(BadMessage::FramesNotNegotiated))
     );
 
-    // The held grant lapses at its next frame; its lines still work.
+    // The connection that held the grant keeps it: its frame is answered,
+    // and its lines still work.
+    holder.send(&ping_call(FrameKind::Request, PriorityHint::Control, br#"{"cmd":"ping"}"#));
+    let (header, reply) = read_frame(&mut holder);
+    assert_eq!(header.kind(), FrameKind::Reply);
+    assert_eq!(reply["ok"], json!(true), "{reply}");
     holder.send(&ping(4));
     assert_eq!(holder.reply().unwrap()["id"], json!(4));
-    let end = close_after(
-        holder,
-        Send::Framed(ping_call(FrameKind::Request, PriorityHint::Control, b"{}")),
-    );
+    assert_eq!(holder.finish(), ConnectionEnd::PeerClosed);
+    let ipc = server_stats::server_stats(&mux, Some(&["ipc".to_owned()])).ipc.unwrap();
     assert_eq!(
-        end,
-        ConnectionEnd::BadMessage(ConnectionBadMessage::Wire(BadMessage::FramesNotNegotiated))
+        ipc.frame_breaker,
+        crate::diagnostics::IpcFrameBreakerSnapshot { tripped: true, framed_bad_message: 3 }
     );
+}
+
+/// The next message on `peer`'s socket, which must be a frame; its header
+/// and JSON payload.
+fn read_frame(peer: &mut Peer) -> (FrameHeader, Value) {
+    let mut header = [0; cmux_ipc::HEADER_LEN];
+    peer.replies.read_exact(&mut header).unwrap();
+    let header = FrameHeader::decode(header, u32::MAX).unwrap();
+    let mut payload = vec![0; header.len() as usize];
+    peer.replies.read_exact(&mut payload).unwrap();
+    (header, serde_json::from_slice(&payload).unwrap())
+}
+
+/// A peer that dies, or whose writer gives up, in the middle of a frame is a
+/// lost peer: the close still counts as `truncated`, but never toward the
+/// breaker, however often it happens.
+#[test]
+fn bad_message_a_close_inside_a_frame_never_trips_the_breaker() {
+    let mux = Mux::new_for_test("bad-message-truncated", crate::SurfaceOptions::default());
+    mux.control_clients.ipc_transports.bind_all_for_test();
+    let cut = ping_call(FrameKind::Request, PriorityHint::Control, br#"{"cmd":"ping"}"#);
+    for close in 1..=frame_breaker::TRIP_CLOSES * 2 {
+        let (mut peer, _) = peer_on(&mux);
+        assert_eq!(declare_frames(&mut peer, 1)["ok"], json!(true));
+        let bytes = if close % 2 == 0 { &cut[..9] } else { &cut[..20] };
+        let end = close_after(peer, Send::Framed(bytes.to_vec()));
+        assert!(
+            matches!(&end, ConnectionEnd::BadMessage(bad) if bad.reason() == "truncated"),
+            "{end:?}"
+        );
+    }
+    assert!(!mux.control_clients.frame_breaker.is_tripped());
+    let (mut peer, _) = peer_on(&mux);
+    assert!(offers_frames(&mut peer, 1), "frames are still offered");
+    let ipc = server_stats::server_stats(&mux, Some(&["ipc".to_owned()])).ipc.unwrap();
+    assert_eq!(ipc.bad_message, 6);
+    assert_eq!(ipc.frame_breaker, crate::diagnostics::IpcFrameBreakerSnapshot::default());
 }

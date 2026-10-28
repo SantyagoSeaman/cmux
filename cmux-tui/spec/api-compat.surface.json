@@ -22892,6 +22892,18 @@
         "ty": "uint64",
         "required": true
       },
+      "/data/ipc/frame_breaker": {
+        "ty": "object",
+        "required": true
+      },
+      "/data/ipc/frame_breaker/framed_bad_message": {
+        "ty": "uint64",
+        "required": true
+      },
+      "/data/ipc/frame_breaker/tripped": {
+        "ty": "boolean",
+        "required": true
+      },
       "/data/ipc/parses": {
         "ty": "object",
         "required": true

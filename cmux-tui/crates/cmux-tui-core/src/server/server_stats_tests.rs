@@ -316,6 +316,7 @@ fn server_stats_include_reports_ipc_after_traffic() {
     assert!(writes["syscalls"].as_u64().unwrap() >= 4, "{ipc}");
     assert!(writes["syscalls_per_message"].as_f64().unwrap() >= 1.0, "{ipc}");
     assert_eq!(ipc["bad_message"], json!(0), "{ipc}");
+    assert_eq!(ipc["frame_breaker"], json!({"tripped": false, "framed_bad_message": 0}), "{ipc}");
 
     let decoded: ::cmux::raw::ServerStatsResult =
         serde_json::from_value(full["data"].clone()).expect("the SDK decodes the ipc section");

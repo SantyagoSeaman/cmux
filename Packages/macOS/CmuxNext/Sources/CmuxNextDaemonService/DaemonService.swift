@@ -94,10 +94,10 @@ public final class DaemonService {
     /// Watches each line the service's connections and its terminal attachments read (their reader threads'
     /// `daemon.line` scopes); nil watches nothing.
     @ObservationIgnored public let hangWatch: (any HangWatchScoping)?
-    /// The local daemon's diagnostic sites (`server-diagnostic-site`), each once per daemon life across this
-    /// service's connections; the app's hang reports install their sink here (`WatchdogReporting`), whose
-    /// ledger keeps them once across app launches.
+    /// The daemon's diagnostic sites (each once per daemon life across connections), and the framed IPC crash-loop
+    /// breaker every connection to it shares (``DaemonWireUpgrades``); `WatchdogReporting` installs both sinks.
     @ObservationIgnored public let diagnosticSites = DaemonDiagnosticSiteRelay<DaemonDiagnosticSite.Sighting>()
+    @ObservationIgnored public let frameBreaker = DaemonFrameBreaker()
 
     /// - Parameters:
     ///   - machineID: `local`, or the remote machine's id.

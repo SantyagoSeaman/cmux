@@ -95,7 +95,7 @@ import Testing
         return configuration
     }
 
-    static let upgrades = DaemonWireUpgrades(frames: schema, streams: true)
+    static let upgrades = DaemonWireUpgrades(frames: schema, streams: true, frameBreaker: DaemonFrameBreaker())
 
     /// A daemon at this build's revision with `schema`'s tables, answering ``served`` on frames.
     static func daemon(offers: [String] = [DaemonHandshakeTests.frames, DaemonHandshakeTests.streams],
@@ -170,7 +170,7 @@ import Testing
     @Test(arguments: [false, true]) func anotherSchemaAtTheSameRevisionKeepsLines(hello: Bool) async throws {
         let daemon = try WireDaemon(Self.daemon())
         defer { daemon.stop() }
-        let newer = DaemonWireUpgrades(frames: Self.newerSchema, streams: true)
+        let newer = DaemonWireUpgrades(frames: Self.newerSchema, streams: true, frameBreaker: DaemonFrameBreaker())
         let (connection, grants) = try await Self.connect(daemon, upgrades: newer, hello: hello)
         #expect(grants == DaemonWireGrants(frames: false, streams: true))
         #expect(try await connection.request(New(text: "n")) == .object(["cmd": .string("wire-new"), "text": .string("n")]))
@@ -371,7 +371,7 @@ struct DaemonHandshakeLiveTests {
         let h = try await BranchDaemonHarness.start()
         var configuration = BranchDaemonHarness.configuration()
         configuration.wireUpgrades = DaemonWireUpgrades(frames: DaemonFrameSchema(table: .schema, identity: .built),
-                                                        streams: true)
+                                                        streams: true, frameBreaker: DaemonFrameBreaker())
         let upgraded = DaemonConnection(endpoint: h.endpoint, configuration: configuration)
         do {
             _ = try await h.workspaceWithTerminal("wire")

@@ -38,3 +38,41 @@ fn bad_message_breaker_counts_the_last_three_closes() {
     assert_eq!(breaker.record(start + Duration::from_secs(70)), BreakerVerdict::Counted);
     assert_eq!(breaker.record(start + Duration::from_secs(80)), BreakerVerdict::Tripped);
 }
+
+/// Closes on many threads, some filling the window and some far apart: the
+/// breaker trips exactly once, a close that does not trip never clears it,
+/// and every close is counted.
+#[test]
+fn bad_message_breaker_trips_once_under_concurrent_closes() {
+    const THREADS: u64 = 8;
+    const CLOSES: u64 = 64;
+    for _ in 0..50 {
+        let start = Instant::now();
+        let breaker = FrameBreaker::new(start);
+        let tripped = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let breaker = &breaker;
+                    scope.spawn(move || {
+                        (0..CLOSES)
+                            .filter(|close| {
+                                // Odd threads stamp far apart, so their own
+                                // closes never fill the window.
+                                let at = if thread % 2 == 0 {
+                                    start
+                                } else {
+                                    start + TRIP_WINDOW * u32::try_from(close * 3).unwrap()
+                                };
+                                breaker.record(at) == BreakerVerdict::Tripped
+                            })
+                            .count()
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|worker| worker.join().unwrap()).sum::<usize>()
+        });
+        assert_eq!(tripped, 1, "exactly one close trips");
+        assert!(breaker.is_tripped(), "no close clears a trip");
+        assert_eq!(breaker.snapshot().framed_bad_message, THREADS * CLOSES);
+    }
+}

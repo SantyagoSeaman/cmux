@@ -4,7 +4,8 @@ import os
 /// The app's crash-loop breaker of framed IPC (p05-ipc-191; plans/cmux-next/chrome-parity/p05-ipc.md 3.7).
 ///
 /// A bad message from the daemon closes its connection (``LineTransport``). When the connection had asked for
-/// frames, the close also counts here, by daemon life (its `identify` pid and boot generation): the third such
+/// frames, the close also counts here, by daemon life (its `identify` pid and boot generation); a close inside a
+/// frame is a lost connection (the daemon died or dropped a slow reader mid-write) and counts nothing. The third such
 /// close of one life within ``tripWindow`` turns frames off for that life. Every later handshake with it asks
 /// for no frames (``WireNegotiation``), so the app goes on with JSON lines instead of reconnecting into the
 /// same bad frame forever. A new daemon life starts with frames on again. Chrome ends a renderer that sends a
@@ -13,11 +14,11 @@ import os
 ///
 /// The trip is visible four ways: the close reason of the connection that tripped it, which becomes the
 /// connection's `disconnected` state (``tripDetail``); an error in the unified log; the ``DaemonWireStats``
-/// counter `frameBreakerTrips` (`debug.daemon.wire`); and a ``Trip`` on ``trips`` for the app's diagnostics
-/// sink, held until one is installed.
+/// counter `frameBreakerTrips` (`debug.daemon.wire`); and a ``Trip`` on ``trips``, held until a sink is
+/// installed: the app's `WatchdogReporting` sends it on as a crash-report event (`BlockingReportSink`).
 ///
-/// One breaker serves every connection to one daemon: it lives on the ``DaemonWireUpgrades`` those
-/// connections are configured with, and copies of that value share it.
+/// One breaker serves every connection to one daemon: the owner of that daemon target (`DaemonService`) makes
+/// it once and passes it into every ``DaemonWireUpgrades`` that asks for frames.
 public final class DaemonFrameBreaker: Sendable {
     /// Bad-message closes of one daemon life's framed connections that turn its frames off.
     public static let tripCloses = 3

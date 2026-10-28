@@ -656,7 +656,8 @@ object{
     received:array<kind_count>, sent:array<kind_count>,
     parses:object{lines:parse_count,frames:parse_count},
     writes:object{messages:uint64,syscalls:uint64,syscalls_per_message:float64,stalls:uint64},
-    bad_message:uint64
+    bad_message:uint64,
+    frame_breaker:object{tripped:boolean,framed_bad_message:uint64}
   },
   lock_classes?:object{
     registry:lock_class_set, registry_connection:lock_class_set,
@@ -801,7 +802,11 @@ request. `writes.syscalls` counts the writers' write calls and
 receive buffer. `bad_message` counts connections closed for a malformed
 message: a JSON line over the size limit or not UTF-8, a bad frame, or a
 WebSocket message that is oversized, not UTF-8, binary or against the
-protocol.
+protocol. `frame_breaker` is the crash-loop breaker of framed IPC
+(transports.md): `framed_bad_message` counts the `bad_message` closes of
+connections that had negotiated frames and whose bytes broke the protocol
+(a peer that closed inside a frame is not counted), and `tripped` turns true
+for the rest of the daemon's life at the third within 60 s.
 
 `ipc_methods` adds the same requests by method (Chrome's per-message IPC
 timing): one row per method that ran since daemon start, ordered by `id`,

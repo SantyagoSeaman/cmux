@@ -12135,6 +12135,9 @@ Result<Json> Codec<ServerStatsIpc>::encode(const ServerStatsIpc& value) {
     auto encoded_bad_message = encode_value(value.bad_message);
     if (!encoded_bad_message) return std::move(encoded_bad_message).error();
     object.emplace("bad_message", std::move(encoded_bad_message).value());
+    auto encoded_frame_breaker = encode_value(value.frame_breaker);
+    if (!encoded_frame_breaker) return std::move(encoded_frame_breaker).error();
+    object.emplace("frame_breaker", std::move(encoded_frame_breaker).value());
     auto encoded_parses = encode_value(value.parses);
     if (!encoded_parses) return std::move(encoded_parses).error();
     object.emplace("parses", std::move(encoded_parses).value());
@@ -12168,6 +12171,15 @@ Result<ServerStatsIpc> Codec<ServerStatsIpc>::decode(const Json& value) {
         auto decoded = decode_value<std::uint64_t>(*field_bad_message);
         if (!decoded) return std::move(decoded).error();
         result.bad_message = std::move(decoded).value();
+    }
+    const Json* field_frame_breaker = value.find("frame_breaker");
+    if (!field_frame_breaker) {
+        return make_error(ErrorCode::decode, "missing required field 'frame_breaker'");
+    }
+    if (field_frame_breaker) {
+        auto decoded = decode_value<ServerStatsIpcFrameBreaker>(*field_frame_breaker);
+        if (!decoded) return std::move(decoded).error();
+        result.frame_breaker = std::move(decoded).value();
     }
     const Json* field_parses = value.find("parses");
     if (!field_parses) {
@@ -12222,6 +12234,43 @@ Result<ServerStatsIpc> Codec<ServerStatsIpc>::decode(const Json& value) {
         auto decoded = decode_value<ServerStatsIpcWrites>(*field_writes);
         if (!decoded) return std::move(decoded).error();
         result.writes = std::move(decoded).value();
+    }
+    return result;
+}
+
+Result<Json> Codec<ServerStatsIpcFrameBreaker>::encode(const ServerStatsIpcFrameBreaker& value) {
+    (void)value;
+    Json::Object object;
+    auto encoded_framed_bad_message = encode_value(value.framed_bad_message);
+    if (!encoded_framed_bad_message) return std::move(encoded_framed_bad_message).error();
+    object.emplace("framed_bad_message", std::move(encoded_framed_bad_message).value());
+    auto encoded_tripped = encode_value(value.tripped);
+    if (!encoded_tripped) return std::move(encoded_tripped).error();
+    object.emplace("tripped", std::move(encoded_tripped).value());
+    return Json(std::move(object));
+}
+
+Result<ServerStatsIpcFrameBreaker> Codec<ServerStatsIpcFrameBreaker>::decode(const Json& value) {
+    auto source = value.as_object();
+    if (!source) return std::move(source).error();
+    ServerStatsIpcFrameBreaker result{};
+    const Json* field_framed_bad_message = value.find("framed_bad_message");
+    if (!field_framed_bad_message) {
+        return make_error(ErrorCode::decode, "missing required field 'framed_bad_message'");
+    }
+    if (field_framed_bad_message) {
+        auto decoded = decode_value<std::uint64_t>(*field_framed_bad_message);
+        if (!decoded) return std::move(decoded).error();
+        result.framed_bad_message = std::move(decoded).value();
+    }
+    const Json* field_tripped = value.find("tripped");
+    if (!field_tripped) {
+        return make_error(ErrorCode::decode, "missing required field 'tripped'");
+    }
+    if (field_tripped) {
+        auto decoded = decode_value<bool>(*field_tripped);
+        if (!decoded) return std::move(decoded).error();
+        result.tripped = std::move(decoded).value();
     }
     return result;
 }
