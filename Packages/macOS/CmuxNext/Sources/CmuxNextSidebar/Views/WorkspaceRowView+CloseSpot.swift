@@ -17,7 +17,7 @@ extension WorkspaceRowView {
         if let columnMark {
             // ⋮ ⌄ ✕: the menu takes the close's place, the close the column's, and the mark gives way until the hover ends.
             moreButton.frame = closeButton.frame
-            closeButton.frame = SidebarStyle.trailingColumnFrame(rowWidth: rowWidth, centerY: cy, side: control)
+            closeButton.frame = SidebarStyle.rowCloseFrame(rowWidth: rowWidth, centerY: cy)
             return true
         } else if !disclosureButton.isHidden, disclosure != nil, disclosure != .empty {
             // No mark: the chevron ends the row; the close and the chevron trade places.
