@@ -1,5 +1,6 @@
 import CmuxNextCompat
 public import CmuxNextSettings
+public import CmuxNextWakeups
 public import Foundation
 
 /// Unacknowledged inline queue edits, independently of acpmux's queued prompt. Only attachment
@@ -8,6 +9,7 @@ public import Foundation
 public final class AgentPaneQueuedEdits {
     public static let fileName = "agent-queued-edits.json"
     private let file: URL?
+    private let background: BackgroundWork
     private var tail: Task<Void, Never>?
 
     nonisolated struct Draft: Codable, Equatable, Sendable {
@@ -18,7 +20,8 @@ public final class AgentPaneQueuedEdits {
         var droppedImages: [String]
     }
 
-    public init(directory: URL?) {
+    public init(directory: URL?, work: BackgroundWork = BackgroundWork()) {
+        background = work
         file = directory?.appending(path: Self.fileName)
     }
 
@@ -57,12 +60,13 @@ public final class AgentPaneQueuedEdits {
     }
 
     private func queued<T: Sendable>(_ work: @escaping @Sendable (URL?) throws -> T) async throws -> T {
-        let previous = tail, file = file
-        let task = Task.detached {
+        let previous = tail, file = file, background = background
+        // task-owner: the request awaits task, and tail orders every later request after it.
+        let task = Task(priority: .medium) {
             await previous?.value
-            return try work(file)
+            return try await background.run(.userVisible, mayBlock: .files, shutdown: .blockShutdown) { try work(file) }
         }
-        let done = Task.detached { _ = try? await task.value }
+        let done = Task(priority: .medium) { _ = try? await task.value }
         tail = done
         defer { if tail == done { tail = nil } }
         return try await task.value

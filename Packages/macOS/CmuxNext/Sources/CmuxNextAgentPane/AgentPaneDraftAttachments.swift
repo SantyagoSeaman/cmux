@@ -1,4 +1,5 @@
 public import CmuxNextSettings
+public import CmuxNextWakeups
 import CryptoKit
 public import Foundation
 
@@ -27,8 +28,8 @@ public final class AgentPaneDraftAttachments {
     /// the page asked, a later small write never overtaking an earlier large one.
     private var queue: [String: Task<Void, Never>] = [:]
 
-    public init(directory: URL?) {
-        queuedEdits = AgentPaneQueuedEdits(directory: directory)
+    public init(directory: URL?, work: BackgroundWork = BackgroundWork()) {
+        queuedEdits = AgentPaneQueuedEdits(directory: directory, work: work)
         self.directory = directory?.appending(path: Self.directoryName, directoryHint: .isDirectory)
     }
 

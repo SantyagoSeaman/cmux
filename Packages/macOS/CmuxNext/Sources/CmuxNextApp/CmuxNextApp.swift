@@ -65,12 +65,13 @@ public struct CmuxNextApp {
             to: draftState)
         // Where each agent chat rests, beside the snapshot, so a relaunch reopens it there (cx-6bgzj).
         AgentPaneScrollAnchors.shared = AgentPaneScrollAnchors(directory: environment.sidebarSnapshotFile?.url.deletingLastPathComponent())
+        let work = BackgroundWork()
         // Each chat's unsent chips, beside the stable draft root, so updates retain them.
-        AgentPaneDraftAttachments.shared = AgentPaneDraftAttachments(directory: draftState)
+        AgentPaneDraftAttachments.shared = AgentPaneDraftAttachments(directory: draftState, work: work)
         AgentPaneDraftTexts.shared = AgentPaneDraftTexts(directory: draftState)
         // The last quit's agent pages, terminal frames and chat composers are read and decoded off the main thread
         // from here, while AppKit starts, so each pane's first frame can use them without waiting.
-        let state = environment.sidebarSnapshotFile?.url.deletingLastPathComponent(), work = BackgroundWork()
+        let state = environment.sidebarSnapshotFile?.url.deletingLastPathComponent()
         let launchImages = AgentPaneLaunchImages(state: state), relaunchWake = AgentPaneRelaunchWake(directory: draftState)
         launchImages.prefetch(on: work) { DebugTimings.markLaunch($0) }
         TerminalLaunchFrames.beside(state).prefetch(on: work) { DebugTimings.markLaunch($0) }
