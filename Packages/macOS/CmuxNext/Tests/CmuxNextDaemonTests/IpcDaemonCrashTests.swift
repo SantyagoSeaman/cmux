@@ -13,15 +13,19 @@ import Testing
 /// endpoints (mojo/public/cpp/bindings/README.md, "Connection errors"; content/browser/renderer_host/
 /// render_process_host_impl.cc `ProcessDied`). Here:
 ///
-/// - the app side does not crash: every view ends with `connectionLost` (never `bad_message`) and no attach line
-///   fails to decode;
+/// - the app side does not crash: every view's stream ends with what a dead peer gives (EOF, a read or write
+///   error), never a bad message or a daemon `stream-end`, and no attach line fails to decode;
 /// - from the new daemon's `listen()` (the birth time of the socket inode it binds, cmux-tui server/listen.rs
 ///   `bind_session_socket`) to the READY of every reattached view is at most 100 ms; the daemon's own start,
 ///   kill to `listen()`, is printed apart (D7);
-/// - every view shows its own terminal: the first screen and all output carry only its marker, and the shell's
-///   counter goes on past the value seen before the kill (the host survived and was adopted, not restarted);
+/// - every view shows its own terminal: the first screen and all output carry only its marker, and the first
+///   counter the new daemon shows is at least the last one the killed daemon sent (the host survived and was
+///   adopted, not restarted: a restarted shell counts from 1 again);
 /// - a span held across the kill keeps its ring mapped, and the release of that last span unmaps it
 ///   (app-daemon-connection-DESIGN.md section 4.3).
+///
+/// Every screen and output chunk is tagged with the pid of the daemon whose stream carried it, so bytes of the
+/// killed daemon that reach the view after the kill never count as the new daemon's.
 @Suite(.enabled(if: RealBinary.isBranchBuild, "needs the same-tree cmux-tui (scripts/cmux-next/pin-cmux-tui.sh fetch)"),
        .liveDaemon, .timeLimit(.minutes(3)))
 struct IpcDaemonCrashTests {
@@ -31,6 +35,8 @@ struct IpcDaemonCrashTests {
     /// Output each view reads before the kill, so the kill lands mid-flood.
     static let floodBytes = 256 * 1024
     static let ringCapability = "terminal-output-ring-v1"
+    /// The ring rides on attach frames (cmux-tui capabilities.rs: `OutputRing` requires `AttachFrames`).
+    static let attachFramesCapability = "attach-frames-v1"
 
     @Test func aKilledDaemonLeavesEveryFloodingViewOnItsOwnScreenWithinTheBound() async throws {
         let binary = try #require(RealBinary.url)
@@ -65,54 +71,62 @@ struct IpcDaemonCrashTests {
 
         let flooding = await Self.until(.seconds(30)) { views.allSatisfy { $0.flooding(Self.floodBytes) } }
         #expect(flooding, "not every view read its flood: \(views.map(\.summary))")
-        let rings = first.supports(Self.ringCapability)
-        // The day the daemon offers the ring (p05-ipc-111b binds it) this is not recorded, the test fails, and the
-        // wrapper goes: the ring checks below then run for real.
-        withKnownIssue("cmux-tui offers no terminal-output-ring-v1 yet: IpcTransports::BOUND lacks OutputRing") {
+        let rings = Self.ringsGranted(to: configuration, by: first)
+        // `DaemonWireUpgrades` has no ring field, so this connection cannot echo attach-frames-v1 and
+        // terminal-output-ring-v1 and the daemon grants it no ring. The day the knob asks for both (a dependency
+        // of this test that p05-ipc-113 does not add) this is not recorded, the test fails, and the wrapper goes:
+        // the ring checks below then run for real.
+        withKnownIssue("the connection cannot ask for terminal-output-ring-v1: DaemonWireUpgrades has no ring knob") {
             try #require(rings)
         }
-        var heldAddress: UInt?
+        var heldRegion: MappedRegion?
         if rings {
             views[0].holdNextSpan()
-            heldAddress = await Self.until(.seconds(10)) { views[0].heldAddress != nil } ? views[0].heldAddress : nil
-            #expect(heldAddress.map(RingMapping.isReadOnlyShared) == true, "a ring view's output is not a span of the ring mapping")
+            let held = await Self.until(.seconds(10)) { views[0].heldAddress != nil } ? views[0].heldAddress : nil
+            heldRegion = held.flatMap(MappedRegion.containing)
+            #expect(heldRegion?.isReadOnly == true,
+                    "a ring view's output is not a span of a read-only mapping: \(String(describing: heldRegion))")
         }
 
-        let before = views.map(\.counter)
         let killed = Wall.nanos()
         kill(first.pid, SIGKILL)
-        let back = await Self.until(.seconds(60)) {
-            zip(views, before).allSatisfy { view, counter in view.screened(after: killed) && view.counted(past: counter) }
-        }
+        let back = await Self.until(.seconds(60)) { views.allSatisfy { $0.reattached(awayFrom: first.pid) } }
         let socket = await connection.endpoint?.socketPath
         let next = await connection.identity
 
-        #expect(back, "not every view came back on its own screen: \(views.map(\.summary))")
+        #expect(back, "not every view came back on the new daemon: \(views.map(\.summary))")
         #expect(next.map { $0.pid != first.pid } == true, "no new daemon took over")
         if let listened = socket.flatMap(Wall.birth(of:)), listened > killed {
-            let routed = views.compactMap { $0.routed(after: killed) }.min()
-            let ready = views.compactMap { $0.screen(after: killed) }
-            let last = ready.max() ?? listened
+            let routed = views.compactMap { $0.firstRoute(awayFrom: first.pid) }.min()
+            let ready = views.compactMap { $0.firstScreen(awayFrom: first.pid) }
             print("IpcDaemonCrashTests: kill -> listen \(Wall.ms(listened - killed)) ms (daemon start, D7); "
-                  + "listen -> control ready \(routed.map { Wall.ms($0 &- listened) } ?? "-") ms; "
-                  + "listen -> every READY \(Wall.ms(last &- listened)) ms over \(ready.count) views")
+                  + "listen -> control ready \(Wall.since(listened, routed)) ms; "
+                  + "listen -> every READY \(Wall.since(listened, ready.max())) ms over \(ready.count) views")
             #expect(ready.count == Self.views)
-            #expect(last &- listened <= Self.readyBound,
-                    "listen() to the last READY took \(Wall.ms(last &- listened)) ms: \(ready.map { Wall.ms($0 &- listened) })")
+            if let early = ready.min(), let last = ready.max() {
+                // A screen of the new daemon cannot come before it bound its socket.
+                #expect(early >= listened, "a reattached view's READY came before listen(): \(ready) < \(listened)")
+                if last >= listened {
+                    #expect(last - listened <= Self.readyBound,
+                            "listen() to the last READY took \(Wall.ms(last - listened)) ms: \(ready.map { Wall.since(listened, $0) })")
+                }
+            }
         } else {
             Issue.record("the new daemon's socket \(socket ?? "-") was not bound after the kill")
         }
         for view in views {
+            #expect(view.adopted(awayFrom: first.pid),
+                    "view \(view.index) restarted: the new daemon's first counter is below the old one's last: \(view.summary)")
             #expect(view.foreignMarkers == 0, "view \(view.index) showed another terminal's output: \(view.summary)")
             #expect(view.badScreens == 0, "view \(view.index) got a screen without its own terminal: \(view.summary)")
             #expect(view.closes.allSatisfy(Self.endedByTheKill), "view \(view.index) ended otherwise: \(view.closes)")
         }
         #expect(TerminalAttachment.undecodableLines.load(ordering: .relaxed) == undecodable)
 
-        if let heldAddress {
-            #expect(RingMapping.isReadOnlyShared(heldAddress), "a held span lost its mapping when its stream ended")
+        if let heldRegion {
+            #expect(heldRegion.isMapped, "a held span lost its mapping when its stream ended")
             views[0].releaseHeldSpan()
-            #expect(!RingMapping.isReadOnlyShared(heldAddress), "the ring stayed mapped after its last span was released")
+            #expect(!heldRegion.isMapped, "the ring stayed mapped after its last span was released")
         }
 
         for view in views { view.stop() }
@@ -120,14 +134,32 @@ struct IpcDaemonCrashTests {
         await BranchDaemonHarness.shutDown(connection)
     }
 
+    /// What a dead peer leaves as a lost connection's detail: the reader's EOF or read error, the writer's error
+    /// (CmuxNextIPC FrameWriter `Failure`), or the control connection the view streamed on closing under it
+    /// (LineTransport.swift reader loop; TerminalAttachment+Stream.swift `deliver`).
+    private static let killDetails: Set<String> = ["EOF", "control connection closed", "peer closed the socket", "socket closed"]
+    private static let killDetailPrefixes = ["read: ", "write: "]
+
     /// The kill ends a view with its connection; a view that fell behind a flood may also have lost its stream
-    /// (`overflow`) and reattached, as the app's attach driver does. Never a protocol error.
+    /// (`overflow`) and reattached, as the app's attach driver does. Never a bad message (the reader's
+    /// "bad message: ..."), a daemon `stream-end` the view does not know ("stream ended"), or a clean shutdown.
     private static func endedByTheKill(_ reason: TerminalChannelCloseReason) -> Bool {
         switch reason {
-        case .connectionLost(let detail): !detail.hasPrefix("bad_message")
+        case .connectionLost(let detail):
+            killDetails.contains(detail) || killDetailPrefixes.contains { detail.hasPrefix($0) }
         case .overflow, .detachedByClient: true
         case .surfaceGone: false
         }
+    }
+
+    /// Whether the daemon grants this connection the ring: it must offer attach-frames-v1 and
+    /// terminal-output-ring-v1, and the connection must echo both in its `set-client-info` (cmux-tui
+    /// capabilities.rs grants only what the client echoes). Read from what the handshake echoes
+    /// (`handshakeCapabilities` and the wire negotiation's echo, HandshakeLines `clientInfo`), not from the offer.
+    private static func ringsGranted(to configuration: DaemonConnectionConfiguration, by daemon: DaemonIdentity) -> Bool {
+        let echo = WireNegotiation(upgrades: configuration.wireUpgrades, bridged: false).echo(offered: daemon)
+        let echoed = configuration.handshakeCapabilities + (echo?.capabilities ?? [])
+        return [attachFramesCapability, ringCapability].allSatisfy { echoed.contains($0) && daemon.supports($0) }
     }
 
     /// One workspace with ``views`` terminals, each printing `F<nn>:<count>` lines as fast as its shell can.
@@ -160,7 +192,8 @@ struct IpcDaemonCrashTests {
 }
 
 /// One terminal's view, attached as a stream and reattached on the connection's next epoch each time its stream
-/// ends, as the app's attach driver does. It reads every byte and records what a crash could get wrong.
+/// ends, as the app's attach driver does. It reads every byte and records what a crash could get wrong, each
+/// screen and counter under the pid of the daemon whose stream carried it.
 private final class FloodView: Sendable {
     static let size = CellSize(cols: 80, rows: 24)
     /// Attach failures in a row before the view gives up.
@@ -171,17 +204,27 @@ private final class FloodView: Sendable {
     let resource: ResourceID?
     private let state = Mutex(State())
 
+    /// A wall time and the pid of the daemon whose stream it belongs to.
+    struct Stamp {
+        let at: UInt64
+        let daemon: Int32
+    }
+
     struct State {
         var bytes = 0
-        /// The shell's newest counter seen in live output.
+        /// The shell's newest counter, from any daemon.
         var counter: UInt64 = 0
+        /// Per daemon pid: the newest counter its streams showed.
+        var newest: [Int32: UInt64] = [:]
+        /// Per daemon pid: the newest counter of its first replay or output chunk that held one.
+        var firstShown: [Int32: UInt64] = [:]
         var foreignMarkers = 0
         /// Screens (READY or replay) whose bytes named no terminal or another one.
         var badScreens = 0
-        /// Wall time of each screen.
-        var screens: [UInt64] = []
-        /// Wall time of each ready control connection a reattach found.
-        var routes: [UInt64] = []
+        /// Each screen.
+        var screens: [Stamp] = []
+        /// Each ready control connection a reattach found.
+        var routes: [Stamp] = []
         var closes: [TerminalChannelCloseReason] = []
         var failures: [String] = []
         var current: TerminalAttachment?
@@ -201,22 +244,39 @@ private final class FloodView: Sendable {
         "F" + (index < 10 ? "0" : "") + String(index) + ":"
     }
 
-    var counter: UInt64 { state.withLock { $0.counter } }
     var foreignMarkers: Int { state.withLock { $0.foreignMarkers } }
     var badScreens: Int { state.withLock { $0.badScreens } }
     var closes: [TerminalChannelCloseReason] { state.withLock { $0.closes } }
     var summary: String {
         state.withLock {
-            "#\(index): \($0.bytes) B, counter \($0.counter), screens \($0.screens.count), closes \($0.closes), "
-                + "failures \($0.failures.suffix(3))"
+            "#\(index): \($0.bytes) B, counter \($0.counter), newest \($0.newest), first shown \($0.firstShown), "
+                + "screens \($0.screens.map(\.daemon)), closes \($0.closes), failures \($0.failures.suffix(3))"
         }
     }
 
     func flooding(_ bytes: Int) -> Bool { state.withLock { $0.bytes >= bytes && $0.counter > 0 } }
-    func screen(after wall: UInt64) -> UInt64? { state.withLock { $0.screens.first { $0 > wall } } }
-    func screened(after wall: UInt64) -> Bool { screen(after: wall) != nil }
-    func routed(after wall: UInt64) -> UInt64? { state.withLock { $0.routes.first { $0 > wall } } }
-    func counted(past value: UInt64) -> Bool { counter > value }
+    /// The first screen of a daemon other than `old`: the reattached view's READY.
+    func firstScreen(awayFrom old: Int32) -> UInt64? { state.withLock { $0.screens.first { $0.daemon != old }?.at } }
+    func firstRoute(awayFrom old: Int32) -> UInt64? { state.withLock { $0.routes.first { $0.daemon != old }?.at } }
+
+    /// The view has a screen of a daemon other than `old` and a counter that daemon showed.
+    func reattached(awayFrom old: Int32) -> Bool {
+        state.withLock { state in
+            guard let next = state.screens.first(where: { $0.daemon != old })?.daemon else { return false }
+            return state.firstShown[next] != nil
+        }
+    }
+
+    /// The terminal was adopted, not restarted: the first counter the next daemon showed is at least the newest
+    /// one `old` sent. The view reads `old`'s stream to its end before it attaches to the next daemon, so every
+    /// counter of `old` is in by then.
+    func adopted(awayFrom old: Int32) -> Bool {
+        state.withLock { state in
+            guard let next = state.screens.first(where: { $0.daemon != old })?.daemon,
+                  let shown = state.firstShown[next], let last = state.newest[old] else { return false }
+            return shown >= last
+        }
+    }
 
     /// Keeps the next output span longer than `Data`'s inline bytes until ``releaseHeldSpan()``.
     func holdNextSpan() { state.withLock { $0.wantsHold = true } }
@@ -251,7 +311,8 @@ private final class FloodView: Sendable {
                     note(failure: "the connection does not stream terminals")
                     return
                 }
-                let routed = Wall.nanos()
+                let daemon = carrier.identity.pid
+                let routed = Stamp(at: Wall.nanos(), daemon: daemon)
                 state.withLock { $0.routes.append(routed) }
                 let target = TerminalAttachment.Target(surface: surface, terminalResourceID: resource,
                                                        generation: carrier.identity.generation)
@@ -264,7 +325,7 @@ private final class FloodView: Sendable {
                 }
                 failed = 0
                 for await event in view.events {
-                    guard receive(event) else { break }
+                    guard receive(event, from: daemon) else { break }
                 }
             } catch {
                 failed += 1
@@ -286,15 +347,15 @@ private final class FloodView: Sendable {
         state.withLock { $0.failures.append(failure) }
     }
 
-    /// One event of the view; false when it ended the stream.
-    private func receive(_ event: TerminalChannelEvent) -> Bool {
+    /// One event of the view's stream on `daemon`; false when it ended the stream.
+    private func receive(_ event: TerminalChannelEvent, from daemon: Int32) -> Bool {
         switch event {
         case .replay(let replay):
-            screen(replay.data)
+            screen(replay.data, from: daemon)
         case .snapshot(let frame) where frame.phase == .ready:
-            screen(nil)  // GHOSTSNP, not text: the output after it shows whose screen it is
+            screen(nil, from: daemon)  // GHOSTSNP, not text: the output after it shows whose screen it is
         case .output(let data, _):
-            output(data)
+            output(data, from: daemon)
         case .closed(let reason):
             state.withLock { $0.closes.append(reason) }
             return false
@@ -304,28 +365,37 @@ private final class FloodView: Sendable {
         return true
     }
 
-    private func screen(_ bytes: Data?) {
-        let at = Wall.nanos()
+    private func screen(_ bytes: Data?, from daemon: Int32) {
+        let at = Stamp(at: Wall.nanos(), daemon: daemon)
         let scan = bytes.map { MarkerScan(of: $0) }
         state.withLock { state in
             state.screens.append(at)
             guard let scan else { return }
             state.foreignMarkers += scan.markers.filter { $0 != index }.count
             if !scan.markers.contains(index) { state.badScreens += 1 }
+            Self.count(scan, of: index, from: daemon, in: &state)
         }
     }
 
-    private func output(_ data: Data) {
+    private func output(_ data: Data, from daemon: Int32) {
         let scan = MarkerScan(of: data)
         state.withLock { state in
             state.bytes += data.count
             state.foreignMarkers += scan.markers.filter { $0 != index }.count
-            for (marker, counter) in scan.counters where marker == index { state.counter = max(state.counter, counter) }
+            Self.count(scan, of: index, from: daemon, in: &state)
             if state.wantsHold, state.held == nil, data.count > 64 {
                 state.held = data
                 state.wantsHold = false
             }
         }
+    }
+
+    /// Records terminal `index`'s counters in one chunk of `daemon`'s stream.
+    private static func count(_ scan: MarkerScan, of index: Int, from daemon: Int32, in state: inout State) {
+        guard let newest = scan.counters.filter({ $0.0 == index }).map({ $0.1 }).max() else { return }
+        state.counter = max(state.counter, newest)
+        state.newest[daemon] = max(state.newest[daemon] ?? 0, newest)
+        if state.firstShown[daemon] == nil { state.firstShown[daemon] = newest }
     }
 }
 
@@ -390,12 +460,29 @@ private enum Wall {
     static func ms(_ nanos: UInt64) -> String {
         String(format: "%.1f", Double(nanos) / 1_000_000)
     }
+
+    /// Milliseconds from `start` to `end`; "-" with no end or one before `start`.
+    static func since(_ start: UInt64, _ end: UInt64?) -> String {
+        guard let end, end >= start else { return "-" }
+        return ms(end - start)
+    }
 }
 
-/// This process's mappings, read from the kernel: whether a span's bytes still lie in the ring's read-only shared
-/// mapping, so the test sees the unmap itself rather than a counter that says so.
-private enum RingMapping {
-    static func isReadOnlyShared(_ address: UInt) -> Bool {
+/// One VM region of this process, read from the kernel, so the test sees the ring's mapping and its unmap
+/// themselves rather than a counter that says so. A ring span's bytes lie in a read-only region (p05-ipc-112
+/// maps the ring PROT_READ); the release of the ring's last span unmaps exactly that region.
+private struct MappedRegion: Equatable, CustomStringConvertible {
+    let start: UInt64
+    let size: UInt64
+    let protection: vm_prot_t
+
+    var isReadOnly: Bool { protection & VM_PROT_READ != 0 && protection & VM_PROT_WRITE == 0 }
+    /// This exact region is still mapped, with the same bounds and protection.
+    var isMapped: Bool { Self.containing(UInt(start)) == self }
+    var description: String { "0x\(String(start, radix: 16)) +\(size) prot \(protection)" }
+
+    /// The region that contains `address`; nil when none does.
+    static func containing(_ address: UInt) -> MappedRegion? {
         var start = mach_vm_address_t(address)
         var size: mach_vm_size_t = 0
         var info = vm_region_basic_info_data_64_t()
@@ -410,7 +497,7 @@ private enum RingMapping {
             }
         }
         // mach_vm_region answers the first region at or above the address: it must contain it.
-        guard result == KERN_SUCCESS, start <= UInt64(address), UInt64(address) < start + size else { return false }
-        return info.shared != 0 && info.protection & VM_PROT_READ != 0 && info.protection & VM_PROT_WRITE == 0
+        guard result == KERN_SUCCESS, start <= UInt64(address), UInt64(address) - start < size else { return nil }
+        return MappedRegion(start: start, size: size, protection: info.protection)
     }
 }
