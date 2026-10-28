@@ -5,7 +5,13 @@ import React, { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { OnNewTab } from "./newTabComposer";
-import { QuickModelMenu, type QuickFamily } from "./QuickModelMenu";
+import type { QuickFamily } from "./QuickModelMenu";
+
+let QuickModelMenu: typeof import("./QuickModelMenu").QuickModelMenu;
+const loadQuickModelMenu = async () => {
+  QuickModelMenu ??= (await import("./QuickModelMenu")).QuickModelMenu;
+  return QuickModelMenu;
+};
 
 let dom: JSDOM | undefined;
 let root: Root | undefined;
@@ -117,6 +123,7 @@ function Harness({ newTab }: { newTab: boolean }) {
 
 async function openMenu(newTab: boolean) {
   const container = installDom();
+  await loadQuickModelMenu();
   await act(async () => {
     root = createRoot(container);
     root.render(<Harness newTab={newTab} />);
@@ -198,6 +205,7 @@ test("Fast mode exposes one checked menu row with a visual switch and no bare st
 
 test("inline effort picks a different model and its level together; model names keep effort", async () => {
   const container = installDom();
+  await loadQuickModelMenu();
   const picks: { id: string; effort?: string }[] = [];
   const effortPicks: string[] = [];
   function InlineHarness({ combined = true }: { combined?: boolean }) {
@@ -302,6 +310,7 @@ test("provider submenu and expanded rows keep the current model's Effort fallbac
   };
   for (const providerLook of ["submenu", "expanded"] as const) {
     const container = installDom();
+    await loadQuickModelMenu();
     function ProviderHarness() {
       const trigger = useRef<HTMLButtonElement | null>(null);
       const [open, setOpen] = useState(false);
