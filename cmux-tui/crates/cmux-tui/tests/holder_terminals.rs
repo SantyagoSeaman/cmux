@@ -369,10 +369,7 @@ fn the_terminal_holder_feature_and_its_env_alias_pick_the_model() {
         ),
         (
             "the alias's opt-out",
-            [
-                ("CMUX_TUI_TERMINAL_HOST_MODEL", Path::new("hosts")),
-                ("CMUX_ENABLE_FEATURES", unset),
-            ],
+            [("CMUX_TUI_TERMINAL_HOST_MODEL", Path::new("hosts")), ("CMUX_ENABLE_FEATURES", unset)],
             false,
         ),
         (
@@ -563,6 +560,101 @@ fn a_restart_after_two_mib_of_output_keeps_the_alternate_screen() {
         "the restart lost the alternate screen set before the ring's oldest byte:
 {screen}"
     );
+}
+
+/// After a daemon SIGKILL and restart, the daemon nudges each re-attached
+/// terminal with a same-size resize (terminal-host-model-DESIGN.md section
+/// 5), so a full-screen program redraws its whole screen with no input:
+/// what it shows does not rest on how much of its output the holder kept.
+/// vim's status line counts its own evaluations, so a full redraw shows as
+/// a higher count. Without the nudge the count stays: the kernel sends no
+/// SIGWINCH for a size that did not change. The ring replay must not
+/// answer vim's queries a second time either (p01-process-210, DA/DSR from
+/// the shard owner): vim logs each terminal response it reads.
+#[test]
+fn vim_redraws_after_a_daemon_sigkill() {
+    let Some(vim) = ["/usr/bin/vim", "/bin/vim"].into_iter().find(|path| Path::new(path).exists())
+    else {
+        assert!(!require_fixtures(), "no vim to run with {REQUIRE_FIXTURES} set");
+        eprintln!("no vim here: nothing to redraw");
+        return;
+    };
+    let mut daemon = Daemon::start();
+    let vimrc = daemon.dir.join("vimrc");
+    let responses = daemon.dir.join("term-responses");
+    fs::write(
+        &vimrc,
+        format!(
+            "let g:n = 0\nfunction! Count() abort\n  let g:n += 1\n  return 'REDRAWS-' . g:n\nendfunction\nset belloff=all laststatus=2\nset statusline=%{{Count()}}\nautocmd TermResponse * call writefile([v:termresponse], '{}', 'a')\n",
+            responses.display()
+        ),
+    )
+    .unwrap();
+    let vimrc = vimrc.to_string_lossy().into_owned();
+    let answers = || fs::read_to_string(&responses).unwrap_or_default().lines().count();
+    let created = request(
+        &daemon.socket,
+        json!({"cmd": "run", "argv": [vim, "-N", "-n", "-i", "NONE", "-u", vimrc],
+            "new_workspace": true, "name": "vim", "cols": 80, "rows": 24}),
+    );
+    let surface = created["surface"].as_u64().unwrap();
+    let terminal_id = created["terminal_id"].as_str().unwrap().to_string();
+    daemon.track(surface);
+    let before = settled_redraws(&daemon.socket, surface);
+    assert_eq!(answers(), 1, "vim asked for the terminal's version once and got one answer");
+
+    daemon.sigkill();
+    daemon.restart();
+    let surface = running_surface(&daemon.socket, &terminal_id);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (count, text) = redraws(&daemon.socket, surface);
+        if count.is_some_and(|count| count > before) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "vim never redrew after the restart (count {count:?}, {before} before):\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The restarted daemon replayed vim's version query from the holder's
+    // ring: answered again, the answer reaches vim as typed input.
+    settled_redraws(&daemon.socket, surface);
+    assert_eq!(answers(), 1, "the replayed query was answered again");
+}
+
+/// vim's status-line count once it stopped changing (vim drew its first
+/// screen and waits for input).
+fn settled_redraws(socket: &Path, surface: u64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = None;
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let (count, text) = redraws(socket, surface);
+        if count.is_some() && count == last {
+            return count.unwrap_or_default();
+        }
+        assert!(Instant::now() < deadline, "vim's screen never settled:\n{text}");
+        last = count;
+    }
+}
+
+/// The highest `REDRAWS-<n>` on the screen, and the screen.
+fn redraws(socket: &Path, surface: u64) -> (Option<u64>, String) {
+    let text = request(socket, json!({"cmd": "read-screen", "surface": surface}))["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let count = text
+        .split("REDRAWS-")
+        .skip(1)
+        .filter_map(|rest| {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+        .max();
+    (count, text)
 }
 
 /// The replay race at a holder crash (perf lead, holder item 1): a holder

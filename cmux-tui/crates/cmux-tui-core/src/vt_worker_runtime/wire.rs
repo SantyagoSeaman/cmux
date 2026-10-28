@@ -9,9 +9,11 @@
 //! [`Kind::Assign`] (its ring), [`Kind::Seed`] (where to start), then any
 //! number of [`Kind::Advance`] and [`Kind::Resize`], and [`Kind::Release`]
 //! last. Worker to daemon: [`Kind::Ready`] once, then [`Kind::Parsed`] and
-//! [`Kind::Answer`]. A worker answers every Seed with a Parsed at or past
-//! the seed's `end`, also when it had nothing to parse: that Parsed is how
-//! the broker knows the terminal is restored.
+//! [`Kind::Answer`] and [`Kind::Snapshot`]. A worker answers every Seed
+//! with a Parsed at or past the seed's `end`, also when it had nothing to
+//! parse: that Parsed is how the broker knows the terminal is restored. A
+//! worker sends the Answers a parse made before the Parsed that reports
+//! it, and a Snapshot after the Parsed that reached its `base`.
 //!
 //! Everything a worker sends is untrusted: a bad magic, an unknown kind, an
 //! oversized or short payload ends the link, and the broker replaces the
@@ -32,6 +34,10 @@ pub const MAX_PAYLOAD: usize = 256 * 1024;
 /// The largest [`Kind::Answer`] payload: every answer of the fixed set is
 /// shorter ([`super::QueryAnswer`]).
 pub const MAX_ANSWER: usize = 64;
+/// The largest [`Kind::Snapshot`] replay: the holder keeps it as the
+/// terminal's prologue, as it keeps the in-daemon parser's snapshots
+/// (`holder_runtime::terminal::SNAPSHOT_MAX_BYTES`).
+pub const MAX_SNAPSHOT: usize = 128 * 1024;
 
 /// [`Kind::Seed`] flag: output between the prologue's base and
 /// `replay_from` is not replayed (it rolled out of the ring, or the strike
@@ -65,6 +71,10 @@ pub enum Kind {
     Parsed = 65,
     /// w->d: the bytes of one query answer for the terminal's PTY.
     Answer = 66,
+    /// w->d: `base u64`, then a VT replay of the screen at `base` (1 to
+    /// [`MAX_SNAPSHOT`] bytes), for the holder to keep as the terminal's
+    /// prologue (p01-process-210).
+    Snapshot = 67,
 }
 
 impl Kind {
@@ -79,6 +89,7 @@ impl Kind {
             64 => Self::Ready,
             65 => Self::Parsed,
             66 => Self::Answer,
+            67 => Self::Snapshot,
             _ => return None,
         })
     }
@@ -153,6 +164,24 @@ impl Frame {
     pub fn answer(terminal: u64, bytes: &[u8]) -> Self {
         Self::new(Kind::Answer, terminal, bytes.to_vec())
     }
+
+    pub fn snapshot(terminal: u64, base: u64, replay: &[u8]) -> Self {
+        let mut payload = Vec::with_capacity(8 + replay.len());
+        payload.extend_from_slice(&base.to_le_bytes());
+        payload.extend_from_slice(replay);
+        Self::new(Kind::Snapshot, terminal, payload)
+    }
+}
+
+/// The `base` and replay of a [`Kind::Snapshot`]; an empty or oversized
+/// replay is a bad frame.
+pub fn decode_snapshot(frame: &Frame) -> io::Result<(u64, &[u8])> {
+    let mut input = Input(&frame.payload);
+    let base = input.u64()?;
+    if input.0.is_empty() || input.0.len() > MAX_SNAPSHOT {
+        return Err(bad("vt worker snapshot length"));
+    }
+    Ok((base, input.0))
 }
 
 fn size_payload(cols: u16, rows: u16) -> Vec<u8> {
@@ -321,9 +350,15 @@ mod tests {
             Frame::release(5),
             Frame::parsed(5, 99),
             Frame::answer(5, b"\x1b[0n"),
+            Frame::snapshot(5, 300, b"\x1b[?1049hscreen"),
         ] {
             assert_eq!(round_trip(&frame), frame);
         }
+        let snapshot = round_trip(&Frame::snapshot(5, 300, b"screen"));
+        assert_eq!(decode_snapshot(&snapshot).unwrap(), (300, &b"screen"[..]));
+        assert!(decode_snapshot(&Frame::snapshot(5, 300, b"")).is_err(), "an empty replay");
+        let oversized = vec![b'x'; MAX_SNAPSHOT + 1];
+        assert!(decode_snapshot(&Frame::snapshot(5, 300, &oversized)).is_err());
         let decoded = round_trip(&Frame::seed(5, &seed));
         assert_eq!(SeedFrame::decode(&decoded).unwrap(), seed);
         assert_eq!(decode_size(&round_trip(&Frame::assign(5, 80, 24))).unwrap(), (80, 24));

@@ -99,6 +99,8 @@ impl VtWorkerHost for Host {
 
     fn write_answer(&mut self, _terminal: VtTerminalKey, _answer: &[u8]) {}
 
+    fn snapshot(&mut self, _terminal: VtTerminalKey, _base: u64, _replay: Vec<u8>) {}
+
     fn parsed(&mut self, _terminal: VtTerminalKey, _offset: u64) {}
 
     fn lifecycle(&mut self, event: WorkerLifecycle) {
@@ -124,7 +126,13 @@ fn start(poison: Option<u64>, terminals: u64) -> (VtWorkerBroker, Receiver<Worke
     .expect("start the broker");
     for key in 1..=terminals {
         let ring = OwnedFd::from(File::open("/dev/null").expect("open /dev/null"));
-        broker.attach(VtTerminalSpec { key: VtTerminalKey(key), cols: 80, rows: 24, ring });
+        broker.attach(VtTerminalSpec {
+            key: VtTerminalKey(key),
+            cols: 80,
+            rows: 24,
+            ring,
+            answered: 0,
+        });
     }
     (broker, received)
 }

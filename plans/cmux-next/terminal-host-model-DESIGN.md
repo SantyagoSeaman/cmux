@@ -144,7 +144,26 @@ processes and ~2,000 threads fewer.
   2 MiB of a flood; the holder keeps the newest as the terminal's prologue, and a restarted
   daemon's ATTACH gets it first and the ring from its base. A prologue older than the ring is
   still sent (modes survive) and the daemon cancels before the tail; a re-attach from a ring
-  that dropped bytes starts with CAN. Still open: the same-size RESIZE nudge.
+  that dropped bytes starts with CAN.
+  Built (p01-process-210): the shard owner makes the snapshot and answers the queries.
+  - Snapshots. On the VT pool the terminal's shard run makes it (`SnapshottingReader`,
+    confirmed offset); with worker processes (`CMUX_TUI_VT_WORKERS=process`) the worker's
+    shard makes it with the same rule (`cmux-vt-worker` shard.rs, at most 128 KiB, after the
+    PARSED that reached its base), and the broker hands it to the holder only at an offset
+    the worker reported parsed (a later one is a bad message).
+  - Replays answer nothing. A re-attached terminal's prologue and the ring a previous daemon
+    parsed (up to the holder's ring end at LISTED), a reopen seed, and in process mode a dead
+    worker's parsed output that its successor replays are parsed again but their DA/DSR
+    answers are dropped: answered twice, they reached the program as typed input (vim read a
+    second `CSI > 1;0;0 c` after each daemon restart). The sink never hands the parser
+    replayed and live bytes in one read, and a worker's seed stops where answered output
+    ends. A query the old daemon died before parsing gets no answer; programs time it out.
+  - The nudge. After a re-attach the daemon sends the PTY's foreground process group
+    SIGWINCH: the kernel signals only a size change (Linux `tty_do_resize`, XNU `ttioctl`),
+    so a same-size TIOCSWINSZ alone would not redraw. vim, less and top redraw their whole
+    screen after the replayed ring. Test: `holder_terminals.rs`
+    `vim_redraws_after_a_daemon_sigkill` (red without the nudge: vim's status-line count
+    stays; red without the replay rule: vim logs two terminal responses).
 - A surface's close (Cmd-W) runs under its runtime lock, so it never connects, starts a holder
   or re-adopts (review 2): without an open link the CLOSE waits for the next link and the
   daemon hangs up the shell's groups itself.

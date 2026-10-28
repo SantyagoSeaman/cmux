@@ -162,11 +162,23 @@ impl Surface {
             },
             (command, cwd),
         );
-        if adopted.is_err() {
+        match &adopted {
+            // The parser has its wake: the redraw follows the replayed ring
+            // in the holder's stream (terminal-host-model-DESIGN.md 5).
+            Ok(_) => {
+                if let Err(error) = terminal.nudge_redraw() {
+                    eprintln!(
+                        "cmux-tui: holder terminal {} got no redraw nudge: {error}",
+                        terminal.chan
+                    );
+                }
+            }
             // No surface shows it, and the startup pass no longer lists it:
             // end it rather than leave it on the holder for ever.
-            let _ = service.close(terminal.chan, 0);
-            service.untrack(terminal.chan);
+            Err(_) => {
+                let _ = service.close(terminal.chan, 0);
+                service.untrack(terminal.chan);
+            }
         }
         adopted.map(Some)
     }

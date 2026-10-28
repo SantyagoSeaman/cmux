@@ -12,6 +12,14 @@
 //! the events the slice made: one flooding terminal never holds another back
 //! by more than one slice (the vt-pool rule of p01-process-120, as Chrome's
 //! scheduler yields between tasks).
+//!
+//! The shard owns each terminal's prologue snapshots too (p01-process-210):
+//! once a burst of [`SNAPSHOT_IDLE_BYTES`] went idle, or every
+//! [`SNAPSHOT_EVERY_BYTES`] of a flood, it sends a VT replay of the screen at
+//! exactly the offset it parsed, which the holder keeps as the terminal's
+//! prologue. The rule is the in-daemon parser's (cmux-tui-core
+//! holder_runtime/sink.rs `snapshot_due`), so a restart restores the same
+//! screen in both VT modes.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -22,10 +30,17 @@ use ghostty_vt::{Callbacks, KittyGraphicsLimits, ProgramStatusEvent, RenderState
 
 use crate::ring_view::{RingCopy, RingView};
 use crate::screen_page::{Modes, PageEncoder, PageMeta, PageWriter, Published};
-use crate::wire::{Attach, AttachFailure, Colors, Event, Geometry};
+use crate::wire::{Attach, AttachFailure, Colors, Event, Geometry, MAX_SNAPSHOT};
 
 /// The most ring bytes one [`Shard::step`] parses.
 pub const SLICE_BYTES: usize = 64 << 10;
+/// Output parsed since the last snapshot that gets a fresh one once the
+/// terminal went idle: a prompt redraw or an echo never costs a replay, a
+/// burst of TUI output does once.
+pub const SNAPSHOT_IDLE_BYTES: u64 = 64 << 10;
+/// Output parsed between two snapshots while it never goes idle (a flood):
+/// the holder's prologue is then at most this far behind the stream.
+pub const SNAPSHOT_EVERY_BYTES: u64 = 2 << 20;
 /// CAN: the parser gets it where the ring lost bytes, so an escape sequence
 /// cut there ends instead of eating the bytes after the gap.
 const CANCEL: &[u8] = &[0x18];
@@ -96,6 +111,8 @@ struct Slot {
     parsed: u64,
     /// The ring end the daemon announced.
     target: u64,
+    /// The offset of the newest snapshot (the start: nothing to replay).
+    snapshot_base: u64,
     frame: u64,
     pwd: Option<String>,
 }
@@ -104,6 +121,18 @@ impl Slot {
     /// Unparsed bytes and no Kitty read pending.
     fn has_work(&self) -> bool {
         self.parsed < self.target && !self.stream.awaiting_media()
+    }
+
+    /// A snapshot is due at the parsed offset. Never while a Kitty command
+    /// waits for its file: the parser consumed bytes it has not applied, so
+    /// the screen is not the screen at any offset.
+    fn snapshot_due(&self) -> bool {
+        if self.stream.awaiting_media() {
+            return false;
+        }
+        let since = self.parsed.saturating_sub(self.snapshot_base);
+        let idle = self.parsed >= self.target;
+        (idle && since >= SNAPSHOT_IDLE_BYTES) || since >= SNAPSHOT_EVERY_BYTES
     }
 }
 
@@ -165,6 +194,7 @@ impl Shard {
             stream: OutputStream::new(attach.start),
             parsed: attach.start,
             target: attach.start,
+            snapshot_base: attach.start,
             frame: 0,
             pwd: None,
         };
@@ -305,7 +335,27 @@ impl Shard {
         }
         drain_effects(id, slot, events);
         self.publish(id, events);
+        self.snapshot_if_due(id, events);
         true
+    }
+
+    /// After [`Self::publish`] reported the parsed offset: a VT replay of
+    /// the screen at that offset when one is due. One that does not fit
+    /// [`MAX_SNAPSHOT`] is not sent and the holder keeps its older prologue,
+    /// as for the in-daemon parser; the next one waits for more output.
+    fn snapshot_if_due(&mut self, id: u64, events: &mut Vec<Event>) {
+        let Some(slot) = self.slots.get_mut(&id) else { return };
+        if !slot.snapshot_due() {
+            return;
+        }
+        slot.snapshot_base = slot.parsed;
+        let Ok(replay) = slot.terminal.vt_replay_bounded(MAX_SNAPSHOT) else { return };
+        // The sequence the parser is inside goes last, right before the
+        // ring bytes after `base` that complete it.
+        let replay = replay.into_self_contained_bytes();
+        if !replay.is_empty() && replay.len() <= MAX_SNAPSHOT {
+            events.push(Event::Snapshot { id, base: slot.parsed, replay });
+        }
     }
 
     /// Encode `id`'s screen into its page and report the parsed offset.

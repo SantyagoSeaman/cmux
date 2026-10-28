@@ -316,7 +316,7 @@ impl HolderService {
         // A shell that ended while no daemon ran still re-attaches: its last
         // output replays and the holder's EXIT records its real status.
         let Some(custody) = entry.master else { return Ok(None) };
-        let sink = HolderSink::new(entry.oldest);
+        let sink = HolderSink::reattached(entry.oldest, entry.end);
         if entry.oldest > 0 {
             // The ring's first byte may be inside an escape sequence or a
             // UTF-8 character the ring dropped the start of.

@@ -70,6 +70,7 @@ fn events_round_trip() {
                 size: 99,
             },
         },
+        Event::Snapshot { id: 3, base: 1 << 33, replay: b"\x1b[?1049h\x1b[Hscreen".to_vec() },
     ];
     for event in &events {
         send_event(a.as_raw_fd(), event).expect("send");
@@ -283,6 +284,21 @@ fn broken_frames_are_wire_errors() {
             .unwrap_err(),
         WireError::BadValue("kitty media name length")
     );
+
+    // A snapshot is a replay of at least one and at most MAX_SNAPSHOT bytes.
+    let snapshot = |len: usize| {
+        let mut payload = 1u64.to_le_bytes().to_vec();
+        payload.extend_from_slice(&40u64.to_le_bytes());
+        payload.extend(std::iter::repeat_n(b'x', len));
+        payload
+    };
+    assert!(decode_event(frame(kind::SNAPSHOT, &snapshot(MAX_SNAPSHOT))).is_ok());
+    for len in [0, MAX_SNAPSHOT + 1] {
+        assert_eq!(
+            decode_event(frame(kind::SNAPSHOT, &snapshot(len))).unwrap_err(),
+            WireError::BadValue("snapshot length")
+        );
+    }
 
     let (a, b) = pair();
     let mut header = ((MAX_PAYLOAD + 1) as u32).to_le_bytes().to_vec();

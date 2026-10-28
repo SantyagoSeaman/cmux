@@ -272,3 +272,75 @@ fn the_daemons_output_rewrites_run_before_the_parser() {
         events.contains(&Event::ProgramStatus { id: 1, event: ProgramStatusEvent::PromptStart })
     );
 }
+
+fn snapshots(events: &[Event]) -> Vec<(u64, Vec<u8>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Snapshot { id: 1, base, replay } => Some((*base, replay.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// p01-process-210: a burst that went idle gets one snapshot at exactly the
+/// offset parsed, and the snapshot plus the ring after it give the screen,
+/// also when the burst ended inside an escape sequence.
+#[test]
+fn an_idle_burst_snapshots_the_screen_at_the_parsed_offset() {
+    let mut fixture = fixture(1 << 20);
+    let mut shard = Shard::new();
+    let mut events = Vec::new();
+    attach(&mut shard, 1, &fixture, &mut events);
+    let mut burst = Vec::new();
+    let mut line = 0;
+    while burst.len() < SNAPSHOT_IDLE_BYTES as usize {
+        burst.extend_from_slice(format!("\x1b[3{}mline {line}\x1b[0m\r\n", line % 8).as_bytes());
+        line += 1;
+    }
+    burst.extend_from_slice(b"\x1b[3");
+    fixture.ring.push(&burst);
+    shard.advance(1, fixture.ring.end());
+    events.clear();
+    run(&mut shard, &mut events);
+    let taken = snapshots(&events);
+    assert_eq!(taken.len(), 1, "one snapshot for one burst");
+    let (base, replay) = taken.into_iter().next().unwrap_or_default();
+    assert_eq!(base, burst.len() as u64);
+    assert!(replay.len() <= MAX_SNAPSHOT);
+    let snapshot = events.iter().position(|event| matches!(event, Event::Snapshot { .. }));
+    let parsed = events
+        .iter()
+        .position(|event| matches!(event, Event::Parsed { id: 1, offset, .. } if *offset == base));
+    assert!(parsed < snapshot, "the parsed offset is reported before its snapshot");
+
+    // An echo after it costs no replay.
+    let tail = b"1mred\x1b[0m tail";
+    fixture.ring.push(tail);
+    shard.advance(1, fixture.ring.end());
+    events.clear();
+    run(&mut shard, &mut events);
+    assert!(snapshots(&events).is_empty(), "{events:?}");
+    let screen =
+        PageReader::open(&fixture.page, fixture.page_len).expect("reader").read().expect("screen");
+    let mut restored = replay;
+    restored.extend_from_slice(tail);
+    assert_eq!(screen.cells, reference(&restored), "snapshot plus ring tail != the screen");
+}
+
+/// p01-process-210: a flood that never goes idle still gets a snapshot
+/// every SNAPSHOT_EVERY_BYTES, so the holder's prologue never falls further
+/// behind, and one more at its end.
+#[test]
+fn a_flood_snapshots_every_two_mib_and_at_its_end() {
+    let mut fixture = fixture(4 << 20);
+    let mut shard = Shard::new();
+    let mut events = Vec::new();
+    attach(&mut shard, 1, &fixture, &mut events);
+    fixture.ring.push(&vec![b'f'; 3 << 20]);
+    shard.advance(1, fixture.ring.end());
+    events.clear();
+    run(&mut shard, &mut events);
+    let bases: Vec<u64> = snapshots(&events).into_iter().map(|(base, _)| base).collect();
+    assert_eq!(bases, [SNAPSHOT_EVERY_BYTES, 3 << 20]);
+}

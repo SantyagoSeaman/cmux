@@ -36,6 +36,10 @@ pub const MAX_STATUS_TEXT: usize = 4096;
 /// The longest Kitty file name a request carries: the rewriter holds at
 /// most this much of a command (`cmux_kitty_media::Limits::max_held_bytes`).
 pub const MAX_MEDIA_NAME: usize = 8 << 10;
+/// The largest SNAPSHOT replay: the holder keeps it as the terminal's
+/// prologue, as it keeps the in-daemon parser's snapshots (cmux-tui-core
+/// holder_runtime/terminal.rs `SNAPSHOT_MAX_BYTES`).
+pub const MAX_SNAPSHOT: usize = 128 << 10;
 /// The most bytes one Kitty file read answers with: the rewriter's cap.
 pub const MAX_MEDIA_BYTES: u64 = DEFAULT_MAX_FILE_BYTES;
 
@@ -272,6 +276,15 @@ pub enum Event {
         id: u64,
         request: MediaRequest,
     },
+    /// A VT replay of the screen at ring offset `base` (at most
+    /// [`MAX_SNAPSHOT`]), for the holder to keep as the terminal's prologue:
+    /// a restarted daemon or worker starts from it and the ring after it.
+    /// Sent after the [`Event::Parsed`] that reached `base`.
+    Snapshot {
+        id: u64,
+        base: u64,
+        replay: Vec<u8>,
+    },
 }
 
 /// Why an ATTACH or a RESIZE page was refused.
@@ -318,6 +331,7 @@ mod kind {
     pub const ATTACH_FAILED: u8 = 72;
     pub const PROGRAM_STATUS: u8 = 73;
     pub const KITTY_MEDIA_REQUEST: u8 = 74;
+    pub const SNAPSHOT: u8 = 75;
 }
 
 /// Write one frame (blocking).
@@ -469,6 +483,15 @@ pub fn send_event(socket: RawFd, event: &Event) -> io::Result<()> {
             let name = request.name.get(..MAX_MEDIA_NAME).unwrap_or(&request.name);
             out.extend_from_slice(name);
             return send(socket, kind::KITTY_MEDIA_REQUEST, &out, &[]);
+        }
+        Event::Snapshot { id, base, replay } => {
+            if replay.is_empty() || replay.len() > MAX_SNAPSHOT {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "snapshot length"));
+            }
+            out.extend_from_slice(&id.to_le_bytes());
+            out.extend_from_slice(&base.to_le_bytes());
+            out.extend_from_slice(replay);
+            return send(socket, kind::SNAPSHOT, &out, &[]);
         }
     };
     for value in fields {
@@ -923,6 +946,14 @@ pub fn decode_event(frame: Frame) -> Result<Event, WireError> {
                 id,
                 request: MediaRequest { medium, name: name.to_vec(), offset, size },
             }
+        }
+        kind::SNAPSHOT => {
+            let (id, base) = (p.u64()?, p.u64()?);
+            let replay = p.rest();
+            if replay.is_empty() || replay.len() > MAX_SNAPSHOT {
+                return Err(WireError::BadValue("snapshot length"));
+            }
+            Event::Snapshot { id, base, replay: replay.to_vec() }
         }
         other => return Err(WireError::UnknownKind(other)),
     };

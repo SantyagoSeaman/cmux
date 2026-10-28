@@ -26,9 +26,13 @@ struct FakeConfig {
     version: u16,
     /// Output offset whose parse crashes the worker.
     poison: Option<u64>,
-    /// Answers sent after each seed: `(terminal, bytes)`, `None` for the
-    /// seeded terminal.
+    /// Answers sent for each seed and advance, before the Parsed that
+    /// reports it (the wire's order): `(terminal, bytes)`, `None` for the
+    /// parsed terminal.
     answers: Vec<(Option<u64>, Vec<u8>)>,
+    /// A snapshot at each parsed offset, after the Parsed; `Some(n)` puts
+    /// its base `n` past the offset parsed (a bad message).
+    snapshots: Option<u64>,
     /// Replaying any prologue crashes the worker.
     prologue_crashes: bool,
     /// Never read the link (a hung worker).
@@ -41,6 +45,7 @@ impl Default for FakeConfig {
             version: WIRE_VERSION,
             poison: None,
             answers: Vec::new(),
+            snapshots: None,
             prologue_crashes: false,
             hung: false,
         }
@@ -92,12 +97,7 @@ fn serve(
                     return Err(io::Error::other("poison"));
                 }
                 parsed.insert(frame.terminal, seed.end);
-                out.write_all(&Frame::parsed(frame.terminal, seed.end).encode())?;
-                for (terminal, bytes) in &config.answers {
-                    out.write_all(
-                        &Frame::answer(terminal.unwrap_or(frame.terminal), bytes).encode(),
-                    )?;
-                }
+                report(&mut out, config, frame.terminal, seed.end)?;
             }
             Kind::Advance => {
                 let end = decode_offset(&frame)?;
@@ -106,10 +106,26 @@ fn serve(
                     return Err(io::Error::other("poison"));
                 }
                 parsed.insert(frame.terminal, end);
-                out.write_all(&Frame::parsed(frame.terminal, end).encode())?;
+                report(&mut out, config, frame.terminal, end)?;
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// What a worker sends for a parse that reached `end`: its answers, the
+/// Parsed, then a snapshot at the parsed offset.
+fn report(out: &mut UnixStream, config: &FakeConfig, terminal: u64, end: u64) -> io::Result<()> {
+    for (to, bytes) in &config.answers {
+        out.write_all(&Frame::answer(to.unwrap_or(terminal), bytes).encode())?;
+    }
+    out.write_all(&Frame::parsed(terminal, end).encode())?;
+    if let Some(ahead) = config.snapshots {
+        let base = end + ahead;
+        out.write_all(
+            &Frame::snapshot(terminal, base, format!("screen@{base}").as_bytes()).encode(),
+        )?;
     }
     Ok(())
 }
@@ -179,6 +195,7 @@ impl WorkerLauncher for ThreadLauncher {
 enum HostEvent {
     Parsed(VtTerminalKey, u64),
     Answer(VtTerminalKey, Vec<u8>),
+    Snapshot(VtTerminalKey, u64, Vec<u8>),
     Life(WorkerLifecycle),
 }
 
@@ -194,6 +211,10 @@ impl VtWorkerHost for TestHost {
 
     fn write_answer(&mut self, terminal: VtTerminalKey, answer: &[u8]) {
         let _ = self.events.send(HostEvent::Answer(terminal, answer.to_vec()));
+    }
+
+    fn snapshot(&mut self, terminal: VtTerminalKey, base: u64, replay: Vec<u8>) {
+        let _ = self.events.send(HostEvent::Snapshot(terminal, base, replay));
     }
 
     fn parsed(&mut self, terminal: VtTerminalKey, offset: u64) {
@@ -213,8 +234,13 @@ fn reseed(base: u64, oldest: u64, end: u64) -> Reseed {
 }
 
 fn spec(key: u64) -> VtTerminalSpec {
+    answered_spec(key, 0)
+}
+
+/// A terminal a previous daemon parsed and answered up to `answered`.
+fn answered_spec(key: u64, answered: u64) -> VtTerminalSpec {
     let ring = OwnedFd::from(File::open("/dev/null").expect("open /dev/null"));
-    VtTerminalSpec { key: VtTerminalKey(key), cols: 80, rows: 24, ring }
+    VtTerminalSpec { key: VtTerminalKey(key), cols: 80, rows: 24, ring, answered }
 }
 
 struct Harness {
@@ -493,6 +519,86 @@ fn terminals_spread_over_shards_and_a_loss_restores_only_its_own_shard() {
     wait_for(&h.events, |event| *event == HostEvent::Parsed(VtTerminalKey(2), 20));
     let reseeded: Vec<_> = h.seeds.try_iter().map(|seed| seed.shard).collect();
     assert_eq!(reseeded, [0, 0], "only shard 0 reseeds");
+}
+
+const DA1: &[u8] = b"\x1b[?62;22c";
+
+/// Answers written and answers dropped as replayed, in order, until
+/// `wanted` answers in all came.
+fn answers(events: &Receiver<HostEvent>, wanted: usize) -> Vec<Result<(), AnswerRejected>> {
+    (0..wanted)
+        .map(|_| {
+            match wait_for(events, |event| {
+                matches!(
+                    event,
+                    HostEvent::Answer(..) | HostEvent::Life(WorkerLifecycle::AnswerRejected { .. })
+                )
+            }) {
+                HostEvent::Life(WorkerLifecycle::AnswerRejected { reason, .. }) => Err(reason),
+                _ => Ok(()),
+            }
+        })
+        .collect()
+}
+
+/// p01-process-210: a new worker replays the ring its dead predecessor
+/// parsed; the queries in it were answered then, and a second answer would
+/// reach the program as typed input. Output after it is answered.
+#[test]
+fn a_successors_replay_answers_nothing_and_new_output_is_answered() {
+    let config = FakeConfig { answers: vec![(None, DA1.to_vec())], ..FakeConfig::default() };
+    let h = harness(1, vec![config], reseeds([1], reseed(0, 0, 400)));
+    h.broker.attach(spec(1));
+    let (_, first) = wait_for(&h.kills, |_| true);
+    assert_eq!(answers(&h.events, 1), [Ok(())], "the first parse answers");
+    wait_for(&h.events, |event| *event == HostEvent::Parsed(VtTerminalKey(1), 400));
+    first.shutdown(Shutdown::Both).expect("kill the worker");
+    assert_eq!(answers(&h.events, 1), [Err(AnswerRejected::Replayed)]);
+    restored(&h.events, 0);
+    h.broker.advance(VtTerminalKey(1), 500);
+    assert_eq!(answers(&h.events, 1), [Ok(())], "output past the replay is answered");
+}
+
+/// p01-process-210: after a daemon restart the seed stops where the old
+/// daemon's answered output ends, so no parse spans replay and new output;
+/// an advance takes the worker on to the ring's end.
+#[test]
+fn a_restarted_daemons_seed_stops_where_the_answered_output_ends() {
+    let config = FakeConfig { answers: vec![(None, DA1.to_vec())], ..FakeConfig::default() };
+    let h = harness(1, vec![config], reseeds([1], reseed(100, 0, 400)));
+    h.broker.attach(answered_spec(1, 250));
+    let seed = wait_for(&h.seeds, |_| true);
+    assert_eq!((seed.replay_from, seed.end), (100, 250));
+    assert_eq!(answers(&h.events, 2), [Err(AnswerRejected::Replayed), Ok(())]);
+    wait_for(&h.events, |event| *event == HostEvent::Parsed(VtTerminalKey(1), 400));
+    assert_eq!(restored(&h.events, 0).1, 1);
+}
+
+/// p01-process-210: the worker's snapshots reach the holder once it
+/// reported their offset parsed, newest only; one past what it parsed
+/// ends the worker as a bad message.
+#[test]
+fn snapshots_reach_the_holder_only_at_a_parsed_offset() {
+    let config = FakeConfig { snapshots: Some(0), ..FakeConfig::default() };
+    let h = harness(1, vec![config], reseeds([1], reseed(0, 0, 400)));
+    h.broker.attach(spec(1));
+    let snapshot = |base: u64| {
+        HostEvent::Snapshot(VtTerminalKey(1), base, format!("screen@{base}").into_bytes())
+    };
+    wait_for(&h.events, |event| *event == snapshot(400));
+    h.broker.advance(VtTerminalKey(1), 500);
+    wait_for(&h.events, |event| *event == snapshot(500));
+
+    let ahead = FakeConfig { snapshots: Some(1), ..FakeConfig::default() };
+    let h = harness(1, vec![ahead, FakeConfig::default()], reseeds([1], reseed(0, 0, 400)));
+    h.broker.attach(spec(1));
+    let lost =
+        wait_for(&h.events, |event| matches!(event, HostEvent::Life(WorkerLifecycle::Lost { .. })));
+    assert!(
+        matches!(&lost, HostEvent::Life(WorkerLifecycle::Lost { cause: LinkEnd::BadFrame(_), .. })),
+        "{lost:?}"
+    );
+    assert!(h.events.try_iter().all(|event| !matches!(event, HostEvent::Snapshot(..))));
 }
 
 #[test]

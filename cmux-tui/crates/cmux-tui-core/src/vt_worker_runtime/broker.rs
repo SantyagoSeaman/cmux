@@ -34,6 +34,11 @@ pub struct VtTerminalSpec {
     /// The terminal's ring segment: a dup the broker keeps, so every worker
     /// the terminal's shard gets can be handed the ring.
     pub ring: OwnedFd,
+    /// Output before this offset was parsed, and its queries answered, by
+    /// an earlier owner (the daemon before a restart: the holder's ring end
+    /// when this daemon listed the terminal; 0 for a new terminal). A
+    /// worker parses it again from the ring and its answers are dropped.
+    pub answered: u64,
 }
 
 /// The daemon side of the broker. Every call runs on the broker thread and
@@ -45,6 +50,10 @@ pub trait VtWorkerHost: Send + 'static {
     /// Write a validated query answer (canonical bytes) to the terminal's
     /// PTY input.
     fn write_answer(&mut self, terminal: VtTerminalKey, answer: &[u8]);
+    /// Hand the holder `replay`, a VT replay of the terminal's screen at
+    /// output offset `base`, as its prologue (the holder's SNAPSHOT, as the
+    /// in-daemon parser's snapshots): the worker parsed up to `base`.
+    fn snapshot(&mut self, terminal: VtTerminalKey, base: u64, replay: Vec<u8>);
     /// The worker parsed every byte of the terminal before `offset` (the
     /// sink's `confirm_parsed`, the holder's ACK).
     fn parsed(&mut self, terminal: VtTerminalKey, offset: u64);
@@ -192,6 +201,12 @@ struct Terminal {
     /// The newest offset handed to [`VtWorkerHost::parsed`]: it never goes
     /// back when a new worker reparses from the prologue.
     confirmed: u64,
+    /// Output before here had its queries answered (by the daemon before a
+    /// restart, or by a worker that reported it parsed): parsed again, it
+    /// answers nothing.
+    answered: u64,
+    /// The base of the newest snapshot handed to the holder.
+    snapshot_base: u64,
 }
 
 struct Worker {
@@ -278,6 +293,8 @@ impl Broker {
             sent: 0,
             parsed: 0,
             confirmed: 0,
+            answered: spec.answered,
+            snapshot_base: 0,
         };
         self.terminals.insert(spec.key, terminal);
         self.shards[shard].members.insert(spec.key);
@@ -382,15 +399,22 @@ impl Broker {
             }
             return;
         };
-        let plan = SeedPlan::new(reseed, mode);
+        let mut plan = SeedPlan::new(reseed, mode);
         let Some(terminal) = self.terminals.get_mut(&key) else { return };
-        terminal.end = terminal.end.max(plan.end);
+        let end = plan.end;
+        // The seed stops where the answered output ends and an advance
+        // takes the worker on, so no parse spans both: an answer that
+        // comes while the worker has not reached it is a replay's.
+        if terminal.answered > plan.replay_from && terminal.answered < end {
+            plan.end = terminal.answered;
+        }
+        terminal.end = terminal.end.max(end);
         terminal.sent = plan.end;
         terminal.parsed = plan.replay_from;
         let (shard, cols, rows, ring) =
             (terminal.shard, terminal.cols, terminal.rows, terminal.ring.clone());
         if let Some(restore) = &mut self.shards[shard].restore {
-            restore.pending.insert(key, plan.end);
+            restore.pending.insert(key, end);
         }
         self.send(shard, Frame::assign(key.0, cols, rows), Some(ring));
         self.send(shard, Frame::seed(key.0, &plan.frame()), None);
@@ -447,6 +471,10 @@ impl Broker {
                 Err(error) => self.lost(shard, LinkEnd::BadFrame(error.to_string())),
             },
             Kind::Answer => self.answer(shard, key, &frame.payload),
+            Kind::Snapshot => match wire::decode_snapshot(&frame) {
+                Ok((base, replay)) => self.snapshot(shard, key, base, replay),
+                Err(error) => self.lost(shard, LinkEnd::BadFrame(error.to_string())),
+            },
             // A daemon-to-worker kind from a worker.
             _ => self.lost(shard, LinkEnd::BadFrame(format!("{:?} from a worker", frame.kind))),
         }
@@ -463,6 +491,9 @@ impl Broker {
         // Never past what the ring holds: the holder trims by this offset.
         let offset = offset.min(terminal.end);
         terminal.parsed = terminal.parsed.max(offset);
+        // Its answers came before this report: a successor's replay of it
+        // answers nothing.
+        terminal.answered = terminal.answered.max(terminal.parsed);
         if offset > terminal.confirmed {
             terminal.confirmed = offset;
             self.host.parsed(key, offset);
@@ -471,8 +502,33 @@ impl Broker {
         self.send_advance(key);
     }
 
+    /// The shard owner's prologue snapshot (p01-process-210): relayed to
+    /// the holder when the worker parsed up to its base and it is newer
+    /// than the last one. A base the worker never reported parsed is a bad
+    /// message: the holder would keep a screen of output that does not
+    /// exist yet.
+    fn snapshot(&mut self, shard: usize, key: VtTerminalKey, base: u64, replay: &[u8]) {
+        let Some(terminal) =
+            self.terminals.get_mut(&key).filter(|terminal| terminal.shard == shard)
+        else {
+            return;
+        };
+        if base > terminal.parsed {
+            let cause = format!("snapshot at {base} past the parsed {}", terminal.parsed);
+            return self.lost(shard, LinkEnd::BadFrame(cause));
+        }
+        if base <= terminal.snapshot_base {
+            return;
+        }
+        terminal.snapshot_base = base;
+        self.host.snapshot(key, base, replay.to_vec());
+    }
+
     fn answer(&mut self, shard: usize, key: VtTerminalKey, bytes: &[u8]) {
         let checked = match self.terminals.get(&key).filter(|terminal| terminal.shard == shard) {
+            // Its parse started before the answered output ends (a seed
+            // stops there): a replay, answered when it first ran.
+            Some(terminal) if terminal.parsed < terminal.answered => Err(AnswerRejected::Replayed),
             Some(terminal) => QueryAnswer::parse(bytes, terminal.cols, terminal.rows),
             None => Err(AnswerRejected::NotInShard),
         };

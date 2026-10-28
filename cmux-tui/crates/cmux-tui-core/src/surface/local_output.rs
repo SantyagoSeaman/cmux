@@ -176,10 +176,16 @@ impl LocalOutput {
             let cursor_activity = term
                 .cursor_activity()
                 .expect("INVARIANT: valid local terminals expose cursor activity");
+            #[cfg(unix)]
+            let answered = self.pending_responses.lock().recover_poison().len();
             let normalized =
                 crate::prompt_mode_reset::write_output(&mut term, output, &mut self.shell_marks);
             #[cfg(unix)]
             if let Some(sink) = self.parsed_sink.as_ref() {
+                // A replay's queries were answered when they first ran.
+                if sink.taken_replays() {
+                    self.pending_responses.lock().recover_poison().truncate(answered);
+                }
                 sink.confirm_parsed();
             }
             terminal_notifications = pty.observe_terminal_output(output);

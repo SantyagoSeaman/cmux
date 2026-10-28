@@ -250,6 +250,17 @@ impl HolderTerminal {
         self.sink.is_detached()
     }
 
+    /// A same-size resize after a daemon restart: a full-screen program
+    /// (vim, less, top) redraws its whole screen, so what it shows no longer
+    /// depends on how much of its output the holder's prologue and ring
+    /// kept. The kernel signals a resize only when the size changes (Linux
+    /// `tty_do_resize`, drivers/tty/tty_io.c; XNU `ttioctl` TIOCSWINSZ), so
+    /// at the same size the daemon sends the terminal's foreground process
+    /// group the SIGWINCH the kernel sends at a real resize.
+    pub(crate) fn nudge_redraw(&self) -> io::Result<()> {
+        signal_foreground(self.custody.as_raw_fd(), libc::SIGWINCH)
+    }
+
     /// Hang up the shell (an explicit close). Runs under the surface's
     /// runtime lock, so it only writes to a link that is already open:
     /// it never connects, starts a holder or re-adopts (which takes
@@ -264,6 +275,27 @@ impl HolderTerminal {
             }
         }
     }
+}
+
+/// Signal the foreground process group of the PTY whose master is
+/// `master`, the group the kernel sends SIGWINCH to. Never the daemon's own
+/// group or init's.
+fn signal_foreground(master: std::os::fd::RawFd, signal: libc::c_int) -> io::Result<()> {
+    // SAFETY: tcgetpgrp on the custody master this terminal keeps open.
+    let foreground = unsafe { libc::tcgetpgrp(master) };
+    if foreground < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: getpgrp cannot fail.
+    let own = unsafe { libc::getpgrp() };
+    if foreground <= 1 || foreground == own {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "no foreground process group"));
+    }
+    // SAFETY: signals the foreground process group of this terminal's PTY.
+    if unsafe { libc::killpg(foreground, signal) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Whether the kept ring `segment` may go to a new holder for a terminal

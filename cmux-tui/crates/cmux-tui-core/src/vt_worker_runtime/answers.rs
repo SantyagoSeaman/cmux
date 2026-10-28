@@ -47,6 +47,11 @@ pub enum AnswerRejected {
     CursorOutside { row: u16, col: u16 },
     /// The terminal is not one of the sending worker's shard.
     NotInShard,
+    /// An answer to output an earlier owner (a dead worker, the daemon
+    /// before a restart) already parsed and answered: the worker parsed it
+    /// again from the holder's ring, and a second answer would reach the
+    /// program as typed input.
+    Replayed,
 }
 
 impl fmt::Display for AnswerRejected {
@@ -58,6 +63,7 @@ impl fmt::Display for AnswerRejected {
                 write!(f, "cursor report {row};{col} outside the terminal")
             }
             Self::NotInShard => f.write_str("answer for a terminal outside the worker's shard"),
+            Self::Replayed => f.write_str("answer to replayed output that was answered before"),
         }
     }
 }
