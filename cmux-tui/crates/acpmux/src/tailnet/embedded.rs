@@ -141,6 +141,13 @@ impl Controller {
 
     /// Resume only a saved explicit opt-in; an untouched installation creates nothing.
     pub async fn resume(self: &Arc<Self>) -> Result<(), String> {
+        let controller = self.clone();
+        tokio::spawn(async move { controller.resume_serialized().await })
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
+    async fn resume_serialized(self: &Arc<Self>) -> Result<(), String> {
         let _lifecycle = self.lifecycle.lock().await;
         let path = self.state_dir.join("enabled");
         let enabled = tokio::task::spawn_blocking(move || saved_opt_in(&path))
@@ -162,8 +169,15 @@ impl Controller {
     /// Start the node without waiting for login. A saved login resumes; an
     /// unsigned node reports `needs_login` and its URL through `state`.
     pub async fn start(self: &Arc<Self>) -> Result<Snapshot, String> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.start_locked().await
+        // Complete the state transition even when a requesting connection goes
+        // away. Dropping spawn_blocking's waiter cannot cancel node creation.
+        let controller = self.clone();
+        tokio::spawn(async move {
+            let _lifecycle = controller.lifecycle.lock().await;
+            controller.start_locked().await
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn start_locked(self: &Arc<Self>) -> Result<Snapshot, String> {
