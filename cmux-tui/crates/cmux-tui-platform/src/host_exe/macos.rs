@@ -56,42 +56,63 @@ static SIBLING_IDENTITY: OnceLock<&'static str> = OnceLock::new();
 /// The sibling failed (install or identity): this daemon does not try it
 /// again and copies its own executable instead.
 static SIBLING_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// The holder's verified copy (`holder_copy`), checked again before each use.
-static HOLDER: Mutex<Option<Installed>> = Mutex::new(None);
+/// The helpers' verified copies (`holder_copy`, `vt_worker_copy`) by file
+/// name, each checked again before each use.
+static HELPERS: Mutex<Vec<(&'static str, Installed)>> = Mutex::new(Vec::new());
 
 /// The verified copy of the standalone holder `source` under the host-exe
 /// root, installed when missing; the source itself when there is no root.
 /// `None` when the copy cannot be made or its `--version` is refused.
 pub(super) fn holder_copy(source: &Path, accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
+    helper_copy(super::HOLDER_NAME, "a terminal holder", source, accepts)
+}
+
+/// The verified copy of the VT worker `source`, as [`holder_copy`].
+pub(super) fn vt_worker_copy(source: &Path, accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
+    helper_copy(super::VT_WORKER_NAME, "a VT worker", source, accepts)
+}
+
+fn helper_copy(
+    name: &'static str,
+    role: &str,
+    source: &Path,
+    accepts: &dyn Fn(&str) -> bool,
+) -> Option<PathBuf> {
     let Some(root) = root() else {
-        return super::holder_answers(source, accepts).then(|| source.to_path_buf());
+        return super::answers(source, accepts).then(|| source.to_path_buf());
     };
-    let mut holder = HOLDER.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(copy) = holder.as_ref()
-        && file_key(&copy.path).ok() == Some(copy.key)
-    {
-        return Some(copy.path.clone());
+    helper_copy_in(&root, name, role, source, accepts)
+}
+
+fn helper_copy_in(
+    root: &Path,
+    name: &'static str,
+    role: &str,
+    source: &Path,
+    accepts: &dyn Fn(&str) -> bool,
+) -> Option<PathBuf> {
+    let mut helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+    let current = helpers.iter().position(|(helper, _)| *helper == name);
+    if let Some(index) = current {
+        let copy = &helpers[index].1;
+        if file_key(&copy.path).ok() == Some(copy.key) {
+            return Some(copy.path.clone());
+        }
+        helpers.swap_remove(index);
     }
-    *holder = None;
-    let copy = match install(&root, source, super::HOLDER_NAME) {
+    let copy = match install(root, source, name) {
         Ok(copy) => copy,
         Err(error) => {
-            eprintln!(
-                "cmux-tui: the terminal holder copy at {} is not usable: {error}",
-                root.display()
-            );
+            eprintln!("cmux-tui: the {name} copy at {} is not usable: {error}", root.display());
             return None;
         }
     };
-    if !super::holder_answers(&copy.path, accepts) {
-        eprintln!(
-            "cmux-tui: {} does not answer as a terminal holder this daemon speaks",
-            copy.path.display()
-        );
+    if !super::answers(&copy.path, accepts) {
+        eprintln!("cmux-tui: {} does not answer as {role} this daemon speaks", copy.path.display());
         return None;
     }
     let path = copy.path.clone();
-    *holder = Some(copy);
+    helpers.push((name, copy));
     Some(path)
 }
 
@@ -450,4 +471,57 @@ fn sha256_file(path: &Path) -> io::Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stand-in worker executable that answers `--version` with `wire`.
+    fn worker_script(path: &Path, wire: u16) {
+        fs::write(path, format!("#!/bin/sh\necho 'cmux-vt-worker wire {wire}'\n"))
+            .expect("write the stand-in worker");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make it executable");
+    }
+
+    /// The app update for VT workers: Sparkle deletes the old bundle and
+    /// puts one whose worker speaks another wire in its place. The daemon
+    /// that is still running keeps the verified copy of its own build's
+    /// worker, so a worker it restarts is that build's; once that copy is
+    /// gone, the new bundle's worker is refused and the daemon parses with
+    /// pool threads.
+    #[test]
+    fn a_bundle_swap_keeps_the_workers_copy_and_another_wire_is_refused() {
+        const NAME: &str = "cmux-vt-worker-update-test";
+        let base =
+            std::env::temp_dir().join(format!("cmux-host-exe-update-{}", std::process::id()));
+        let root = base.join("host-exe");
+        let app = base.join("Applications/cmux.app");
+        let source = app.join("Contents/Resources/bin/cmux-vt-worker");
+        fs::create_dir_all(source.parent().expect("bin")).expect("bundle");
+        worker_script(&source, 3);
+        let speaks_3 = |answer: &str| answer == "cmux-vt-worker wire 3";
+
+        let copy = helper_copy_in(&root, NAME, "a VT worker", &source, &speaks_3)
+            .expect("the bundle's worker is copied and answers");
+        assert!(copy.starts_with(&root) && copy.ends_with(NAME), "{}", copy.display());
+
+        fs::remove_dir_all(&app).expect("the update deletes the old bundle");
+        fs::create_dir_all(source.parent().expect("bin")).expect("new bundle");
+        worker_script(&source, 4);
+        assert_eq!(
+            helper_copy_in(&root, NAME, "a VT worker", &source, &speaks_3).as_deref(),
+            Some(copy.as_path()),
+            "a worker restarted after the swap runs the daemon's own build"
+        );
+        assert!(copy.is_file(), "the copy outlives the bundle it came from");
+
+        fs::remove_file(&copy).expect("remove the copy");
+        assert_eq!(
+            helper_copy_in(&root, NAME, "a VT worker", &source, &speaks_3),
+            None,
+            "a worker of another wire is never used"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 }

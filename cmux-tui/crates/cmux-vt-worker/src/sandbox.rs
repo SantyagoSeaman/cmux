@@ -1,4 +1,4 @@
-//! The worker's sandbox: compiled by the daemon, applied by the worker
+//! The worker's sandbox: chosen by the daemon, applied by the worker
 //! before the first ring byte.
 //!
 //! Chrome's model (`sandbox/mac/seatbelt_exec.cc`, `sandbox/mac/seatbelt.cc`):
@@ -17,9 +17,13 @@
 //! descriptors it already holds: reads and writes on its socket and mmap of
 //! the segments it receives.
 //!
-//! Linux gets seccomp-bpf plus landlock with p01-process-211; until then
-//! [`compile_policy`] there returns [`SandboxPolicy::Unsandboxed`], the
-//! worker's HELLO says so, and the broker decides.
+//! Linux (`linux`, x86-64 and arm64): seccomp-bpf, plus landlock where the
+//! kernel has it. The daemon decides whether landlock is required
+//! ([`SandboxPolicy::Seccomp`]) and the worker installs both itself, as
+//! Chrome's Linux children install their BPF policy
+//! (`sandbox/linux/seccomp-bpf/sandbox_bpf.cc`). A platform with no worker
+//! sandbox gets [`SandboxError::Unsupported`] from [`compile_policy`], so no
+//! worker runs there and the daemon keeps its VT pool threads.
 
 /// The Seatbelt profile (SBPL) of a VT worker.
 pub const SEATBELT_PROFILE: &str = r#"(version 1)
@@ -43,11 +47,28 @@ pub const SEATBELT_PROFILE: &str = r#"(version 1)
 /// What the daemon sends the worker to apply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SandboxPolicy {
-    /// No sandbox: only where the platform's sandbox has not landed yet
-    /// (Linux, p01-process-211). A macOS worker refuses it.
+    /// No sandbox. Only the broker's unit tests (worker threads) use it;
+    /// every worker process refuses it.
     Unsandboxed,
     /// A compiled Seatbelt profile (the bytes `sandbox_compile_string` made).
     Seatbelt(Vec<u8>),
+    /// Linux: the worker's seccomp-bpf filter, and with `landlock` a
+    /// landlock domain that handles every access right the kernel knows.
+    /// The daemon sets `landlock` when its kernel has landlock; a worker
+    /// that then cannot enter the domain exits.
+    Seccomp { landlock: bool },
+}
+
+impl SandboxPolicy {
+    /// The mechanism a worker that applied this policy reports in its HELLO.
+    pub fn mechanism(&self) -> SandboxMechanism {
+        match self {
+            Self::Unsandboxed => SandboxMechanism::None,
+            Self::Seatbelt(_) => SandboxMechanism::Seatbelt,
+            Self::Seccomp { landlock: false } => SandboxMechanism::Seccomp,
+            Self::Seccomp { landlock: true } => SandboxMechanism::SeccompLandlock,
+        }
+    }
 }
 
 /// The sandbox a worker runs under, as its HELLO reports it.
@@ -56,6 +77,10 @@ pub enum SandboxPolicy {
 pub enum SandboxMechanism {
     None = 0,
     Seatbelt = 1,
+    /// Linux seccomp-bpf, no landlock (the kernel has none).
+    Seccomp = 2,
+    /// Linux seccomp-bpf and landlock.
+    SeccompLandlock = 3,
 }
 
 impl SandboxMechanism {
@@ -63,6 +88,8 @@ impl SandboxMechanism {
         match value {
             0 => Some(Self::None),
             1 => Some(Self::Seatbelt),
+            2 => Some(Self::Seccomp),
+            3 => Some(Self::SeccompLandlock),
             _ => None,
         }
     }
@@ -76,12 +103,19 @@ pub enum SandboxError {
     Compile(String),
     /// `sandbox_apply` failed.
     Apply(i32),
-    /// This platform cannot apply the policy it was sent.
+    /// This platform has no worker sandbox, or cannot apply the policy it
+    /// was sent.
     Unsupported,
-    /// A macOS worker was told to run unsandboxed.
+    /// A worker process was told to run unsandboxed.
     UnsandboxedRefused,
     /// An empty compiled profile.
     EmptyPolicy,
+    /// `prctl(PR_SET_NO_NEW_PRIVS)` failed (errno).
+    NoNewPrivs(i32),
+    /// The landlock domain could not be made or entered (errno).
+    Landlock(i32),
+    /// The kernel refused the seccomp filter (errno).
+    Seccomp(i32),
 }
 
 impl std::fmt::Display for SandboxError {
@@ -90,42 +124,72 @@ impl std::fmt::Display for SandboxError {
             Self::Compile(message) => write!(f, "compile the worker sandbox: {message}"),
             Self::Apply(code) => write!(f, "apply the worker sandbox: {code}"),
             Self::Unsupported => f.write_str("this platform cannot apply that sandbox"),
-            Self::UnsandboxedRefused => f.write_str("a macOS worker never runs unsandboxed"),
+            Self::UnsandboxedRefused => f.write_str("a worker process never runs unsandboxed"),
             Self::EmptyPolicy => f.write_str("empty compiled sandbox profile"),
+            Self::NoNewPrivs(errno) => write!(f, "set no_new_privs: errno {errno}"),
+            Self::Landlock(errno) => write!(f, "enter the landlock domain: errno {errno}"),
+            Self::Seccomp(errno) => write!(f, "install the seccomp filter: errno {errno}"),
         }
     }
 }
 
 impl std::error::Error for SandboxError {}
 
-/// The daemon's side: the policy to send a new worker.
+/// The daemon's side: the policy to send a new worker. `Unsupported` where
+/// workers have no sandbox: none may run there.
 pub fn compile_policy() -> Result<SandboxPolicy, SandboxError> {
     #[cfg(target_os = "macos")]
     {
         seatbelt::compile(SEATBELT_PROFILE).map(SandboxPolicy::Seatbelt)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        Ok(SandboxPolicy::Unsandboxed)
+        linux::policy()
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))
+    )))]
+    {
+        Err(SandboxError::Unsupported)
     }
 }
 
 /// The worker's side: apply `policy` to this process, for good.
 pub fn apply(policy: &SandboxPolicy) -> Result<SandboxMechanism, SandboxError> {
     match policy {
-        SandboxPolicy::Unsandboxed if cfg!(target_os = "macos") => {
-            Err(SandboxError::UnsandboxedRefused)
-        }
-        SandboxPolicy::Unsandboxed => Ok(SandboxMechanism::None),
+        SandboxPolicy::Unsandboxed => Err(SandboxError::UnsandboxedRefused),
         SandboxPolicy::Seatbelt(compiled) if compiled.is_empty() => Err(SandboxError::EmptyPolicy),
-        #[cfg(target_os = "macos")]
-        SandboxPolicy::Seatbelt(compiled) => {
-            seatbelt::apply_compiled(compiled).map(|()| SandboxMechanism::Seatbelt)
+        SandboxPolicy::Seatbelt(compiled) => apply_seatbelt(compiled),
+        SandboxPolicy::Seccomp { landlock } => {
+            apply_seccomp(*landlock).map(|()| policy.mechanism())
         }
-        #[cfg(not(target_os = "macos"))]
-        SandboxPolicy::Seatbelt(_) => Err(SandboxError::Unsupported),
     }
 }
+
+#[cfg(target_os = "macos")]
+fn apply_seatbelt(compiled: &[u8]) -> Result<SandboxMechanism, SandboxError> {
+    seatbelt::apply_compiled(compiled).map(|()| SandboxMechanism::Seatbelt)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_seatbelt(_compiled: &[u8]) -> Result<SandboxMechanism, SandboxError> {
+    Err(SandboxError::Unsupported)
+}
+
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn apply_seccomp(landlock: bool) -> Result<(), SandboxError> {
+    linux::apply(landlock)
+}
+
+#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+fn apply_seccomp(_landlock: bool) -> Result<(), SandboxError> {
+    Err(SandboxError::Unsupported)
+}
+
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[path = "sandbox/linux.rs"]
+pub mod linux;
 
 #[cfg(target_os = "macos")]
 mod seatbelt {
@@ -243,21 +307,45 @@ mod tests {
         assert_eq!(apply(&SandboxPolicy::Seatbelt(Vec::new())), Err(SandboxError::EmptyPolicy));
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn linux_reports_no_sandbox_until_seccomp_lands() {
-        assert_eq!(compile_policy(), Ok(SandboxPolicy::Unsandboxed));
-        assert_eq!(apply(&SandboxPolicy::Unsandboxed), Ok(SandboxMechanism::None));
+    fn no_worker_process_runs_unsandboxed() {
+        assert_eq!(apply(&SandboxPolicy::Unsandboxed), Err(SandboxError::UnsandboxedRefused));
+    }
+
+    #[test]
+    fn each_policy_names_the_mechanism_its_hello_reports() {
+        for (policy, mechanism) in [
+            (SandboxPolicy::Unsandboxed, SandboxMechanism::None),
+            (SandboxPolicy::Seatbelt(vec![1]), SandboxMechanism::Seatbelt),
+            (SandboxPolicy::Seccomp { landlock: false }, SandboxMechanism::Seccomp),
+            (SandboxPolicy::Seccomp { landlock: true }, SandboxMechanism::SeccompLandlock),
+        ] {
+            assert_eq!(policy.mechanism(), mechanism);
+            assert_eq!(SandboxMechanism::from_wire(mechanism as u8), Some(mechanism));
+        }
+        assert_eq!(SandboxMechanism::from_wire(4), None);
+    }
+
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn linux_sends_seccomp_with_landlock_exactly_when_the_kernel_has_it() {
+        assert_eq!(
+            compile_policy(),
+            Ok(SandboxPolicy::Seccomp { landlock: linux::landlock_abi() >= 1 })
+        );
         assert_eq!(apply(&SandboxPolicy::Seatbelt(vec![1])), Err(SandboxError::Unsupported));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_profile_compiles_and_a_macos_worker_refuses_no_sandbox() {
+    fn the_profile_compiles_and_a_macos_worker_refuses_seccomp() {
         let SandboxPolicy::Seatbelt(compiled) = compile_policy().expect("compile") else {
             panic!("macOS compiles a Seatbelt policy");
         };
         assert!(!compiled.is_empty());
-        assert_eq!(apply(&SandboxPolicy::Unsandboxed), Err(SandboxError::UnsandboxedRefused));
+        assert_eq!(
+            apply(&SandboxPolicy::Seccomp { landlock: false }),
+            Err(SandboxError::Unsupported)
+        );
     }
 }

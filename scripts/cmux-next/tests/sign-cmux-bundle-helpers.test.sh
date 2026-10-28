@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # scripts/sign-cmux-bundle-helpers.sh (steps 0-1 of sign-cmux-bundle.sh) signs
 # every Mach-O helper under Contents/Resources/bin and libexec, the root
-# cmux-server-helper with no entitlements, and stamps the server's launchd
+# cmux-server-helper and the sandboxed bin/cmux-vt-worker with no
+# entitlements, and stamps the server's launchd
 # plists from the FINAL bundle id. codesign and file are stubs: no keychain.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -24,7 +25,7 @@ make_app() { # <app> <bundle id>
   local app="$1"
   mkdir -p "$app/Contents/Resources/bin" "$app/Contents/Resources/libexec" "$app/Contents/MacOS"
   /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $2" "$app/Contents/Info.plist" >/dev/null
-  for f in bin/cmux bin/cmux-diff-sidecar bin/cmux-app-host libexec/cmux-server-helper libexec/cmux-extra-helper; do
+  for f in bin/cmux bin/cmux-diff-sidecar bin/cmux-app-host bin/cmux-vt-worker libexec/cmux-server-helper libexec/cmux-extra-helper; do
     printf 'MACHO\n' > "$app/Contents/Resources/$f"
     chmod +x "$app/Contents/Resources/$f"
   done
@@ -41,17 +42,21 @@ sign() { # <app> <log>
 APP="$TMP/nightly/cmux NIGHTLY.app"
 make_app "$APP" com.cmuxterm.app.nightly
 out=$(sign "$APP" "$TMP/nightly.log") || fail "signing failed: $out"
-for f in "$APP"/Contents/Resources/libexec/* "$APP"/Contents/Resources/bin/cmux "$APP"/Contents/Resources/bin/cmux-diff-sidecar "$APP"/Contents/Resources/bin/cmux-app-host; do
+for f in "$APP"/Contents/Resources/libexec/* "$APP"/Contents/Resources/bin/cmux "$APP"/Contents/Resources/bin/cmux-diff-sidecar "$APP"/Contents/Resources/bin/cmux-app-host "$APP"/Contents/Resources/bin/cmux-vt-worker; do
   rel="${f#"$APP"/Contents/Resources/}"
   grep -q "^==> signing .*$rel" <<<"$out" || fail "output does not list $rel: $out"
   grep -q -- "--sign Developer ID Application: Test (TEAMID1234) .*$f\$" "$TMP/nightly.log" \
     || fail "$rel was not signed with the team identity"
 done
-[[ "$(grep -c -- '--sign' "$TMP/nightly.log")" == 5 ]] || fail "expected 5 signatures: $(cat "$TMP/nightly.log")"
+[[ "$(grep -c -- '--sign' "$TMP/nightly.log")" == 6 ]] || fail "expected 6 signatures: $(cat "$TMP/nightly.log")"
 helper_line=$(grep -- '/libexec/cmux-server-helper$' "$TMP/nightly.log")
 [[ "$helper_line" == *"--options runtime --timestamp"*"--identifier cmux-server-helper"* ]] \
   || fail "root helper not signed with the hardened runtime, a timestamp and its identifier: $helper_line"
 [[ "$helper_line" != *--entitlements* ]] || fail "root helper got entitlements: $helper_line"
+worker_line=$(grep -- '/bin/cmux-vt-worker$' "$TMP/nightly.log")
+[[ "$worker_line" == *"--options runtime --timestamp"*"--identifier cmux-vt-worker"* ]] \
+  || fail "the VT worker not signed with the hardened runtime, a timestamp and its identifier: $worker_line"
+[[ "$worker_line" != *--entitlements* ]] || fail "the sandboxed VT worker got entitlements: $worker_line"
 grep -q -- "--entitlements .*cmux-helper.entitlements .*/libexec/cmux-extra-helper\$" "$TMP/nightly.log" \
   || fail "other libexec helpers must get the helper entitlements"
 grep -q 'cmux-shell-hook\|bin/cmux-tui$' "$TMP/nightly.log" && fail "a script or symlink was codesigned"

@@ -2,7 +2,8 @@
 //!
 //! - `CMUX_TUI_VT_WORKERS=process` starts the broker
 //!   (`start_process_workers`), which launches the real `cmux-vt-worker`
-//!   under this platform's sandbox (Seatbelt on macOS); the worker parses
+//!   under this platform's sandbox (Seatbelt on macOS, seccomp-bpf and
+//!   landlock on Linux); the worker parses
 //!   holder rings into screen pages.
 //! - After a SIGKILL, the real worker's successor restores its 16
 //!   terminals within 100 ms, to the same screens.
@@ -304,8 +305,12 @@ fn output(key: u64) -> Vec<u8> {
     bytes
 }
 
+/// Seatbelt on macOS, seccomp (with landlock where the kernel has it) on
+/// Linux: never none.
 fn platform_sandbox() -> SandboxMechanism {
-    if cfg!(target_os = "macos") { SandboxMechanism::Seatbelt } else { SandboxMechanism::None }
+    let required = WorkerSandbox::for_platform().expect("the platform's sandbox").required();
+    assert_ne!(required, SandboxMechanism::None, "a worker always runs sandboxed");
+    required
 }
 
 #[test]

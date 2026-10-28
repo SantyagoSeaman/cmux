@@ -10,9 +10,13 @@
 //! - **Launch and sandbox.** [`WorkerLauncher`] starts a shard's worker
 //!   through `cmux_process` (no descriptor but its link socket), lazily,
 //!   when the shard gets its first terminal. Its first frame is BOOTSTRAP
-//!   with the Seatbelt policy the daemon compiled ([`WorkerSandbox`]); the
-//!   worker gets no ring before its HELLO reports this wire version and the
-//!   platform's sandbox. A worker that reports another is handed back.
+//!   with the policy the daemon chose ([`WorkerSandbox`]: compiled Seatbelt
+//!   on macOS, seccomp-bpf and landlock on Linux); the worker gets no ring
+//!   before its HELLO reports this wire version and the platform's sandbox.
+//!   A worker that reports another is handed back. The executable is the
+//!   app's `bin/cmux-vt-worker`, from its content-addressed copy on macOS
+//!   ([`worker_executable`]); a build without one, or with one of another
+//!   wire, keeps the pool threads.
 //! - **Shards.** A terminal goes to the live shard with the fewest
 //!   terminals and stays there. Its ATTACH carries its ring, its screen
 //!   page ([`ScreenPage`]) and the screen to start from.
@@ -107,6 +111,8 @@ pub fn process_workers_requested(value: Option<&str>) -> bool {
 pub enum StartError {
     /// The platform's worker sandbox did not compile: no worker may run.
     Sandbox(SandboxError),
+    /// The build ships no `cmux-vt-worker` that speaks this daemon's wire.
+    NoWorker,
     /// The broker thread did not start.
     Io(io::Error),
 }
@@ -115,6 +121,7 @@ impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sandbox(error) => write!(f, "VT worker sandbox: {error}"),
+            Self::NoWorker => f.write_str("no cmux-vt-worker of this daemon's wire"),
             Self::Io(error) => write!(f, "VT worker broker: {error}"),
         }
     }
@@ -122,11 +129,37 @@ impl std::fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
+/// The worker executable this daemon may launch: the app's
+/// `bin/cmux-vt-worker` beside the daemon, run from its verified
+/// content-addressed copy on macOS (`host_exe::vt_worker_executable`, as
+/// `cmux-holder` is), when its `--version` names this daemon's wire. `None`
+/// when the build ships no worker or one of another wire: the daemon parses
+/// with its VT pool threads. Blocking (hash, copy and one exec): call it off
+/// any request path, where the broker starts.
+pub fn worker_executable() -> Option<PathBuf> {
+    crate::host_exe::vt_worker_executable(&|answer| {
+        cmux_vt_worker::wire::parse_version_line(answer) == Some(cmux_vt_worker::wire::WIRE_VERSION)
+    })
+}
+
+/// [`start_process_workers`] with the bundled worker ([`worker_executable`]);
+/// [`StartError::NoWorker`] when there is none this daemon speaks to.
+pub fn start_bundled_process_workers(
+    value: Option<&str>,
+    host: Box<dyn VtWorkerHost>,
+) -> Result<Option<VtWorkerBroker>, StartError> {
+    if !process_workers_requested(value) {
+        return Ok(None);
+    }
+    let worker_exe = worker_executable().ok_or(StartError::NoWorker)?;
+    start_process_workers(value, worker_exe, host)
+}
+
 /// The daemon's start of the broker: `None` unless `value` of
 /// [`VT_WORKERS_ENV`] asks for worker processes, else a broker that
 /// launches `worker_exe` per shard, sized for this machine, under this
-/// platform's sandbox. The caller reads the env (`std::env::var`) and picks
-/// the worker executable (task 211 ships it like `cmux-holder`).
+/// platform's sandbox. The caller reads the env (`std::env::var`); the
+/// shipped worker is [`start_bundled_process_workers`]'s.
 pub fn start_process_workers(
     value: Option<&str>,
     worker_exe: impl Into<PathBuf>,

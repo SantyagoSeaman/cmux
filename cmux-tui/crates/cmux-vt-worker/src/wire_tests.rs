@@ -295,3 +295,39 @@ fn broken_frames_are_wire_errors() {
     reader.fill(b.as_raw_fd()).expect("read");
     assert_eq!(reader.next_frame().unwrap_err(), WireError::PayloadTooLarge(MAX_PAYLOAD + 1));
 }
+
+#[test]
+fn every_sandbox_policy_and_mechanism_round_trips() {
+    let (a, b) = pair();
+    let policies = [
+        SandboxPolicy::Unsandboxed,
+        SandboxPolicy::Seatbelt(vec![9, 8]),
+        SandboxPolicy::Seccomp { landlock: false },
+        SandboxPolicy::Seccomp { landlock: true },
+    ];
+    let mut reader = FrameReader::default();
+    for policy in &policies {
+        send_command(a.as_raw_fd(), &Command::Bootstrap(policy.clone())).expect("bootstrap");
+        let Command::Bootstrap(got) = decode_command(read_frame(&mut reader, &b)).expect("decode")
+        else {
+            panic!("bootstrap");
+        };
+        assert_eq!(&got, policy);
+        let hello = Event::Hello { version: WIRE_VERSION, sandbox: policy.mechanism(), pid: 1 };
+        send_event(a.as_raw_fd(), &hello).expect("hello");
+        assert_eq!(decode_event(read_frame(&mut reader, &b)).expect("decode"), hello);
+    }
+    let bad = Frame { kind: kind::BOOTSTRAP, payload: vec![2, 2], fds: Vec::new() };
+    assert_eq!(decode_command(bad).unwrap_err(), WireError::BadValue("landlock"));
+    let short = Frame { kind: kind::BOOTSTRAP, payload: vec![2], fds: Vec::new() };
+    assert!(decode_command(short).is_err(), "a seccomp policy carries its landlock flag");
+}
+
+#[test]
+fn the_version_line_names_this_wire() {
+    assert_eq!(version_line(), format!("cmux-vt-worker wire {WIRE_VERSION}"));
+    assert_eq!(parse_version_line(&format!("{}\n", version_line())), Some(WIRE_VERSION));
+    assert_eq!(parse_version_line("cmux-vt-worker wire 2"), Some(2));
+    assert_eq!(parse_version_line("cmux-holder wire 1-5"), None);
+    assert_eq!(parse_version_line(""), None);
+}

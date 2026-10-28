@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds this checkout's cmux-tui client set on a build host whose tree is not
 # published: cmux-tui and the companions the bundle scripts install beside it
-# (cmux-tui-host, cmux-app-host, cmux-cloud, cmux-browser-host,
-# cmux-agent-screen-detection).
+# (cmux-tui-host, cmux-app-host, cmux-cloud, cmux-browser-host, cmux-holder,
+# cmux-vt-worker, cmux-agent-screen-detection).
 # reload.sh uses it for an
 # nx-remote build (NX_JOB_ID) when pin-cmux-tui.sh probe does not report the
 # tree ready, and hands the result to the bundle as CMUX_TUI_CLIENT_LOCAL, so
@@ -80,9 +80,9 @@ keep_dsym cmux-tui-host
 
 # The companions this source bundles beside cmux-tui: the ones its bundle
 # scripts name (the fleet recipe decides the same way).
-# The terminal holder builds on its own (std and libc only): with cmux-tui its
-# libc features would unify with the daemon's.
-for name in cmux-app-host cmux-cloud cmux-browser-host cmux-holder cmux-agent-screen-detection; do
+# The terminal holder and the sandboxed VT worker build on their own: with
+# cmux-tui their libc features would unify with the daemon's.
+for name in cmux-app-host cmux-cloud cmux-browser-host cmux-holder cmux-vt-worker cmux-agent-screen-detection; do
   named=0
   for script in scripts/cmux-next/bundle-cmux-tui.sh scripts/install-cmux-tui-client.sh; do
     if [[ -f "$repo_root/$script" ]] && grep -q -- "$name" "$repo_root/$script"; then named=1; fi

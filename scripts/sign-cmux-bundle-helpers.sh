@@ -7,7 +7,8 @@
 #
 # Helpers get minimal hardened-runtime entitlements (no application-identifier).
 # libexec/cmux-server-helper is a root LaunchDaemon and gets none, with the
-# identifier cmux-server-helper. Symlinks (bin/cmux-tui, bin/acpmux -> cmux)
+# identifier cmux-server-helper; bin/cmux-vt-worker, the sandboxed VT parser,
+# gets none either, with the identifier cmux-vt-worker. Symlinks (bin/cmux-tui, bin/acpmux -> cmux)
 # and scripts are left to the bundle seal: a codesigned script stores its
 # signature in an extended attribute, which Sparkle's BinaryDelta refuses to
 # diff. Plists under Contents/Library carry no signature of their own; the app
@@ -58,6 +59,15 @@ for helper_dir in bin libexec; do
       # A root LaunchDaemon gets no entitlements (no JIT, no library validation opt-out).
       echo "==> signing root helper $helper_dir/cmux-server-helper (no entitlements)"
       "$CODESIGN_TOOL" "${COMMON[@]}" --identifier cmux-server-helper "$helper"
+      continue
+    fi
+    if [[ "$helper_dir/$(basename "$helper")" == "bin/cmux-vt-worker" ]]; then
+      # The sandboxed VT parser runs untrusted terminal output through unsafe
+      # code: the hardened runtime with no entitlements (no JIT, no unsigned
+      # executable memory, library validation on), as Chrome signs its
+      # utility processes.
+      echo "==> signing sandboxed helper bin/cmux-vt-worker (no entitlements)"
+      "$CODESIGN_TOOL" "${COMMON[@]}" --identifier cmux-vt-worker "$helper"
       continue
     fi
     echo "==> signing helper $helper_dir/$(basename "$helper")"

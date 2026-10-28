@@ -1,9 +1,10 @@
 //! The real `cmux-vt-worker` binary, driven as the daemon drives it: a
 //! socket at fd 3, BOOTSTRAP with the platform's compiled sandbox, then
 //! holder ring segments and daemon-made pages, and the Kitty file reads the
-//! worker asks for answered as the daemon answers them. On macOS the worker
-//! parses under its Seatbelt profile, so these tests also prove the profile
-//! leaves the parse, the mappings and the socket working.
+//! worker asks for answered as the daemon answers them. The worker parses
+//! under its sandbox (Seatbelt on macOS, seccomp-bpf and landlock on
+//! Linux), so these tests also prove the sandbox leaves the parse, the
+//! mappings and the socket working.
 //!
 //! The oracle is the daemon's own output path (surface/local_output.rs):
 //! the Kitty file media rewrite, then `cmux_vt_stream::write_output` (title
@@ -64,12 +65,9 @@ impl Worker {
     fn started() -> Self {
         let mut worker = Self::spawn();
         let policy = sandbox::compile_policy().expect("compile the worker sandbox");
+        let expected = policy.mechanism();
+        assert_ne!(expected, SandboxMechanism::None, "a worker always runs sandboxed");
         worker.send(&WorkerCommand::Bootstrap(policy));
-        let expected = if cfg!(target_os = "macos") {
-            SandboxMechanism::Seatbelt
-        } else {
-            SandboxMechanism::None
-        };
         match worker.next_event() {
             Event::Hello { version, sandbox, pid } => {
                 assert_eq!(version, WIRE_VERSION);
@@ -517,4 +515,24 @@ fn the_worker_exits_cleanly_when_the_daemon_closes_the_socket() {
     drop(socket);
     let status = child.wait_timeout(Duration::from_secs(30)).expect("wait").expect("exited");
     assert!(status.success(), "{status:?}");
+}
+
+#[test]
+fn a_worker_told_to_run_unsandboxed_exits_before_any_ring() {
+    let mut worker = Worker::spawn();
+    worker.send(&WorkerCommand::Bootstrap(sandbox::SandboxPolicy::Unsandboxed));
+    let status = worker.child.wait_timeout(Duration::from_secs(30)).expect("wait").expect("exited");
+    assert_eq!(status.code(), Some(4), "the sandbox exit code");
+}
+
+#[test]
+fn version_names_the_wire_the_daemon_checks_before_it_uses_the_binary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cmux-vt-worker"))
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run --version");
+    assert!(output.status.success(), "{output:?}");
+    let line = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(cmux_vt_worker::wire::parse_version_line(&line), Some(WIRE_VERSION), "{line:?}");
 }

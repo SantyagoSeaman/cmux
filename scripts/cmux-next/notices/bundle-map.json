@@ -92,6 +92,11 @@
       "notices": ["first-party", "section:rust-cmux-cli", "rust-std", "section:manual-rust-and-zig-standard-libraries"]
     },
     {
+      "path": "Contents/Resources/bin/cmux-vt-worker",
+      "what": "the sandboxed VT parser process (cmux-tui crate cmux-vt-worker, bin cmux-vt-worker): libghostty-vt with std, libc and the daemon's output rewrites",
+      "notices": ["first-party", "section:rust-cmux-cli", "section:manual-ghostty", "rust-std", "zig-std", "section:manual-rust-and-zig-standard-libraries"]
+    },
+    {
       "path": "Contents/Resources/bin/cmux-app-host",
       "what": "app host (cmux-tui crate cmux-app-host)",
       "notices": ["first-party", "section:rust-cmux-app-host", "rust-std", "section:manual-rust-and-zig-standard-libraries"]

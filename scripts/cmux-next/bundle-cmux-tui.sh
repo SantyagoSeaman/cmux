@@ -61,7 +61,12 @@
 # (CMUX_NEXT_HOLDER_BIN; tree state cmux-holder.sha256; no pin fields, so pin
 # mode bundles none): the daemon starts every holder from a content-addressed
 # copy of it when it answers --version with a wire range the daemon speaks, else
-# runs the holder built into bin/cmux-tui-host.
+# runs the holder built into bin/cmux-tui-host. The sandboxed VT parser goes
+# beside bin/cmux as bin/cmux-vt-worker by the same rules (CMUX_NEXT_VT_WORKER_BIN;
+# tree state cmux-vt-worker.sha256; no pin fields, so pin mode bundles none):
+# with CMUX_TUI_VT_WORKERS=process the daemon starts every worker from a
+# content-addressed copy of it when it answers --version with the daemon's
+# worker wire, else parses with its VT pool threads.
 # Release signing (sign-cmux-bundle-helpers.sh)
 # signs every Mach-O in bin/ the same way as bin/cmux, and
 # check-bundled-browser-host.sh checks the placed copy.
@@ -189,7 +194,8 @@ elif [[ -z "$src" ]]; then
     # companions from a different tree, architecture, or mode.
     rm -f "$dest" "$dest_dir/cmux-tui" "$dest_dir/acpmux" \
       "$dest_dir/cmux-app-host" "$dest_dir/cmux-cloud" "$dest_dir/cmux-browser-host" \
-      "$dest_dir/cmux-tui-host" "$dest_dir/cmux-holder" "$dest_dir/cmux-agent-screen-detection" \
+      "$dest_dir/cmux-tui-host" "$dest_dir/cmux-holder" "$dest_dir/cmux-vt-worker" \
+      "$dest_dir/cmux-agent-screen-detection" \
       "$dest_dir/cmux-tui.version" "$dest_dir/daemon-capabilities.json"
     echo "warning: no cmux-tui binary to bundle. Run scripts/cmux-next/pin-cmux-tui.sh fetch --pin, or set CMUX_NEXT_TUI_BIN."
     exit 0
@@ -260,6 +266,8 @@ companion_source cmux-tui-host "${CMUX_NEXT_TERMINAL_HOST_BIN:-}" terminal_host_
 terminal_host_src="$companion_src"
 companion_source cmux-holder "${CMUX_NEXT_HOLDER_BIN:-}" holder_sha256
 holder_src="$companion_src"
+companion_source cmux-vt-worker "${CMUX_NEXT_VT_WORKER_BIN:-}" vt_worker_sha256
+vt_worker_src="$companion_src"
 # Pin mode (Release) bundles no screen detector until its third-party notices
 # are mapped (notices/bundle-map.json; check_bundle_notices.py fails a release
 # on an unmapped Mach-O) and the pin carries agent_screen_detection_* fields.
@@ -283,6 +291,7 @@ cloud_server_sha256=${cloud_server_src:+$(sha256_of "$cloud_server_src")}
 browser_host_sha256=${browser_host_src:+$(sha256_of "$browser_host_src")}
 terminal_host_sha256=${terminal_host_src:+$(sha256_of "$terminal_host_src")}
 holder_sha256=${holder_src:+$(sha256_of "$holder_src")}
+vt_worker_sha256=${vt_worker_src:+$(sha256_of "$vt_worker_src")}
 agent_screen_detection_sha256=${agent_screen_detection_src:+$(sha256_of "$agent_screen_detection_src")}
 "
 
@@ -318,6 +327,7 @@ place_companion "$cloud_server_src" cmux-cloud
 place_companion "$browser_host_src" cmux-browser-host
 place_companion "$terminal_host_src" cmux-tui-host
 place_companion "$holder_src" cmux-holder
+place_companion "$vt_worker_src" cmux-vt-worker
 place_companion "$agent_screen_detection_src" cmux-agent-screen-detection
 if [[ ! -f "$version_file" ]] || [[ "$(cat "$version_file")" != "${version_text%$'\n'}" ]]; then
   printf '%s' "$version_text" > "$version_file"

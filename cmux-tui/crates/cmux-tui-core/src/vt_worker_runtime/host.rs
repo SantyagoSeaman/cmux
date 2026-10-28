@@ -186,15 +186,12 @@ pub struct WorkerSandbox {
 
 impl WorkerSandbox {
     /// This platform's, the only one outside the broker's unit tests:
-    /// Seatbelt on macOS, so a macOS worker that reports no sandbox gets no
-    /// ring; none on Linux until seccomp and landlock land
-    /// (p01-process-211).
+    /// Seatbelt on macOS; seccomp-bpf on Linux, with landlock when the
+    /// kernel has it. A worker that reports anything else gets no ring.
+    /// `Unsupported` where workers have no sandbox: none runs there.
     pub fn for_platform() -> Result<Self, SandboxError> {
         let policy = sandbox::compile_policy()?;
-        let required = match policy {
-            SandboxPolicy::Seatbelt(_) => SandboxMechanism::Seatbelt,
-            SandboxPolicy::Unsandboxed => SandboxMechanism::None,
-        };
+        let required = policy.mechanism();
         Ok(Self { policy, required })
     }
 

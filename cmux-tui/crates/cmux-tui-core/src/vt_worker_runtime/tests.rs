@@ -910,3 +910,20 @@ fn only_the_word_process_asks_for_worker_processes() {
         assert!(!process_workers_requested(value), "{value:?}");
     }
 }
+
+#[test]
+fn a_build_without_a_bundled_worker_keeps_the_pool_threads() {
+    let host = || -> Box<dyn VtWorkerHost> {
+        let (events, _) = channel();
+        Box::new(TestHost { reseeds: Reseeds::default(), events })
+    };
+    assert!(matches!(start_bundled_process_workers(None, host()), Ok(None)));
+    // The unit test binary has no `cmux-vt-worker` beside it.
+    if std::env::var_os(crate::host_exe::VT_WORKER_ENV).is_none() {
+        assert_eq!(worker_executable(), None);
+        assert!(matches!(
+            start_bundled_process_workers(Some("process"), host()),
+            Err(StartError::NoWorker)
+        ));
+    }
+}

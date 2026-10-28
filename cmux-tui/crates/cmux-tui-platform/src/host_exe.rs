@@ -32,6 +32,11 @@
 //! and a mismatch refuses the copy (the daemon's own executable is used and
 //! the copy reinstalled).
 //!
+//! The standalone holder (`cmux-holder`) and the sandboxed VT worker
+//! (`cmux-vt-worker`) beside the daemon's executable get copies the same
+//! way, each in the directory named by its own file's hash
+//! ([`holder_executable`], [`vt_worker_executable`]).
+//!
 //! Lifetime: every daemon and host holds a shared `flock` on its copy's
 //! `in-use.lock` for its whole life. A daemon that installs its copy deletes
 //! the other copies whose lock it can take exclusively (no daemon or host
@@ -65,15 +70,40 @@ pub fn holder_executable(accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
         // An explicit file runs as named, with no copy and no `--version`:
         // a test's stand-in for a holder an older cmux build started.
         Some(path) => return Some(PathBuf::from(path)),
-        None => sibling_holder()?,
+        None => sibling(HOLDER_NAME)?,
     };
     imp::holder_copy(&source, accepts)
 }
 
-/// `cmux-holder` beside the daemon's canonical executable, a regular file.
-fn sibling_holder() -> Option<PathBuf> {
+/// The sandboxed VT parser beside the daemon's executable (crate
+/// `cmux-vt-worker`), and its copy's file name.
+pub const VT_WORKER_NAME: &str = "cmux-vt-worker";
+/// Names the VT worker executable instead (tests: a worker of another build).
+pub const VT_WORKER_ENV: &str = "CMUX_TUI_VT_WORKER_EXE";
+
+/// The executable for a new VT worker process, shipped and checked as
+/// [`holder_executable`] ships and checks the holder: the `cmux-vt-worker`
+/// beside the daemon's canonical executable (never looked up on `PATH`),
+/// run on macOS from a verified content-addressed copy named by its own
+/// hash, so an update that swaps the bundle never touches the file running
+/// workers came from and a worker the daemon restarts after the swap is
+/// still the daemon's own build. The candidate must answer `--version` with
+/// a line `accepts` takes (the worker wire the daemon speaks). `None` when
+/// there is no such file or it answers otherwise: the daemon then parses
+/// with its VT pool threads. A file [`VT_WORKER_ENV`] names is used as it
+/// is; its HELLO still has to name the daemon's wire.
+pub fn vt_worker_executable(accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
+    let source = match std::env::var_os(VT_WORKER_ENV).filter(|value| !value.is_empty()) {
+        Some(path) => return Some(PathBuf::from(path)),
+        None => sibling(VT_WORKER_NAME)?,
+    };
+    imp::vt_worker_copy(&source, accepts)
+}
+
+/// `name` beside the daemon's canonical executable, a regular file.
+fn sibling(name: &str) -> Option<PathBuf> {
     let own = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
-    let sibling = own.parent()?.join(HOLDER_NAME);
+    let sibling = own.parent()?.join(name);
     std::fs::symlink_metadata(&sibling)
         .is_ok_and(|meta| meta.file_type().is_file())
         .then_some(sibling)
@@ -81,8 +111,8 @@ fn sibling_holder() -> Option<PathBuf> {
 
 /// Run `path --version`; true when it succeeds with an answer `accepts`
 /// takes. The first exec of a new file also pays its code-signature check
-/// here, before a terminal waits on the holder.
-fn holder_answers(path: &Path, accepts: &dyn Fn(&str) -> bool) -> bool {
+/// here, before a terminal waits on the holder or worker.
+fn answers(path: &Path, accepts: &dyn Fn(&str) -> bool) -> bool {
     cmux_process::Command::new(path)
         .arg("--version")
         .stdin(cmux_process::Stdio::null())
@@ -166,7 +196,13 @@ mod imp {
     /// Elsewhere the holder runs as it is: a running binary cannot be
     /// written on Linux.
     pub(super) fn holder_copy(source: &Path, accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
-        super::holder_answers(source, accepts).then(|| source.to_path_buf())
+        super::answers(source, accepts).then(|| source.to_path_buf())
+    }
+
+    /// The VT worker too: a package update replaces the file by rename, and
+    /// running workers keep the old one.
+    pub(super) fn vt_worker_copy(source: &Path, accepts: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
+        super::answers(source, accepts).then(|| source.to_path_buf())
     }
 
     pub(super) fn hold_in_use_lock() {}

@@ -22,9 +22,23 @@ use ghostty_vt::{
 use crate::sandbox::{SandboxMechanism, SandboxPolicy};
 use crate::shm::{self, Mapping};
 
-/// The wire version a worker's HELLO names. 2: ATTACH carries the
-/// terminal's prologue (the daemon broker's reseed, p01-process-134).
-pub const WIRE_VERSION: u16 = 2;
+/// The wire version a worker's HELLO and `--version` name. 2: ATTACH
+/// carries the terminal's prologue (the daemon broker's reseed,
+/// p01-process-134). 3: BOOTSTRAP's Linux policy (seccomp-bpf and
+/// landlock) and HELLO's Linux mechanisms (p01-process-211).
+pub const WIRE_VERSION: u16 = 3;
+
+/// The line `cmux-vt-worker --version` prints: the daemon checks it before
+/// it uses a worker executable, so a worker of another wire never gets a
+/// BOOTSTRAP it may not read.
+pub fn version_line() -> String {
+    format!("cmux-vt-worker wire {WIRE_VERSION}")
+}
+
+/// The wire version in a [`version_line`], `None` for any other answer.
+pub fn parse_version_line(line: &str) -> Option<u16> {
+    line.trim_end().strip_prefix("cmux-vt-worker wire ")?.parse().ok()
+}
 /// Frame header bytes.
 pub const FRAME_HEADER: usize = 8;
 /// The largest payload either side sends.
@@ -362,6 +376,7 @@ pub fn send_command(socket: RawFd, command: &Command) -> io::Result<()> {
                     out.push(1);
                     out.extend_from_slice(compiled);
                 }
+                SandboxPolicy::Seccomp { landlock } => out.extend([2, u8::from(*landlock)]),
             }
             send(socket, kind::BOOTSTRAP, &out, &[])
         }
@@ -781,6 +796,13 @@ pub fn decode_command(frame: Frame) -> Result<Command, WireError> {
             match p.u8()? {
                 0 => Command::Bootstrap(SandboxPolicy::Unsandboxed),
                 1 => Command::Bootstrap(SandboxPolicy::Seatbelt(p.rest().to_vec())),
+                2 => Command::Bootstrap(SandboxPolicy::Seccomp {
+                    landlock: match p.u8()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(WireError::BadValue("landlock")),
+                    },
+                }),
                 _ => return Err(WireError::BadValue("sandbox policy")),
             }
         }

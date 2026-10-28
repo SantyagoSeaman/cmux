@@ -18,7 +18,8 @@
 # Steps, as scripts/sign-cmux-bundle.sh CMUX_SIGN_MODE=all:
 #   1. Mach-O helpers under Contents/Resources/{bin,libexec}: hardened runtime and
 #      the helper entitlements; libexec/cmux-server-helper: no entitlements,
-#      identifier cmux-server-helper. Symlinks and scripts are left to the seal.
+#      identifier cmux-server-helper; bin/cmux-vt-worker: no entitlements,
+#      identifier cmux-vt-worker. Symlinks and scripts are left to the seal.
 #   2. The nested cmux Computer Use app (helper entitlements).
 #   3. Each Contents/PlugIns/* (recursive, like codesign --deep).
 #   4. Contents/Frameworks/*: Sparkle's sandbox XPC services removed first,
@@ -71,6 +72,9 @@ for dir in bin libexec; do
     is_macho "$helper" || continue
     if [[ "$dir/$(basename "$helper")" == libexec/cmux-server-helper ]]; then
       sign --binary-identifier cmux-server-helper "$helper"
+    elif [[ "$dir/$(basename "$helper")" == bin/cmux-vt-worker ]]; then
+      # The sandboxed VT parser: hardened runtime, no entitlements.
+      sign --binary-identifier cmux-vt-worker "$helper"
     else
       sign --entitlements-xml-file "$HELPER_ENTITLEMENTS" "$helper"
     fi

@@ -37,7 +37,8 @@
 #      bundle id; the app signature seals them.
 #   1. Helpers under Contents/Resources/bin/* and libexec/* with minimal
 #      hardened-runtime entitlements (no application-identifier), through
-#      scripts/sign-cmux-bundle-helpers.sh; libexec/cmux-server-helper gets none.
+#      scripts/sign-cmux-bundle-helpers.sh; libexec/cmux-server-helper and the
+#      sandboxed VT parser bin/cmux-vt-worker get none (checked below).
 #      The macOS cmux-tui SSH payloads under Resources/bin/cmux-tui-ssh/ are
 #      signed the same way (scripts/sign-cmux-tui-ssh-payloads.sh).
 #   2. The nested cmux Computer Use app with the Developer ID identity.
@@ -304,6 +305,25 @@ for helper_dir in bin libexec; do
     fi
   done
 done
+
+# The sandboxed VT parser parses untrusted output with unsafe code: it must run
+# hardened and carry no entitlement at all (p01-process-211). The daemon runs a
+# content-addressed copy of exactly this file, so its signature is the copy's.
+VT_WORKER="$APP_PATH/Contents/Resources/bin/cmux-vt-worker"
+if [[ -f "$VT_WORKER" ]]; then
+  /usr/bin/codesign --verify --strict "$VT_WORKER" || {
+    echo "error: bin/cmux-vt-worker does not verify" >&2
+    exit 1
+  }
+  /usr/bin/codesign -d --verbose=2 "$VT_WORKER" 2>&1 | grep -q '^CodeDirectory.*flags=.*(runtime)' || {
+    echo "error: bin/cmux-vt-worker is not signed with the hardened runtime" >&2
+    exit 1
+  }
+  if /usr/bin/codesign -d --entitlements :- "$VT_WORKER" 2>/dev/null | grep -q '<key>'; then
+    echo "error: bin/cmux-vt-worker carries entitlements; the sandboxed parser gets none" >&2
+    exit 1
+  fi
+fi
 
 if [[ -d "$COMPUTER_USE_HELPER" ]] \
    && /usr/bin/codesign -d --entitlements :- "$COMPUTER_USE_HELPER" 2>&1 \
