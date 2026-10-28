@@ -227,7 +227,7 @@ impl HostedReader {
                     }
                     *metadata = replacement_metadata;
                 }
-                pty.mouse_encoders.lock().recover_poison().sync_from_terminal(&term);
+                pty.sync_input_modes(&term);
                 *geometry = next_geometry;
                 *pty.title.lock().recover_poison() = title.clone();
                 pty.record_directory(pwd);

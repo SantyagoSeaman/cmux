@@ -273,6 +273,9 @@ pub struct PtyTerminalRuntime {
     /// the daemon records terminal commands.
     pub(super) command_tracker: Mutex<crate::shell_history::CommandTracker>,
     pub(super) mouse_encoders: RankedMutex<Box<MouseEncoders>>,
+    /// The input modes key, mouse, paste and focus encoders read with no
+    /// terminal lock (`surface/input_modes.rs`).
+    pub(super) input_modes: input_modes::TerminalInputModes,
     pub(super) runtime: RankedMutex<PtyRuntime>,
     /// The terminal's input FIFO: every input to it (any view, connection
     /// or thread) writes all of its bytes in one turn of it, in arrival

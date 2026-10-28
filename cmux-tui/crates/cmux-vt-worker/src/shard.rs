@@ -21,7 +21,7 @@ use cmux_vt_stream::ShellMarks;
 use ghostty_vt::{Callbacks, KittyGraphicsLimits, ProgramStatusEvent, RenderState, Terminal};
 
 use crate::ring_view::{RingCopy, RingView};
-use crate::screen_page::{Modes, PageEncoder, PageMeta, PageWriter, Published};
+use crate::screen_page::{PageEncoder, PageMeta, PageWriter, Published};
 use crate::wire::{Attach, AttachFailure, Colors, Event, Geometry};
 
 /// The most ring bytes one [`Shard::step`] parses.
@@ -329,8 +329,7 @@ impl Shard {
             cols: slot.terminal.cols(),
             cursor: slot.render.cursor(),
             cursor_visual,
-            modes: Modes::of(&slot.terminal),
-            mouse_format: slot.terminal.active_mouse_format(),
+            modes: slot.terminal.input_modes(),
         };
         let image = self.encoder.finish(&meta);
         if let Published::TooSmall { needed } = slot.page.publish(image) {

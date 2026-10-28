@@ -295,10 +295,7 @@ impl Surface {
         if let Some(result) = Self::send_hosted_input(turn, pty, MessageKind::Paste, bytes, 0) {
             return result;
         }
-        let bracketed = {
-            let term = pty.term.lock().unwrap_or_else(PoisonError::into_inner);
-            term.mode(2004, false)
-        };
+        let bracketed = pty.input_modes.load().contains(ghostty_vt::InputModes::BRACKETED_PASTE);
         let mut runtime = pty.runtime.lock().unwrap_or_else(PoisonError::into_inner);
         #[allow(
             clippy::unreachable,

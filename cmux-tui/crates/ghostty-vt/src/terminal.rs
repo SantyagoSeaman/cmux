@@ -38,6 +38,9 @@ use palette_override::*;
 mod mouse_mode_change;
 use mouse_mode_change::*;
 
+mod input_mode_state;
+use input_mode_state::InputModeState;
+
 mod color_parse;
 pub use color_parse::{parse_color, parse_palette_entry};
 
@@ -364,6 +367,7 @@ pub struct Terminal {
     mouse_mode_signature: MouseModeSignature,
     mouse_mode_probe: MouseModeProbe,
     active_mouse_format: MouseWireFormat,
+    input_mode_state: InputModeState,
     mouse_mode_change_detector: MouseModeChangeDetector,
     vt_boundary: VtBoundaryTracker,
     prompt_semantic: PromptSemanticTracker,
@@ -431,6 +435,7 @@ impl Terminal {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize, callbacks: Callbacks) -> Result<Self> {
         kitty::install_png_decoder()?;
         let mouse_mode_probe = MouseModeProbe::new()?;
+        let input_mode_state = InputModeState::new()?;
         let mut raw: sys::GhosttyTerminal = ptr::null_mut();
         // SAFETY: `raw` is a writable local; a null allocator selects the default.
         check(unsafe {
@@ -504,6 +509,7 @@ impl Terminal {
             mouse_mode_signature: MouseModeSignature::default(),
             mouse_mode_probe,
             active_mouse_format: MouseWireFormat::default(),
+            input_mode_state,
             mouse_mode_change_detector: MouseModeChangeDetector::default(),
             vt_boundary: VtBoundaryTracker::default(),
             prompt_semantic: PromptSemanticTracker::default(),
@@ -679,8 +685,9 @@ impl Terminal {
     }
 
     fn refresh_mouse_mode_revision(&mut self) {
+        let tracking_changed = self.refresh_mouse_tracking();
         let next_bits = self.current_mouse_mode_bits();
-        let bits_changed = next_bits != self.mouse_mode_bits;
+        let bits_changed = next_bits != self.mouse_mode_bits || tracking_changed;
         let tracking_bits = next_bits & 0x0f;
         let format_bits = next_bits >> 4;
         // A bit tuple is sufficient when at most one tracking and wire-format

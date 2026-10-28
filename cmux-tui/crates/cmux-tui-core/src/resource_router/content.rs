@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use ghostty_vt::{KeyEncoder, Mods, MouseAction, MouseButton, MouseInput, key_input_from_chord};
+use ghostty_vt::{InputModes, Mods, MouseAction, MouseButton, MouseInput, key_input_from_chord};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
@@ -811,33 +811,26 @@ fn terminal_scroll_viewport(
 fn terminal_keys(surface: &Surface, fields: &Map<String, Value>) -> Result<(), ActionFailure> {
     let keys =
         intent_string_array(fields, "keys", "terminal.input.keys").map_err(ActionFailure::Known)?;
-    let mut encoder = KeyEncoder::new().map_err(|error| {
-        ActionFailure::Known(ResourceError::operation_failed(
-            "terminal.input.keys",
-            "terminal key encoder could not be created",
-            json!({"error":error.to_string()}),
-        ))
-    })?;
+    // The published modes: no terminal lock, no parser request (p01-process-209).
+    let mut encoder = surface
+        .key_encoder()
+        .map_err(|error| ActionFailure::Known(resource_operation_error(error)))?;
     let mut encoded = Vec::new();
-    surface
-        .try_with_terminal(|terminal| {
-            encoder.sync_from_terminal(terminal);
-            for key in &keys {
-                let input = key_input_from_chord(key).ok_or_else(|| {
-                    validation_error("terminal key chord is invalid", json!({"key":key}))
-                })?;
-                encoder.encode(&input, &mut encoded).map_err(|error| {
-                    ResourceError::operation_failed(
-                        "terminal.input.keys",
-                        "terminal key could not be encoded",
-                        json!({"key":key,"error":error.to_string()}),
-                    )
-                })?;
-            }
-            Ok::<(), ResourceError>(())
-        })
-        .map_err(|error| ActionFailure::Known(resource_operation_error(error)))?
-        .map_err(ActionFailure::Known)?;
+    for key in &keys {
+        let input = key_input_from_chord(key).ok_or_else(|| {
+            ActionFailure::Known(validation_error(
+                "terminal key chord is invalid",
+                json!({"key":key}),
+            ))
+        })?;
+        encoder.encode(&input, &mut encoded).map_err(|error| {
+            ActionFailure::Known(ResourceError::operation_failed(
+                "terminal.input.keys",
+                "terminal key could not be encoded",
+                json!({"key":key,"error":error.to_string()}),
+            ))
+        })?;
+    }
     surface.scroll_to_bottom().map_err(|error| ActionFailure::Indeterminate(error.to_string()))?;
     confirmed_terminal_write(surface, &encoded, "terminal.input.keys")
 }
@@ -967,14 +960,16 @@ fn terminal_focus(surface: &Surface, fields: &Map<String, Value>) -> Result<(), 
     let focused = fields.get("focused").and_then(Value::as_bool).ok_or_else(|| {
         ActionFailure::Known(validation_error("stored terminal focus input is invalid", json!({})))
     })?;
-    let reports_focus = surface
-        .try_with_terminal(|terminal| terminal.mode(1004, false))
-        .map_err(|error| ActionFailure::Known(resource_operation_error(error)))?;
-    if !reports_focus {
+    let reports_focus = surface.input_modes().map(|modes| modes.contains(InputModes::FOCUS_EVENTS));
+    if !reports_focus.ok_or_else(|| ActionFailure::Known(not_a_terminal()))? {
         return Ok(());
     }
     let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
     confirmed_terminal_write(surface, bytes, "terminal.input.focus")
+}
+
+fn not_a_terminal() -> ResourceError {
+    resource_operation_error(anyhow::anyhow!("browser surface does not have a VT terminal"))
 }
 
 fn browser_key(surface: &Surface, fields: &Map<String, Value>) -> Result<(), ActionFailure> {

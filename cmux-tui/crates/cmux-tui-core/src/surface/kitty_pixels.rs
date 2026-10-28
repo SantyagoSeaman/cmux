@@ -35,6 +35,7 @@ impl Surface {
         let pty = self.as_pty().expect("a PTY surface");
         let mut term = pty.term.lock().unwrap();
         term.vt_write(bytes);
+        pty.sync_input_modes(&term);
         pty.render_generation.fetch_add(1, Ordering::AcqRel);
     }
 

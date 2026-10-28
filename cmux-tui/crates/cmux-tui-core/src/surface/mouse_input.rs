@@ -1,6 +1,6 @@
 //! Mouse encoding on `Surface`: encode pointer input against the terminal's
-//! current mouse mode, optionally guarded by the semantics or snapshot the
-//! frontend rendered.
+//! published mouse modes (`input_modes.rs`: no parser request), optionally
+//! guarded by the semantics or snapshot the frontend rendered.
 
 use super::*;
 
@@ -11,11 +11,8 @@ impl Surface {
         output: &mut impl Extend<u8>,
     ) -> Option<ghostty_vt::Result<()>> {
         let pty = self.as_pty()?;
-        match pty.mouse_encoders.try_lock() {
-            Ok(mut encoders) => Some(encoders.encode(input, output)),
-            Err(TryLockError::Poisoned(error)) => Some(error.into_inner().encode(input, output)),
-            Err(TryLockError::WouldBlock) => None,
-        }
+        let mut encoders = pty.synced_mouse_encoders()?;
+        Some(encoders.encode(input, output))
     }
 
     /// Encode only when the terminal still matches the semantics captured
@@ -41,7 +38,7 @@ impl Surface {
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
             Err(TryLockError::WouldBlock) => return Some(GuardedMouseEncode::Contended),
         };
-        encoders.sync_from_terminal(&term);
+        encoders.sync_from_modes(pty.input_modes.load());
         Some(GuardedMouseEncode::Encoded(encoders.encode(input, output)))
     }
 
@@ -70,7 +67,7 @@ impl Surface {
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
             Err(TryLockError::WouldBlock) => return Some(GuardedMouseEncode::Contended),
         };
-        encoders.sync_from_terminal(&term);
+        encoders.sync_from_modes(pty.input_modes.load());
         Some(GuardedMouseEncode::Encoded(encoders.encode(input, output)))
     }
 
@@ -80,13 +77,8 @@ impl Surface {
         output: &mut impl Extend<u8>,
     ) -> Option<ghostty_vt::Result<()>> {
         let pty = self.as_pty()?;
-        match pty.mouse_encoders.try_lock() {
-            Ok(mut encoders) => Some(encoders.encode_release(input, output)),
-            Err(TryLockError::Poisoned(error)) => {
-                Some(error.into_inner().encode_release(input, output))
-            }
-            Err(TryLockError::WouldBlock) => None,
-        }
+        let mut encoders = pty.synced_mouse_encoders()?;
+        Some(encoders.encode_release(input, output))
     }
 
     pub fn encode_mouse_press_pair(
@@ -97,18 +89,8 @@ impl Surface {
         release_output: &mut impl Extend<u8>,
     ) -> Option<ghostty_vt::Result<()>> {
         let pty = self.as_pty()?;
-        match pty.mouse_encoders.try_lock() {
-            Ok(mut encoders) => {
-                Some(encoders.encode_press_pair(press, release, press_output, release_output))
-            }
-            Err(TryLockError::Poisoned(error)) => Some(error.into_inner().encode_press_pair(
-                press,
-                release,
-                press_output,
-                release_output,
-            )),
-            Err(TryLockError::WouldBlock) => None,
-        }
+        let mut encoders = pty.synced_mouse_encoders()?;
+        Some(encoders.encode_press_pair(press, release, press_output, release_output))
     }
 
     /// Encode a press and its matching release against one rendered terminal
@@ -136,7 +118,7 @@ impl Surface {
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
             Err(TryLockError::WouldBlock) => return Some(GuardedMouseEncode::Contended),
         };
-        encoders.sync_from_terminal(&term);
+        encoders.sync_from_modes(pty.input_modes.load());
         Some(GuardedMouseEncode::Encoded(encoders.encode_press_pair(
             press,
             release,
@@ -172,7 +154,7 @@ impl Surface {
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
             Err(TryLockError::WouldBlock) => return Some(GuardedMouseEncode::Contended),
         };
-        encoders.sync_from_terminal(&term);
+        encoders.sync_from_modes(pty.input_modes.load());
         Some(GuardedMouseEncode::Encoded(encoders.encode_press_pair(
             press,
             release,
@@ -184,5 +166,19 @@ impl Surface {
     pub fn reset_mouse_motion_dedupe(&self) {
         let Some(pty) = self.as_pty() else { return };
         pty.mouse_encoders.lock().recover_poison().reset_motion_dedupe();
+    }
+}
+
+impl PtySurface {
+    /// The mouse encoders set from the published modes, or `None` while
+    /// another thread holds them.
+    fn synced_mouse_encoders(&self) -> Option<RankedGuard<'_, Box<MouseEncoders>>> {
+        let mut encoders = match self.mouse_encoders.try_lock() {
+            Ok(encoders) => encoders,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        encoders.sync_from_modes(self.input_modes.load());
+        Some(encoders)
     }
 }

@@ -14,7 +14,7 @@ impl Surface {
         let pty = self.as_pty()?;
         let mut term = pty.term.lock().recover_poison();
         let result = f(&mut term);
-        pty.mouse_encoders.lock().recover_poison().sync_from_terminal(&term);
+        pty.sync_input_modes(&term);
         Some(result)
     }
 
@@ -175,7 +175,7 @@ impl Surface {
         let mut term = pty.term.lock().unwrap();
         term.vt_write(bytes);
         let _ = pty.observe_terminal_output(bytes);
-        pty.mouse_encoders.lock().unwrap().sync_from_terminal(&term);
+        pty.sync_input_modes(&term);
         pty.stream_progress.notify();
         Some(())
     }
@@ -187,6 +187,7 @@ impl Surface {
         let pty = self.as_pty()?;
         let mut term = pty.term.lock().unwrap();
         let normalized = term.vt_write_with_normalized(bytes).into_owned();
+        pty.sync_input_modes(&term);
         pty.broadcast_attach_output(&normalized);
         pty.stream_progress.notify();
         Some(())
@@ -206,7 +207,10 @@ impl Surface {
         let Some(pty) = self.as_pty() else {
             anyhow::bail!("browser surface does not have a VT terminal");
         };
-        Ok(f(&mut pty.term.lock().recover_poison()))
+        let mut term = pty.term.lock().recover_poison();
+        let result = f(&mut term);
+        pty.sync_input_modes(&term);
+        Ok(result)
     }
 
     /// Abort an unreplayable parser sequence and run a capture while the

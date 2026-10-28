@@ -185,8 +185,7 @@ impl Surface {
             term.set_default_palette(&colors.palette);
             replace_ghostty_cursor_defaults(&mut term, colors);
         }
-        let mut mouse_encoders = MouseEncoders::new()?;
-        mouse_encoders.sync_from_terminal(&term);
+        let (mouse_encoders, input_modes) = input_modes::new_input_encoders(&term)?;
         let render_state = RenderState::new()?;
         let frame_requests = frame_producer::FrameRequests::new();
         #[cfg(test)]
@@ -229,6 +228,7 @@ impl Surface {
                     "pty.mouse_encoders",
                     Box::new(mouse_encoders),
                 ),
+                input_modes,
                 runtime: RankedMutex::new(
                     LockRank::Runtime,
                     "pty.runtime",

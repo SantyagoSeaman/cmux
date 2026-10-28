@@ -21,6 +21,7 @@ mod holder_spawn;
 mod host_launch;
 mod host_state;
 mod input;
+mod input_modes;
 mod local_output;
 mod local_reader;
 mod metadata;
@@ -744,8 +745,7 @@ impl Surface {
         let initial_cursor_activity = term.cursor_activity().ok();
         let title = crate::terminal_title::read(&term);
         let pwd = term.pwd();
-        let mut mouse_encoders = MouseEncoders::new()?;
-        mouse_encoders.sync_from_terminal(&term);
+        let (mouse_encoders, input_modes) = input_modes::new_input_encoders(&term)?;
         let sequence_boundary = snapshot.sequence_boundary;
         let protocol_version = attachment.protocol_version();
         let host_identity = attachment.identity();
@@ -802,6 +802,7 @@ impl Surface {
                     "pty.mouse_encoders",
                     Box::new(mouse_encoders),
                 ),
+                input_modes,
                 runtime: RankedMutex::new(
                     LockRank::Runtime,
                     "pty.runtime",

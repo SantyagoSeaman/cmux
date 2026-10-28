@@ -79,7 +79,7 @@ impl HostedReader {
                 // violated the producer's iff contract.
                 return Flow::Break;
             }
-            pty.mouse_encoders.lock().recover_poison().sync_from_terminal(&term);
+            pty.sync_input_modes(&term);
             let after = terminal_scroll_position(&term);
             // The parser already contains the complete
             // coupled state before any attach observer can

@@ -138,7 +138,7 @@ impl Surface {
                 }
                 ClearHistoryTransition::Noop => return Ok(()),
                 ClearHistoryTransition::Cleared(clear) => {
-                    pty.mouse_encoders.lock().recover_poison().sync_from_terminal(&term);
+                    pty.sync_input_modes(&term);
                     pty.broadcast_attach_output(&clear);
                     pty.stream_progress.notify();
                     let after = terminal_scroll_position(&term);

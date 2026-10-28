@@ -267,7 +267,7 @@ fn the_daemons_output_rewrites_run_before_the_parser() {
     assert!(events.contains(&Event::Title { id: 1, title: "shell".to_owned() }));
     let screen =
         PageReader::open(&fixture.page, fixture.page_len).expect("reader").read().expect("screen");
-    assert!(!screen.modes.contains(Modes::MOUSE_NORMAL));
+    assert!(!screen.modes.contains(ghostty_vt::InputModes::MOUSE_NORMAL));
     assert!(
         events.contains(&Event::ProgramStatus { id: 1, event: ProgramStatusEvent::PromptStart })
     );

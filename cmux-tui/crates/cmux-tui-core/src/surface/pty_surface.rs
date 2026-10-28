@@ -335,7 +335,7 @@ impl PtySurface {
         let exit_reset = crate::prompt_mode_reset::exit_reset(term);
         let reset = term.vt_write_with_normalized(&exit_reset);
         self.broadcast_attach_output(&reset);
-        self.mouse_encoders.lock().recover_poison().sync_from_terminal(term);
+        self.sync_input_modes(term);
         let generation = self.render_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.stream_progress.notify();
         generation

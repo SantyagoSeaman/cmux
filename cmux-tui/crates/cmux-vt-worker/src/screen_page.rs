@@ -7,18 +7,22 @@
 //! with the terminal's ring. Chrome's `base/synchronization/` has no
 //! seqlock; the protocol is the classic one (Linux `include/linux/seqlock.h`):
 //! the writer makes `seq` odd, stores the image, makes `seq` even; a reader
-//! copies the image between two equal even reads of `seq`. Both sides reach
+//! copies the image between two equal even reads of `seq`. A key, mouse or
+//! paste encoder reads only the modes ([`PageReader::read_modes`]: three
+//! header words, no allocation); `read-screen` decodes the whole page. Both sides reach
 //! every word atomically (8-byte words), so a torn copy is only ever
 //! discarded, never undefined. The reader treats the page as untrusted
 //! (p01-process-141): it decodes the copy with every length and offset
 //! checked against the copy itself.
 //!
-//! Layout 1, little endian, every section 8-byte aligned:
+//! Layout 2, little endian, every section 8-byte aligned:
 //!
 //! ```text
 //!   0 magic "CMVP" | layout u32
 //!   8 seq u64
-//!  16 status u8 | cursor flags u8 | cursor shape u8 | mouse format u8 | modes u32
+//!  16 status u8 | cursor flags u8 | cursor shape u8 | mouse format u8 |
+//!     input mode flags u32 (`ghostty_vt::InputModes::flags`: DEC modes,
+//!     effective mouse tracking, modifyOtherKeys, Kitty keyboard flags)
 //!  24 parsed offset u64
 //!  32 frame u64
 //!  40 cols u16 | rows u16 | cursor x u16 | cursor y u16
@@ -39,14 +43,14 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{Ordering, fence};
 
 use ghostty_vt::{
-    Cell, CellWidth, ColorSpec, CursorInfo, CursorShape, MouseWireFormat, Rgb, Terminal,
+    Cell, CellWidth, ColorSpec, CursorInfo, CursorShape, InputModes, MouseWireFormat, Rgb,
     UnderlineStyle,
 };
 
 use crate::shm::{self, Mapping};
 
 const MAGIC: [u8; 4] = *b"CMVP";
-const LAYOUT: u32 = 1;
+const LAYOUT: u32 = 2;
 /// Header bytes before the row table.
 pub const PAGE_HEADER: usize = 128;
 /// Bytes of one cell record.
@@ -56,6 +60,8 @@ pub const MAX_GRID: u16 = 4096;
 /// The largest page the daemon makes or a reader maps.
 pub const MAX_PAGE_BYTES: usize = 64 << 20;
 const OFF_SEQ: usize = 8;
+/// The word holding status, cursor flags, shape, mouse format and modes.
+const OFF_MODES_WORD: usize = 16;
 /// Reads that may see a writer in progress before [`PageError::Busy`].
 const READ_ATTEMPTS: u32 = 64;
 
@@ -64,61 +70,6 @@ const STATUS_TOO_SMALL: u8 = 2;
 const CURSOR_IN_VIEW: u8 = 1;
 const CURSOR_BLINKING: u8 = 2;
 const FLAG_UNDERLINE: u16 = 0x0100;
-
-/// Terminal modes an encoder needs without asking the worker.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Modes(pub u32);
-
-impl Modes {
-    /// DECCKM (DEC 1): cursor keys send application sequences.
-    pub const CURSOR_KEYS: u32 = 1 << 0;
-    /// DECKPAM (DEC 66): keypad application mode.
-    pub const KEYPAD_APPLICATION: u32 = 1 << 1;
-    /// Bracketed paste (DEC 2004).
-    pub const BRACKETED_PASTE: u32 = 1 << 2;
-    /// Focus reporting (DEC 1004).
-    pub const FOCUS_EVENTS: u32 = 1 << 3;
-    /// The alternate screen is active.
-    pub const ALT_SCREEN: u32 = 1 << 4;
-    /// Mouse tracking: X10 (DEC 9).
-    pub const MOUSE_X10: u32 = 1 << 5;
-    /// Mouse tracking: normal (DEC 1000).
-    pub const MOUSE_NORMAL: u32 = 1 << 6;
-    /// Mouse tracking: button events (DEC 1002).
-    pub const MOUSE_BUTTON: u32 = 1 << 7;
-    /// Mouse tracking: any event (DEC 1003).
-    pub const MOUSE_ANY: u32 = 1 << 8;
-    /// DECTCEM (DEC 25): the cursor is shown.
-    pub const CURSOR_VISIBLE: u32 = 1 << 9;
-
-    const DEC: [(u16, u32); 9] = [
-        (1, Self::CURSOR_KEYS),
-        (66, Self::KEYPAD_APPLICATION),
-        (2004, Self::BRACKETED_PASTE),
-        (1004, Self::FOCUS_EVENTS),
-        (9, Self::MOUSE_X10),
-        (1000, Self::MOUSE_NORMAL),
-        (1002, Self::MOUSE_BUTTON),
-        (1003, Self::MOUSE_ANY),
-        (25, Self::CURSOR_VISIBLE),
-    ];
-
-    /// The modes `terminal` has now.
-    pub fn of(terminal: &Terminal) -> Self {
-        let mut bits = Self::DEC
-            .iter()
-            .filter(|(mode, _)| terminal.mode(*mode, false))
-            .fold(0, |bits, (_, bit)| bits | bit);
-        if terminal.active_screen() == ghostty_vt::Screen::Alternate {
-            bits |= Self::ALT_SCREEN;
-        }
-        Self(bits)
-    }
-
-    pub fn contains(self, bit: u32) -> bool {
-        self.0 & bit == bit
-    }
-}
 
 /// One decoded page: what the daemon reads instead of asking the worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,8 +84,7 @@ pub struct Screen {
     pub cursor: Option<CursorInfo>,
     /// The cursor's shape and blink, even when hidden.
     pub cursor_visual: (CursorShape, bool),
-    pub modes: Modes,
-    pub mouse_format: MouseWireFormat,
+    pub modes: InputModes,
     /// The viewport, top row first.
     pub cells: Vec<Vec<Cell>>,
 }
@@ -204,8 +154,7 @@ pub struct PageMeta {
     pub cols: u16,
     pub cursor: Option<CursorInfo>,
     pub cursor_visual: (CursorShape, bool),
-    pub modes: Modes,
-    pub mouse_format: MouseWireFormat,
+    pub modes: InputModes,
 }
 
 impl PageEncoder {
@@ -255,9 +204,9 @@ impl PageEncoder {
             STATUS_SCREEN,
             cursor_flags,
             encode_shape(meta.cursor_visual.0),
-            encode_mouse(meta.mouse_format),
+            meta.modes.mouse_format().wire_value(),
         ]);
-        image.extend_from_slice(&meta.modes.0.to_le_bytes());
+        image.extend_from_slice(&meta.modes.flags().to_le_bytes());
         image.extend_from_slice(&meta.parsed.to_le_bytes());
         image.extend_from_slice(&meta.frame.to_le_bytes());
         let (x, y) = meta.cursor.map_or((0, 0), |cursor| (cursor.x, cursor.y));
@@ -408,6 +357,59 @@ impl PageReader {
     }
 }
 
+impl PageReader {
+    /// The terminal's input modes, from three header words copied under
+    /// the seqlock. A TOO_SMALL page still carries them (its header is the
+    /// screen's own), so a key encodes while the daemon grows the page.
+    pub fn read_modes(&self) -> Result<InputModes, PageError> {
+        let (Some(seq_word), Some(magic_word), Some(modes_word)) =
+            (self.map.word(OFF_SEQ), self.map.word(0), self.map.word(OFF_MODES_WORD))
+        else {
+            return Err(PageError::Corrupt("page shorter than its header"));
+        };
+        for _ in 0..READ_ATTEMPTS {
+            let before = seq_word.load(Ordering::Acquire);
+            if before == 0 {
+                return Err(PageError::NotPublished);
+            }
+            if before & 1 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let magic = magic_word.load(Ordering::Relaxed);
+            let modes = modes_word.load(Ordering::Relaxed);
+            // The loads above happen before the second sequence read.
+            fence(Ordering::Acquire);
+            if seq_word.load(Ordering::Relaxed) == before {
+                return decode_modes(magic, modes);
+            }
+        }
+        Err(PageError::Busy)
+    }
+}
+
+/// The input modes of a consistent copy of words 0 and 2.
+fn decode_modes(magic_word: u64, modes_word: u64) -> Result<InputModes, PageError> {
+    let [m0, m1, m2, m3, l0, l1, l2, l3] = magic_word.to_le_bytes();
+    if [m0, m1, m2, m3] != MAGIC {
+        return Err(PageError::Corrupt("magic"));
+    }
+    if u32::from_le_bytes([l0, l1, l2, l3]) != LAYOUT {
+        return Err(PageError::Corrupt("layout"));
+    }
+    let [status, _, _, mouse, f0, f1, f2, f3] = modes_word.to_le_bytes();
+    if status != STATUS_SCREEN && status != STATUS_TOO_SMALL {
+        return Err(PageError::Corrupt("status"));
+    }
+    decode_input_modes(u32::from_le_bytes([f0, f1, f2, f3]), mouse)
+}
+
+fn decode_input_modes(flags: u32, mouse_format: u8) -> Result<InputModes, PageError> {
+    let format =
+        MouseWireFormat::from_wire_value(mouse_format).ok_or(PageError::Corrupt("mouse format"))?;
+    InputModes::from_parts(flags, format).ok_or(PageError::Corrupt("input modes"))
+}
+
 fn copy_words(map: &Mapping, from: usize, len: usize, out: &mut Vec<u8>) {
     for offset in (from..from + pad8(len)).step_by(8) {
         let value = map.word(offset).map_or(0, |word| word.load(Ordering::Relaxed));
@@ -471,8 +473,8 @@ pub fn decode(copy: &[u8]) -> Result<Screen, PageError> {
     let status = header.u8().ok_or(SHORT)?;
     let cursor_flags = header.u8().ok_or(SHORT)?;
     let shape = decode_shape(header.u8().ok_or(SHORT)?)?;
-    let mouse_format = decode_mouse(header.u8().ok_or(SHORT)?)?;
-    let modes = Modes(header.u32().ok_or(SHORT)?);
+    let mouse_format = header.u8().ok_or(SHORT)?;
+    let modes = decode_input_modes(header.u32().ok_or(SHORT)?, mouse_format)?;
     let parsed = header.u64().ok_or(SHORT)?;
     let frame = header.u64().ok_or(SHORT)?;
     let cols = header.u16().ok_or(SHORT)?;
@@ -539,7 +541,6 @@ pub fn decode(copy: &[u8]) -> Result<Screen, PageError> {
         cursor,
         cursor_visual: (shape, blinking),
         modes,
-        mouse_format,
         cells: grid,
     })
 }
@@ -675,27 +676,6 @@ fn decode_shape(value: u8) -> Result<CursorShape, PageError> {
         2 => CursorShape::Underline,
         3 => CursorShape::BlockHollow,
         _ => return Err(PageError::Corrupt("cursor shape")),
-    })
-}
-
-fn encode_mouse(format: MouseWireFormat) -> u8 {
-    match format {
-        MouseWireFormat::X10 => 0,
-        MouseWireFormat::Utf8 => 1,
-        MouseWireFormat::Sgr => 2,
-        MouseWireFormat::Urxvt => 3,
-        MouseWireFormat::SgrPixels => 4,
-    }
-}
-
-fn decode_mouse(value: u8) -> Result<MouseWireFormat, PageError> {
-    Ok(match value {
-        0 => MouseWireFormat::X10,
-        1 => MouseWireFormat::Utf8,
-        2 => MouseWireFormat::Sgr,
-        3 => MouseWireFormat::Urxvt,
-        4 => MouseWireFormat::SgrPixels,
-        _ => return Err(PageError::Corrupt("mouse format")),
     })
 }
 

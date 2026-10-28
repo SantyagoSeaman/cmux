@@ -2,6 +2,7 @@ use std::ptr;
 
 use ghostty_vt_sys as sys;
 
+use crate::input_modes::InputModes;
 use crate::terminal::Terminal;
 use crate::{Result, check};
 
@@ -242,6 +243,47 @@ impl KeyEncoder {
         // the live terminal `&Terminal` borrows; the call reads only its modes.
         unsafe {
             sys::ghostty_key_encoder_setopt_from_terminal(self.encoder, terminal.raw());
+        }
+    }
+
+    /// Sync encoder options from published [`InputModes`]: the same options
+    /// [`Self::sync_from_terminal`] reads from a live terminal.
+    pub fn sync_from_modes(&mut self, modes: InputModes) {
+        for (option, bit) in [
+            (sys::GHOSTTY_KEY_ENCODER_OPT_CURSOR_KEY_APPLICATION, InputModes::CURSOR_KEYS),
+            (sys::GHOSTTY_KEY_ENCODER_OPT_KEYPAD_KEY_APPLICATION, InputModes::KEYPAD_APPLICATION),
+            (
+                sys::GHOSTTY_KEY_ENCODER_OPT_IGNORE_KEYPAD_WITH_NUMLOCK,
+                InputModes::IGNORE_KEYPAD_WITH_NUMLOCK,
+            ),
+            (sys::GHOSTTY_KEY_ENCODER_OPT_ALT_ESC_PREFIX, InputModes::ALT_ESC_PREFIX),
+            (
+                sys::GHOSTTY_KEY_ENCODER_OPT_MODIFY_OTHER_KEYS_STATE_2,
+                InputModes::MODIFY_OTHER_KEYS_2,
+            ),
+            (sys::GHOSTTY_KEY_ENCODER_OPT_BACKARROW_KEY_MODE, InputModes::BACKARROW_SENDS_BS),
+        ] {
+            let value = modes.contains(bit);
+            // SAFETY: `self.encoder` is this value's live encoder; each of these
+            // options reads a bool from the live local `value`.
+            unsafe {
+                sys::ghostty_key_encoder_setopt(self.encoder, option, ptr::from_ref(&value).cast());
+            }
+        }
+        self.set_kitty_flags(modes.kitty_flags());
+    }
+
+    /// Set the Kitty keyboard flags (`GHOSTTY_KITTY_KEY_*`); 0 selects the
+    /// legacy encoding.
+    pub(crate) fn set_kitty_flags(&mut self, flags: u8) {
+        // SAFETY: `self.encoder` is this value's live encoder; KITTY_FLAGS reads
+        // a uint8_t from the live local `flags`.
+        unsafe {
+            sys::ghostty_key_encoder_setopt(
+                self.encoder,
+                sys::GHOSTTY_KEY_ENCODER_OPT_KITTY_FLAGS,
+                ptr::from_ref(&flags).cast(),
+            );
         }
     }
 

@@ -19,6 +19,7 @@
     )
 )]
 
+mod input_modes;
 mod key;
 mod kitty;
 mod kitty_replay;
@@ -30,6 +31,7 @@ mod terminal;
 /// Raw bindings, re-exported for key/mode constants.
 pub use ghostty_vt_sys as sys;
 
+pub use input_modes::{InputModes, MouseTracking};
 pub use key::{KeyAction, KeyEncoder, KeyInput, Mods, key_input_from_chord};
 pub use kitty::{
     KITTY_INFLIGHT_REPLAY_MAX_BYTES, KittyGraphicsSnapshot, KittyImage, KittyImageAlias,

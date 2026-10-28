@@ -248,6 +248,7 @@ cmux-tui-hooks = { path = "crates/cmux-tui-hooks" }
 cmux-tui-util = { path = "crates/cmux-tui-util" }
 cmux-kitty-media = { path = "crates/cmux-kitty-media" }
 cmux-vt-stream = { path = "crates/cmux-vt-stream" }
+cmux-vt-worker = { path = "crates/cmux-vt-worker" }
 cmux-api-compat = { path = "crates/cmux-api-compat" }
 cmux-tui-remote-access = { path = "crates/cmux-tui-remote-access" }
 cmux-link = { path = "crates/cmux-link" }

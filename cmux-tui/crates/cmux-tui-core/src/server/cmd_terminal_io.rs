@@ -26,7 +26,6 @@ use crate::SurfaceId;
 use crate::platform;
 use crate::stream_interrupt::StreamInterrupt;
 use crate::workspace_registry::TerminalLifecycle;
-use ghostty_vt::KeyEncoder;
 use ghostty_vt::KeyInput;
 use ghostty_vt::key_input_from_chord;
 use ghostty_vt::rows_to_runs;
@@ -490,19 +489,16 @@ pub(super) fn send_key(
     if keys.is_empty() {
         anyhow::bail!("bad request: keys must be non-empty");
     }
-    let mut encoder = KeyEncoder::new()?;
+    // The published modes: no terminal lock, no parser request (p01-process-209).
+    let mut encoder = surface.key_encoder()?;
     let mut encoded = Vec::new();
     surface.scroll_to_bottom()?;
-    surface.try_with_terminal(|term| {
-        encoder.sync_from_terminal(term);
-        for key in &keys {
-            let Some(input) = key_input_from_chord(key) else {
-                return Err(anyhow::anyhow!("unknown key {key}"));
-            };
-            encoder.encode(&input, &mut encoded).map_err(anyhow::Error::from)?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })??;
+    for key in &keys {
+        let Some(input) = key_input_from_chord(key) else {
+            anyhow::bail!("unknown key {key}");
+        };
+        encoder.encode(&input, &mut encoded)?;
+    }
     mux.wait_for_creating_input_flush(&surface);
     surface.write_bytes(&encoded)?;
     mux.note_terminal_input(surface.id, client);

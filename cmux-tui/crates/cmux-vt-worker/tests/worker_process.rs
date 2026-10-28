@@ -20,11 +20,12 @@ use cmux_kitty_media::KittyMediaRewriter;
 use cmux_process::{Child, Command, Stdio};
 use cmux_vt_stream::ShellMarks;
 use cmux_vt_worker::sandbox::{self, SandboxMechanism};
-use cmux_vt_worker::screen_page::{Modes, PageReader, Screen, create_page, page_len_for};
+use cmux_vt_worker::screen_page::{PageReader, Screen, create_page, page_len_for};
 use cmux_vt_worker::wire::{
     Attach, Colors, Command as WorkerCommand, Event, FrameReader, Geometry, MediaAnswer,
     WIRE_VERSION, decode_event, send_command,
 };
+use ghostty_vt::InputModes;
 use ghostty_vt::{Callbacks, KittyGraphicsLimits, ProgramStatusEvent, RenderState, Rgb, Terminal};
 
 const GEOMETRY: Geometry = Geometry { cols: 40, rows: 8, cell_width: 8, cell_height: 16 };
@@ -226,8 +227,7 @@ fn in_daemon(
         rows: terminal.rows(),
         cursor: render.cursor(),
         cursor_visual: render.cursor_visual().expect("cursor visual"),
-        modes: Modes::of(&terminal),
-        mouse_format: terminal.active_mouse_format(),
+        modes: terminal.input_modes(),
         cells,
     };
     let effects = Effects {
@@ -409,13 +409,17 @@ fn the_corpus_cases_exercise_the_daemons_output_path() {
         in_daemon(&case.bytes, None, KittyGraphicsLimits::default())
     };
     let (marks, _) = find("mode resets at prompt marks");
-    for mode in [Modes::MOUSE_NORMAL, Modes::BRACKETED_PASTE, Modes::CURSOR_KEYS, Modes::ALT_SCREEN]
-    {
+    for mode in [
+        InputModes::MOUSE_NORMAL,
+        InputModes::BRACKETED_PASTE,
+        InputModes::CURSOR_KEYS,
+        InputModes::ALT_SCREEN,
+    ] {
         assert!(!marks.modes.contains(mode), "mode {mode:#x} reset");
     }
-    assert!(marks.modes.contains(Modes::CURSOR_VISIBLE));
+    assert!(marks.modes.contains(InputModes::CURSOR_VISIBLE));
     let (own_mark, _) = find("a program's own prompt mark keeps its modes");
-    assert!(own_mark.modes.contains(Modes::MOUSE_NORMAL));
+    assert!(own_mark.modes.contains(InputModes::MOUSE_NORMAL));
     let (_, titles) = find("osc 1 and the title stack");
     // The pop restores the second push; libghostty-vt alone keeps "inner".
     assert_eq!(titles.title, "vim notes.md");

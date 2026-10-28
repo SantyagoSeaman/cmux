@@ -4,6 +4,7 @@ use std::ptr;
 
 use ghostty_vt_sys as sys;
 
+use crate::input_modes::{InputModes, MouseTracking};
 use crate::key::Mods;
 use crate::terminal::Terminal;
 use crate::{Result, check};
@@ -74,8 +75,18 @@ impl MouseWireFormat {
 pub struct MouseEncoder {
     encoder: sys::GhosttyMouseEncoder,
     event: sys::GhosttyMouseEvent,
-    terminal_state: Option<(u64, u64)>,
+    synced: Option<MouseSync>,
     size: Option<((u32, u32), (u32, u32))>,
+}
+
+/// What a [`MouseEncoder`]'s tracking and format were last set from, so an
+/// unchanged source skips the setopt (and keeps the motion dedupe).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MouseSync {
+    /// A terminal's instance and mouse-mode revision.
+    Terminal(u64, u64),
+    /// Published [`InputModes`].
+    Modes(MouseTracking, MouseWireFormat),
 }
 
 // SAFETY: the opaque Ghostty encoder and event have no thread affinity. MouseEncoder
@@ -140,6 +151,12 @@ impl MouseEncoders {
     pub fn sync_from_terminal(&mut self, terminal: &Terminal) {
         self.primary.sync_from_terminal(terminal);
         self.release.sync_from_terminal(terminal);
+    }
+
+    /// [`MouseEncoder::sync_from_modes`] for both encoders.
+    pub fn sync_from_modes(&mut self, modes: InputModes) {
+        self.primary.sync_from_modes(modes);
+        self.release.sync_from_modes(modes);
     }
 
     pub fn encode(&mut self, input: MouseInput, out: &mut impl Extend<u8>) -> Result<()> {
@@ -252,6 +269,39 @@ impl MouseModeProbe {
         signature
     }
 
+    /// Classify the terminal's effective mouse tracking (Ghostty keeps one
+    /// last-set-wins value the DEC mode flags cannot show) by which of four
+    /// events its own encoder reports: X10 reports only presses, normal no
+    /// motion, button only motion with a button down, any everything.
+    pub(crate) fn classify_tracking(&mut self, terminal: sys::GhosttyTerminal) -> MouseTracking {
+        self.encoder.sync_from_raw_terminal(terminal);
+        let mut reports = |action, button, column: f32| {
+            self.encoder.reset_motion_dedupe();
+            let mut bytes = ByteCount(0);
+            let input = MouseInput {
+                action,
+                button,
+                mods: Mods::default(),
+                position: (column * 8.0 + 0.5, 40.5),
+                screen_size: (800, 600),
+                cell_size: (8, 16),
+                any_button_pressed: button.is_some(),
+            };
+            self.encoder.encode(input, &mut bytes).is_ok() && bytes.0 > 0
+        };
+        if !reports(MouseAction::Press, Some(MouseButton::Left), 2.0) {
+            MouseTracking::None
+        } else if !reports(MouseAction::Release, Some(MouseButton::Left), 2.0) {
+            MouseTracking::X10
+        } else if !reports(MouseAction::Motion, Some(MouseButton::Left), 4.0) {
+            MouseTracking::Normal
+        } else if !reports(MouseAction::Motion, None, 6.0) {
+            MouseTracking::Button
+        } else {
+            MouseTracking::Any
+        }
+    }
+
     /// Classify the terminal's active coordinate wire format by encoding one
     /// synthetic press through Ghostty's own encoder. Tracking is forced to
     /// "normal" on the probe encoder so the format is observable even while
@@ -285,6 +335,15 @@ impl MouseModeProbe {
             )
             .ok()?;
         classify_probe_press(&bytes)
+    }
+}
+
+/// Counts encoded bytes, so a probe needs no buffer.
+struct ByteCount(usize);
+
+impl Extend<u8> for ByteCount {
+    fn extend<T: IntoIterator<Item = u8>>(&mut self, iter: T) {
+        self.0 += iter.into_iter().count();
     }
 }
 
@@ -327,16 +386,44 @@ impl MouseEncoder {
                 &track_last_cell as *const _ as *const c_void,
             );
         }
-        Ok(Self { encoder, event, terminal_state: None, size: None })
+        Ok(Self { encoder, event, synced: None, size: None })
     }
 
     pub fn sync_from_terminal(&mut self, terminal: &Terminal) {
-        let state = (terminal.instance_id(), terminal.mouse_mode_revision());
-        if self.terminal_state == Some(state) {
+        let state = MouseSync::Terminal(terminal.instance_id(), terminal.mouse_mode_revision());
+        if self.synced == Some(state) {
             return;
         }
         self.sync_from_raw_terminal(terminal.raw());
-        self.terminal_state = Some(state);
+        self.synced = Some(state);
+    }
+
+    /// Set tracking and wire format from published [`InputModes`], as
+    /// [`Self::sync_from_terminal`] does from a live terminal (a change also
+    /// forgets the last motion cell, as Ghostty's setopt_from_terminal does).
+    pub fn sync_from_modes(&mut self, modes: InputModes) {
+        let state = MouseSync::Modes(modes.mouse_tracking(), modes.mouse_format());
+        if self.synced == Some(state) {
+            return;
+        }
+        let tracking = modes.mouse_tracking().raw();
+        let format = modes.mouse_format().raw();
+        // SAFETY: `self.encoder` is live; OPT_EVENT reads a GhosttyMouseTrackingMode
+        // from the live `tracking` and OPT_FORMAT a GhosttyMouseFormat from `format`.
+        unsafe {
+            sys::ghostty_mouse_encoder_setopt(
+                self.encoder,
+                sys::GHOSTTY_MOUSE_ENCODER_OPT_EVENT,
+                ptr::from_ref(&tracking).cast(),
+            );
+            sys::ghostty_mouse_encoder_setopt(
+                self.encoder,
+                sys::GHOSTTY_MOUSE_ENCODER_OPT_FORMAT,
+                ptr::from_ref(&format).cast(),
+            );
+        }
+        self.reset_motion_dedupe();
+        self.synced = Some(state);
     }
 
     fn sync_from_raw_terminal(&mut self, terminal: sys::GhosttyTerminal) {

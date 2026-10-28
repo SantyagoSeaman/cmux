@@ -506,7 +506,7 @@ impl Surface {
                 Cow::Borrowed(_) => replay.to_vec(),
                 Cow::Owned(normalized) => normalized,
             };
-            pty.mouse_encoders.lock().recover_poison().sync_from_terminal(&term);
+            pty.sync_input_modes(&term);
             pty.broadcast_attach_output(&output);
             let after = terminal_scroll_position(&term);
             if before != after {

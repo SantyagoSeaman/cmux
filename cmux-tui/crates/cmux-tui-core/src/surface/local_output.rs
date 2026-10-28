@@ -194,7 +194,7 @@ impl LocalOutput {
                 .cursor_activity()
                 .expect("INVARIANT: valid local terminals expose cursor activity")
                 != cursor_activity;
-            pty.mouse_encoders.lock().recover_poison().sync_from_terminal(&term);
+            pty.sync_input_modes(&term);
             let after = terminal_scroll_position(&term);
             let has_attach_taps = pty.broadcast_attach_output_flow(normalized.as_ref(), flow);
             if has_attach_taps && (term.color_revision() != color_revision || cursor_changed) {

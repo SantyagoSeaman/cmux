@@ -92,7 +92,7 @@ impl HostedReader {
         let generation = pty.with_terminal_stream_update(|term| {
             let before = terminal_scroll_position(term);
             *term = replacement;
-            pty.mouse_encoders.lock().recover_poison().sync_from_terminal(term);
+            pty.sync_input_modes(term);
             *geometry = next_geometry;
             pty.journal_geometry(next_geometry);
             title_moved =

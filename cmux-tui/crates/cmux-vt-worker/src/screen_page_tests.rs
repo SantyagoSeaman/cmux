@@ -1,4 +1,5 @@
 use super::*;
+use ghostty_vt::Terminal;
 
 fn cell(text: &str) -> Cell {
     Cell { text: text.to_owned(), ..Cell::default() }
@@ -11,8 +12,11 @@ fn meta(cols: u16) -> PageMeta {
         cols,
         cursor: Some(CursorInfo { x: 1, y: 0, shape: CursorShape::Bar, blinking: true }),
         cursor_visual: (CursorShape::Bar, true),
-        modes: Modes(Modes::CURSOR_KEYS | Modes::BRACKETED_PASTE),
-        mouse_format: MouseWireFormat::Sgr,
+        modes: InputModes::from_parts(
+            InputModes::CURSOR_KEYS | InputModes::BRACKETED_PASTE | InputModes::MOUSE_BUTTON,
+            MouseWireFormat::Sgr,
+        )
+        .expect("modes"),
     }
 }
 
@@ -62,9 +66,10 @@ fn a_published_screen_reads_back_equal() {
     assert_eq!((screen.cols, screen.rows, screen.parsed, screen.frame), (4, 2, 42, 7));
     assert_eq!(screen.cursor, meta(4).cursor);
     assert_eq!(screen.cursor_visual, (CursorShape::Bar, true));
-    assert!(screen.modes.contains(Modes::CURSOR_KEYS));
-    assert!(!screen.modes.contains(Modes::ALT_SCREEN));
-    assert_eq!(screen.mouse_format, MouseWireFormat::Sgr);
+    assert!(screen.modes.contains(InputModes::CURSOR_KEYS));
+    assert!(!screen.modes.contains(InputModes::ALT_SCREEN));
+    assert_eq!(screen.modes, meta(4).modes);
+    assert_eq!(reader.read_modes(), Ok(meta(4).modes));
 }
 
 #[test]
@@ -158,22 +163,93 @@ fn mutated_pages_never_read_out_of_bounds() {
 #[test]
 fn modes_follow_the_terminal() {
     let mut terminal = Terminal::new(10, 3, 0, ghostty_vt::Callbacks::default()).expect("terminal");
-    assert!(!Modes::of(&terminal).contains(Modes::CURSOR_KEYS));
-    terminal.vt_write(b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1049h\x1b[?1002h\x1b=");
-    let modes = Modes::of(&terminal);
+    assert!(!terminal.input_modes().contains(InputModes::CURSOR_KEYS));
+    terminal.vt_write(b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1049h\x1b[?1002h\x1b=\x1b[>3u");
+    let modes = terminal.input_modes();
     for bit in [
-        Modes::CURSOR_KEYS,
-        Modes::BRACKETED_PASTE,
-        Modes::FOCUS_EVENTS,
-        Modes::ALT_SCREEN,
-        Modes::MOUSE_BUTTON,
-        Modes::KEYPAD_APPLICATION,
+        InputModes::CURSOR_KEYS,
+        InputModes::BRACKETED_PASTE,
+        InputModes::FOCUS_EVENTS,
+        InputModes::ALT_SCREEN,
+        InputModes::MOUSE_BUTTON,
+        InputModes::KEYPAD_APPLICATION,
     ] {
         assert!(modes.contains(bit), "{bit:#x} in {modes:?}");
     }
+    assert_eq!(modes.kitty_flags(), 3);
     terminal.vt_write(b"\x1b[?1l\x1b[?1049l\x1b>");
-    let modes = Modes::of(&terminal);
-    assert!(!modes.contains(Modes::CURSOR_KEYS));
-    assert!(!modes.contains(Modes::ALT_SCREEN));
-    assert!(!modes.contains(Modes::KEYPAD_APPLICATION));
+    let modes = terminal.input_modes();
+    assert!(!modes.contains(InputModes::CURSOR_KEYS));
+    assert!(!modes.contains(InputModes::ALT_SCREEN));
+    assert!(!modes.contains(InputModes::KEYPAD_APPLICATION));
+}
+
+/// The encoders' read: three header words, the same modes as the full
+/// decode, still there while the page is too small for the screen.
+#[test]
+fn read_modes_reads_the_header_alone() {
+    let (mut writer, reader) = page(PAGE_HEADER);
+    assert_eq!(reader.read_modes(), Err(PageError::NotPublished));
+    let image = image(&mut PageEncoder::default(), &rows(), 4);
+    assert!(matches!(writer.publish(&image), Published::TooSmall { .. }));
+    assert_eq!(reader.read_modes(), Ok(meta(4).modes));
+}
+
+#[test]
+fn read_modes_refuses_modes_no_terminal_has() {
+    let mut header = image(&mut PageEncoder::default(), &[], 4);
+    let magic = u64::from_le_bytes(header[..8].try_into().expect("word"));
+    let word = |header: &[u8]| u64::from_le_bytes(header[16..24].try_into().expect("word"));
+    assert_eq!(decode_modes(magic, word(&header)), Ok(meta(4).modes));
+    // Two tracking modes at once.
+    header[20] |= (InputModes::MOUSE_X10 | InputModes::MOUSE_ANY) as u8;
+    header[21] |= ((InputModes::MOUSE_X10 | InputModes::MOUSE_ANY) >> 8) as u8;
+    assert_eq!(decode_modes(magic, word(&header)), Err(PageError::Corrupt("input modes")));
+    assert_eq!(decode(&header), Err(PageError::Corrupt("input modes")));
+    header[20] = 0;
+    header[21] = 0;
+    header[19] = 9;
+    assert_eq!(decode_modes(magic, word(&header)), Err(PageError::Corrupt("mouse format")));
+    assert_eq!(decode_modes(magic ^ 1, word(&header)), Err(PageError::Corrupt("magic")));
+}
+
+/// A reader racing a writer that flips the modes on every publish only
+/// ever sees one of the two published values.
+#[test]
+fn read_modes_never_returns_a_torn_word() {
+    let len = page_len_for(4, 2);
+    let (mut writer, reader) = page(len);
+    let mut encoder = PageEncoder::default();
+    let first = image(&mut encoder, &rows(), 4);
+    let mut other = meta(4);
+    other.modes =
+        InputModes::from_parts(InputModes::MOUSE_ANY | (31 << 16), MouseWireFormat::SgrPixels)
+            .expect("modes");
+    encoder.begin();
+    let second = encoder.finish(&other).to_vec();
+    writer.publish(&first);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flipper = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                writer.publish(&second);
+                writer.publish(&first);
+            }
+        }
+    });
+    let mut seen = 0;
+    for _ in 0..20_000 {
+        match reader.read_modes() {
+            Ok(modes) => {
+                assert!(modes == meta(4).modes || modes == other.modes, "{modes:?}");
+                seen += 1;
+            }
+            Err(PageError::Busy) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    flipper.join().expect("writer");
+    assert!(seen > 0);
 }

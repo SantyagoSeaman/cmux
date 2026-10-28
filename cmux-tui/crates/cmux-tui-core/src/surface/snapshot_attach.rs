@@ -382,6 +382,7 @@ impl Surface {
         let pty = self.as_pty().expect("a PTY surface");
         let mut term = pty.term.lock().unwrap();
         let normalized = term.vt_write_with_normalized(bytes).into_owned();
+        pty.sync_input_modes(&term);
         pty.broadcast_attach_output(&normalized);
     }
 
