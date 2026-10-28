@@ -1322,7 +1322,7 @@ async fn dispatch_request(
                     "controlling this daemon's embedded tailnet",
                 ));
             }
-            #[cfg(feature = "tailnet")]
+            #[cfg(all(unix, feature = "tailnet"))]
             {
                 let controller = hub.tailnet_controller();
                 let snapshot = match m {
@@ -1335,7 +1335,7 @@ async fn dispatch_request(
                 .map_err(RpcError::internal)?;
                 return Ok(snapshot.to_json(true));
             }
-            #[cfg(not(feature = "tailnet"))]
+            #[cfg(not(all(unix, feature = "tailnet"))]
             {
                 Err(RpcError::new(-32000, "tailnet support is not built")
                     .with_data(json!({"reason": "not_built"})))

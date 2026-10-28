@@ -541,7 +541,7 @@ pub struct Hub {
     pub pairing: Arc<crate::pairing::Pairing>,
     /// The optional embedded tailnet node. It is initialized lazily so the
     /// default daemon never starts or links a node without an explicit request.
-    #[cfg(feature = "tailnet")]
+    #[cfg(all(unix, feature = "tailnet"))]
     pub(crate) tailnet_controller: std::sync::OnceLock<Arc<crate::tailnet::embedded::Controller>>,
     /// Brief identities shared by dispatch, report and MCP clients.
     pub(crate) briefs: dispatch::Briefs,
@@ -667,7 +667,7 @@ impl Hub {
             peer_accepts: Default::default(),
             agent_pairs: Default::default(),
             pairing: Default::default(),
-            #[cfg(feature = "tailnet")]
+            #[cfg(all(unix, feature = "tailnet"))]
             tailnet_controller: std::sync::OnceLock::new(),
             briefs,
         });
@@ -734,7 +734,7 @@ impl Hub {
         &self.mailbox
     }
 
-    #[cfg(feature = "tailnet")]
+    #[cfg(all(unix, feature = "tailnet"))]
     pub(crate) fn tailnet_controller(&self) -> Arc<crate::tailnet::embedded::Controller> {
         self.tailnet_controller
             .get_or_init(|| {
