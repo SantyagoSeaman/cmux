@@ -1019,6 +1019,21 @@ export function ModelPicker(props: ModelPickerProps) {
   const chipShort = rowChip?.short && rowChip.short !== chipName ? rowChip.short : undefined;
   const chipFamily = rowChip?.family && rowChip.family !== (chipShort ?? chipName) ? rowChip.family : undefined;
   const chipTitle = rowChip?.title ?? chipLabel;
+  // Health is checked before a turn starts. Keep the selected harness's signed-out/expired state
+  // visible on the closed control and offer its login command without making the user send first.
+  const selectedLogin = current ? loginFor(current) : undefined;
+  const authLabel = selectedLogin !== undefined ? t("harnesses.signedOut") : undefined;
+  const authAction = current && selectedLogin !== undefined && onLogIn ? (
+    <button
+      type="button"
+      className="acpmux-picker-auth-action h-[var(--ui-row-height,28px)] flex-none cursor-pointer rounded-[var(--ui-row-radius,5px)] border-0 bg-transparent px-1.5 font-[inherit] text-detail text-danger hover:bg-hover"
+      data-auth-action="login"
+      title={authLabel}
+      onClick={() => onLogIn(current.acpmuxHarness ?? current.id, selectedLogin)}
+    >
+      {t("harness.logIn")}
+    </button>
+  ) : null;
   const enableProfile = (entry: HarnessChoice) => {
     if (entry.folder?.state !== "needs-enable" || entry.ids.includes(harness ?? "")) return false;
     onHarnessEnable?.(entry.folder.folder, entry.id);
@@ -1140,6 +1155,7 @@ export function ModelPicker(props: ModelPickerProps) {
             onMore={more}
           >
             {chipFace}
+            {authLabel && <span className="acpmux-model-auth text-detail text-danger">{authLabel}</span>}
             {/* A quiet label, as Claude Code's: the model, then its effort, and no chevron. */}
             {detail && (
               <span
@@ -1159,6 +1175,7 @@ export function ModelPicker(props: ModelPickerProps) {
               />
             )}
           </QuickModelMenu>
+          {authAction}
           {speed && <FastToggle speed={speed} inline />}
         </>
       ) : (
@@ -1189,8 +1206,10 @@ export function ModelPicker(props: ModelPickerProps) {
             {...press}
           >
             {chipFace}
+            {authLabel && <span className="acpmux-model-auth text-detail text-danger">{authLabel}</span>}
             <ChevronIcon />
           </PickerButton>
+          {authAction}
           {speed && <FastToggle speed={speed} inline />}
         </>
       )}

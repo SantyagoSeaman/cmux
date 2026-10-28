@@ -239,22 +239,27 @@ test("a search never lists a signed-out harness's models", async () => {
   expect(sent).toEqual([]);
 });
 
-// Review of #20692: a chat already running on a harness keeps its models (a stale or wrong row
-// must never lock the person out of the chat they are in), and Starred lists no model a pick
-// would refuse.
-test("the running chat's own harness keeps its models", async () => {
+// Auth health is checked before a turn, including for the running harness. The closed model
+// control exposes the same login action as the open picker, so the first prompt never discovers a
+// stale or expired account.
+test("the running chat's signed-out harness offers login before sending", async () => {
+  const logins: string[] = [];
   await mount({
     harness: "codex",
     turnCount: 1,
-    signIn: { signedOut: { codex: "codex login" }, logIn: () => undefined },
+    signIn: { signedOut: { codex: "codex login" }, logIn: (harness, login) => logins.push(`${harness}: ${login}`) },
   });
+  const closedLogin = host.querySelector<HTMLButtonElement>('[data-auth-action="login"]');
+  expect(closedLogin?.textContent).toBe("Log In");
+  await act(async () => closedLogin!.click());
+  expect(logins).toEqual(["codex: codex login"]);
   await act(async () => {
     openFullPicker();
   });
-  // A started chat's harness is fixed: its menu has no rail, only that harness's models.
+  // A started chat's harness is fixed: its menu has no rail and lists the pre-turn login action.
   expect(host.querySelector(".acpmux-mp-harness")).toBeNull();
-  expect(modelRows().length).toBeGreaterThan(0);
-  expect(host.querySelector(".acpmux-mp-login")).toBeNull();
+  expect(modelRows()).toHaveLength(0);
+  expect(host.querySelector(".acpmux-mp-login")?.textContent).toBe("Log In");
 });
 
 test("Starred lists no model of a signed-out harness", async () => {
