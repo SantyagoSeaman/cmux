@@ -725,9 +725,26 @@ nonisolated extension Feature {
         runtimeMutable: false
     )
 
+    /// The app tells the local daemon which tabs it shows, at most once per frame, and the daemon sends the title, agent, status, output and scroll changes of hidden tabs once per second instead of each one.
+    public static let frontendVisibilityScope = Feature(
+        index: 42,
+        name: "frontendVisibilityScope",
+        owner: "Performance Lead",
+        description: "The app tells the local daemon which tabs it shows, at most once per frame, and the daemon sends the title, agent, status, output and scroll changes of hidden tabs once per second instead of each one.",
+        kind: .perfPath,
+        process: .app,
+        chromiumFeature: nil,
+        defaults: FeatureDefaults(dev: false, nightly: false, release: false),
+        expires: "2026-12-20",
+        params: [],
+        stories: ["script-storm", "home-idle"],
+        sticky: false,
+        runtimeMutable: false
+    )
+
     /// A frozen hidden page whose memory grows by max(50 MB, 25 percent) after it froze is discarded with its opener group, read at 5, 30 and 120 minutes after the freeze.
     public static let frozenGrowthDiscard = Feature(
-        index: 42,
+        index: 43,
         name: "frozenGrowthDiscard",
         owner: "PL-memory",
         description: "A frozen hidden page whose memory grows by max(50 MB, 25 percent) after it froze is discarded with its opener group, read at 5, 30 and 120 minutes after the freeze.",
@@ -744,7 +761,7 @@ nonisolated extension Feature {
 
     /// Opt-in hang reports are written in schema 3, with the catalog histograms, stability counts, earlier launches and the merged black box; turn it on only once cmux.com accepts schema 3 (p09-observability-064 deployed).
     public static let hangReportsSchema3 = Feature(
-        index: 43,
+        index: 44,
         name: "hangReportsSchema3",
         owner: "PL-telemetry",
         description: "Opt-in hang reports are written in schema 3, with the catalog histograms, stability counts, earlier launches and the merged black box; turn it on only once cmux.com accepts schema 3 (p09-observability-064 deployed).",
@@ -761,7 +778,7 @@ nonisolated extension Feature {
 
     /// The GitHub feed poll books no run while no feed surface shows, the web-updates check none while no window shows; each runs once on show if due. Daemon heartbeats ask nothing while no window shows (a bridged daemon after 60 s of silence) and ask once on window show or app activation.
     public static let hiddenPollPause = Feature(
-        index: 44,
+        index: 45,
         name: "hiddenPollPause",
         owner: "Performance Lead",
         description: "The GitHub feed poll books no run while no feed surface shows, the web-updates check none while no window shows; each runs once on show if due. Daemon heartbeats ask nothing while no window shows (a bridged daemon after 60 s of silence) and ask once on window show or app activation.",
@@ -778,7 +795,7 @@ nonisolated extension Feature {
 
     /// A terminal that no view shows (its tab is parked or its workspace is hidden) runs its PTY reader and parser threads at utility, in the daemon and in its terminal host; showing it again returns them to user-interactive at their next wake.
     public static let hiddenTerminalQos = Feature(
-        index: 45,
+        index: 46,
         name: "hiddenTerminalQos",
         owner: "Performance Lead",
         description: "A terminal that no view shows (its tab is parked or its workspace is hidden) runs its PTY reader and parser threads at utility, in the daemon and in its terminal host; showing it again returns them to user-interactive at their next wake.",
@@ -795,7 +812,7 @@ nonisolated extension Feature {
 
     /// A workspace hidden longer than a grace leaves its window in the background, the oldest first, one per turn, and joins it again when shown. Off, hidden workspaces stay in their window, so a switch back moves no view into it. The arm measured against hiding only.
     public static let hiddenWorkspaceDetachAfterGrace = Feature(
-        index: 46,
+        index: 47,
         name: "hiddenWorkspaceDetachAfterGrace",
         owner: "PL-switch",
         description: "A workspace hidden longer than a grace leaves its window in the background, the oldest first, one per turn, and joins it again when shown. Off, hidden workspaces stay in their window, so a switch back moves no view into it. The arm measured against hiding only.",
@@ -818,7 +835,7 @@ nonisolated extension Feature {
 
     /// A hidden browser tab whose renderer used more than 5 percent of one core over at least the last minute says Using high energy in its hover card, with Discard. Read at natural wakes only; tabs that show are never flagged.
     public static let highEnergyTabs = Feature(
-        index: 47,
+        index: 48,
         name: "highEnergyTabs",
         owner: "Performance Lead",
         description: "A hidden browser tab whose renderer used more than 5 percent of one core over at least the last minute says Using high energy in its hover card, with Discard. Read at natural wakes only; tabs that show are never flagged.",
@@ -835,7 +852,7 @@ nonisolated extension Feature {
 
     /// A still gauge after the toolbar band shows when this Mac is busy or overloaded, with a popover of the load and its reasons; it reads the host every 15 seconds only while a window can be seen.
     public static let hostPressure = Feature(
-        index: 48,
+        index: 49,
         name: "hostPressure",
         owner: "PL-memory",
         description: "A still gauge after the toolbar band shows when this Mac is busy or overloaded, with a popover of the load and its reasons; it reads the host every 15 seconds only while a window can be seen.",
@@ -853,7 +870,7 @@ nonisolated extension Feature {
 
     /// Pooled acpmux agents run at background process priority until a session takes them, and the acpmux daemon does while no client is connected and no agent runs; each goes back to normal priority before it is used.
     public static let idleHelperBackgroundPriority = Feature(
-        index: 49,
+        index: 50,
         name: "idleHelperBackgroundPriority",
         owner: "PL-acpmux",
         description: "Pooled acpmux agents run at background process priority until a session takes them, and the acpmux daemon does while no client is connected and no agent runs; each goes back to normal priority before it is used.",
@@ -870,7 +887,7 @@ nonisolated extension Feature {
 
     /// Resting the pointer on a sidebar row or tab whose browser page is frozen or hibernated wakes that page in the background after a short dwell, at most two at once, never in Low Power Mode on battery or under memory pressure.
     public static let intentPrewarmHover = Feature(
-        index: 50,
+        index: 51,
         name: "intentPrewarmHover",
         owner: "PL-switch",
         description: "Resting the pointer on a sidebar row or tab whose browser page is frozen or hibernated wakes that page in the background after a short dwell, at most two at once, never in Low Power Mode on battery or under memory pressure.",
@@ -893,7 +910,7 @@ nonisolated extension Feature {
 
     /// A press on a sidebar row that switches only when the button comes up (multi-view rows, a row of a multi-selection) wakes that row's frozen or hibernated browser page in the background at once, at most two at once, never in Low Power Mode on battery or under memory pressure.
     public static let intentPrewarmPress = Feature(
-        index: 51,
+        index: 52,
         name: "intentPrewarmPress",
         owner: "PL-switch",
         description: "A press on a sidebar row that switches only when the button comes up (multi-view rows, a row of a multi-selection) wakes that row's frozen or hibernated browser page in the background at once, at most two at once, never in Low Power Mode on battery or under memory pressure.",
@@ -910,7 +927,7 @@ nonisolated extension Feature {
 
     /// Release builds keep the per-method daemon send-to-reply histograms and wire counters that Debug and bench builds always keep, as opt-in field data; off, a release build keeps none and its daemon connections count nothing.
     public static let ipcMethodLatencyFieldData = Feature(
-        index: 52,
+        index: 53,
         name: "ipcMethodLatencyFieldData",
         owner: "Performance Lead",
         description: "Release builds keep the per-method daemon send-to-reply histograms and wire counters that Debug and bench builds always keep, as opt-in field data; off, a release build keeps none and its daemon connections count nothing.",
@@ -927,7 +944,7 @@ nonisolated extension Feature {
 
     /// Until startup completes only the panes on screen make their terminal surface or page, the focused pane first and the other visible panes one per frame after it; panes off screen make theirs after startup or when they scroll in.
     public static let launchVisiblePanesOnly = Feature(
-        index: 53,
+        index: 54,
         name: "launchVisiblePanesOnly",
         owner: "Performance Lead",
         description: "Until startup completes only the panes on screen make their terminal surface or page, the focused pane first and the other visible panes one per frame after it; panes off screen make theirs after startup or when they scroll in.",
@@ -944,7 +961,7 @@ nonisolated extension Feature {
 
     /// At launch the restored windows behind the front one build by what shows: one no window in front covers builds after the first frame, one per frame; a covered or off-screen one builds after startup, or at once when something acts in it. A window saved in full screen builds at launch, as before.
     public static let launchWindowsByOcclusion = Feature(
-        index: 54,
+        index: 55,
         name: "launchWindowsByOcclusion",
         owner: "Performance Lead",
         description: "At launch the restored windows behind the front one build by what shows: one no window in front covers builds after the first frame, one per frame; a covered or off-screen one builds after startup, or at once when something acts in it. A window saved in full screen builds at launch, as before.",
@@ -961,7 +978,7 @@ nonisolated extension Feature {
 
     /// The acpmux daemon and a headless cmux-tui owner exit after 10 minutes with no client, no live agent, no live terminal (own or holder-owned) and no owning app; an app that reconnects within the 10 minutes keeps them.
     public static let leftoverDaemonIdleExit = Feature(
-        index: 55,
+        index: 56,
         name: "leftoverDaemonIdleExit",
         owner: "PL-memory",
         description: "The acpmux daemon and a headless cmux-tui owner exit after 10 minutes with no client, no live agent, no live terminal (own or holder-owned) and no owning app; an app that reconnects within the 10 minutes keeps them.",
@@ -978,7 +995,7 @@ nonisolated extension Feature {
 
     /// The main thread's budgeted batch runs in its own run-loop turn right after the frame's commit, on shares scaled to the display's refresh rate, instead of inside the display tick.
     public static let mainBudgetTurn = Feature(
-        index: 56,
+        index: 57,
         name: "mainBudgetTurn",
         owner: "Performance Lead",
         description: "The main thread's budgeted batch runs in its own run-loop turn right after the frame's commit, on shares scaled to the display's refresh rate, instead of inside the display tick.",
@@ -2772,6 +2789,7 @@ nonisolated extension Feature {
         .fatalHangReports,
         .featureFlagsCard,
         .frameRateClasses,
+        .frontendVisibilityScope,
         .frozenGrowthDiscard,
         .hangReportsSchema3,
         .hiddenPollPause,
@@ -2933,6 +2951,7 @@ nonisolated extension Feature {
         .fatalHangReports,
         .featureFlagsCard,
         .frameRateClasses,
+        .frontendVisibilityScope,
         .frozenGrowthDiscard,
         .hangReportsSchema3,
         .hiddenPollPause,
