@@ -52,6 +52,7 @@ final class ExtensionsMenuItemView: NSView {
                                                imageSize: style.buttonIcon, imageBox: style.buttonIcon, insets: insets, style: style)
         super.init(frame: NSRect(x: 0, y: 0, width: style.width - style.padding * 2, height: style.rowHeight))
         for view in [primary, sidePanelButton, pinButton, moreButton] { addSubview(view) }
+        if Self.flattens { wantsLayer = true; canDrawSubviewsIntoLayer = true }
         primary.drawsHighlight = false
         primary.onHighlightChange = { [weak self] in self?.needsDisplay = true }
         primary.onPress = { [weak self] in self?.onRun?() }
@@ -68,6 +69,9 @@ final class ExtensionsMenuItemView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     override var isFlipped: Bool { true }
+
+    /// DIAG: draw the row's buttons into the row's one layer.
+    static var flattens = false
 
     /// Takes a new state of the same extension (a rename, a pin elsewhere, a new icon, another
     /// site) without rebuilding the row.
